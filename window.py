@@ -882,7 +882,6 @@ class PrinterWindow(QMainWindow):
         self._add_internal_window(
             "exchange", "Обмен с SetRetailX", self.exchange_log, (800, 450)
         )
-        self.subwindows["exchange"].hide()
         self._add_internal_window("scanner", "Сканирование", self.scanner, (430, 230))
         self._add_internal_window(
             "search", "Поиск товаров", self.product_search, (900, 560)
@@ -906,6 +905,7 @@ class PrinterWindow(QMainWindow):
         subwindow.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         subwindow.resize(*size)
         self.mdi.addSubWindow(subwindow)
+        subwindow.hide()
         self.subwindows[key] = subwindow
         return subwindow
 
