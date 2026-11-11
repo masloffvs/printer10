@@ -8,4 +8,6 @@ build/
 dist/
 *.spec
 products.db
-auth.py
+.env
+.env.*
+!.env.example

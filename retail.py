@@ -4,7 +4,7 @@ import time
 
 import requests
 
-from auth import URL_RPC, HOST_DOMAIN
+from auth import BASE_URL, URL_RPC
 from config import DB_PATH, PRINT_FORMATS
 
 active_session = None
@@ -76,9 +76,7 @@ def online_rpc(payload, timeout=15):
 
 def search_online(barcode):
     """Ищет товар на сервере. Используется только при отсутствии в SQLite."""
-    active_session.headers["Referer"] = (
-        f"http://{HOST_DOMAIN}:8090/price-tags/custom-printing"
-    )
+    active_session.headers["Referer"] = f"{BASE_URL}/price-tags/custom-printing"
 
     search_payload = {
         "@class": "ru.crystals.commons.jsonrpc.domain.JsonRpcRequest",
@@ -157,7 +155,7 @@ def print_group(format_key, amount_to_print, entries):
         return False
 
     active_session.headers["Referer"] = (
-        f"http://{HOST_DOMAIN}:8090/price-tags/custom-printing/printing"
+        f"{BASE_URL}/price-tags/custom-printing/printing"
     )
 
     print_payload = {
@@ -217,9 +215,7 @@ def print_group(format_key, amount_to_print, entries):
         task_uuid = uuids[0]
         print(f"[Принтер] Задание зарегистрировано: {task_uuid}")
 
-        active_session.headers["Referer"] = (
-            f"http://{HOST_DOMAIN}:8090/price-tags/custom-printing"
-        )
+        active_session.headers["Referer"] = f"{BASE_URL}/price-tags/custom-printing"
 
         confirm_payload = {
             "@class": "ru.crystals.commons.jsonrpc.domain.JsonRpcRequest",
