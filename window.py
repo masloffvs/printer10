@@ -658,7 +658,6 @@ class PrinterWindow(QMainWindow):
         subwindow.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         subwindow.resize(*size)
         self.mdi.addSubWindow(subwindow)
-        subwindow.show()
         self.subwindows[key] = subwindow
         return subwindow
 
