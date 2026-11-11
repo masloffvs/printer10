@@ -491,7 +491,9 @@ def product_print_code(entry):
 
 
 def print_group(format_key, amount_to_print, entries):
-    """Отправляет одну группу товаров на печать."""
+    """Отправляет одну группу товаров с единым тиражом и форматом."""
+    if not isinstance(amount_to_print, int) or not 1 <= amount_to_print <= 999:
+        raise ValueError("Количество ценников на товар должно быть от 1 до 999.")
     format_info = PRINT_FORMATS[format_key]
     basket = [
         product_print_code(entry)

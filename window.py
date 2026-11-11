@@ -93,7 +93,7 @@ class ScannerWindow(QWidget):
         form.addRow("Формат:", self.format_combo)
 
         self.amount_spin = QSpinBox()
-        self.amount_spin.setRange(1, 2)
+        self.amount_spin.setRange(1, 999)
         form.addRow("Тираж:", self.amount_spin)
         layout.addLayout(form)
 
@@ -598,7 +598,7 @@ class QueueWindow(QWidget):
         controls.addWidget(QLabel("Формат:"))
         controls.addWidget(self.format_combo)
         self.amount_spin = QSpinBox()
-        self.amount_spin.setRange(1, 2)
+        self.amount_spin.setRange(1, 999)
         controls.addWidget(QLabel("Тираж:"))
         controls.addWidget(self.amount_spin)
         self.assign_button = QPushButton("Назначить выбранным")
@@ -712,7 +712,7 @@ class QueueWindow(QWidget):
             "Ценников на каждый товар:",
             1,
             1,
-            2,
+            999,
         )
         if not accepted:
             return
@@ -792,7 +792,11 @@ class QueueWindow(QWidget):
 
     def print_entries(self, entries, description):
         candidates = [
-            entry for entry in entries if entry["format"] and entry["amount"] in (1, 2)
+            entry
+            for entry in entries
+            if entry["format"]
+            and isinstance(entry.get("amount"), int)
+            and 1 <= entry["amount"] <= 999
         ]
         groups = defaultdict(list)
         for index, entry in enumerate(candidates):
@@ -808,9 +812,13 @@ class QueueWindow(QWidget):
                 "Есть неназначенные товары",
                 "Назначенные товары будут напечатаны. Неназначенные останутся в очереди.",
             )
+        format_order = {key: index for index, key in enumerate(PRINT_FORMATS)}
         ordered_groups = sorted(
             groups.items(),
-            key=lambda item: (("А", "Б", "Ц").index(item[0][0]), item[0][1]),
+            key=lambda item: (
+                format_order.get(item[0][0], len(format_order)),
+                item[0][1],
+            ),
         )
         try:
             batch_id = self.printer.print_history.add_batch(
@@ -835,6 +843,10 @@ class QueueWindow(QWidget):
             for (format_key, amount), group_items in ordered_groups:
                 group_entries = [entry for _index, entry in group_items]
                 try:
+                    print(
+                        f"[Пакет печати] формат={format_key}, "
+                        f"amountToPrint={amount}, товаров={len(group_entries)}"
+                    )
                     printed = retail.print_group(format_key, amount, group_entries)
                 except Exception as error:
                     failures.append(str(error))
