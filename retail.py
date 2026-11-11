@@ -149,26 +149,13 @@ def search_products(query, limit=100):
                 "В таблице products отсутствуют поля для поиска товаров."
             )
 
-        fields = (
-            "product_id",
-            "name",
-            "vendor_code",
-            "barcode",
-            "price",
-            "cost",
-            "total_qty",
-            "main_image",
-            "description",
-        )
-        selected = [column for column in fields if column in columns]
         conditions = " OR ".join(
             f"CASEFOLD(CAST(\"{column}\" AS TEXT)) LIKE CASEFOLD(?) ESCAPE '\\'"
             for column in searchable
         )
         order_column = '"name"' if "name" in columns else '"product_id"'
-        selected_columns = ", ".join('"' + column + '"' for column in selected)
         rows = conn.execute(
-            f"SELECT {selected_columns} FROM products WHERE {conditions} "
+            f"SELECT * FROM products WHERE {conditions} "
             f"ORDER BY {order_column} LIMIT ?",
             [pattern] * len(searchable) + [max(1, min(int(limit), 500))],
         ).fetchall()
@@ -188,6 +175,7 @@ def search_products(query, limit=100):
                     "total_qty": product.get("total_qty"),
                     "main_image": product.get("main_image"),
                     "description": product.get("description"),
+                    "details": product,
                 }
             )
         return products

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMdiArea,
     QMdiSubWindow,
@@ -190,7 +191,7 @@ class ProductSearchWindow(QWidget):
         for column in range(1, 5):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.table.itemSelectionChanged.connect(self.show_product_details)
-        self.table.itemDoubleClicked.connect(lambda _item: self.add_selected())
+        self.table.cellClicked.connect(self.open_product_card)
         layout.addWidget(self.table, 1)
 
         self.details = QLabel("Введите запрос для поиска в локальной базе.")
@@ -275,6 +276,11 @@ class ProductSearchWindow(QWidget):
             f"Остаток: {quantity if quantity is not None else '—'}\n{description}"
         )
 
+    def open_product_card(self, row, _column):
+        if not 0 <= row < len(self.products):
+            return
+        self.printer.show_product_card(self.products[row])
+
     def add_selected(self):
         rows = sorted({item.row() for item in self.table.selectedItems()})
         if not rows:
@@ -296,6 +302,67 @@ class ProductSearchWindow(QWidget):
         self.printer.refresh_queue()
         self.printer.statusBar().showMessage(
             f"Добавлено товаров в очередь: {len(rows)}", 5000
+        )
+
+
+class ProductCardWindow(QWidget):
+    """Detailed view of one local catalog product."""
+
+    def __init__(self, printer, product):
+        super().__init__()
+        self.printer = printer
+        self.product = product
+        self.setMinimumSize(440, 320)
+
+        layout = QVBoxLayout(self)
+        details = product.get("details", product)
+        self.title_label = QLabel(product.get("name") or "Без названия")
+        self.title_label.setWordWrap(True)
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        layout.addWidget(self.title_label)
+
+        self.fields = QListWidget()
+        preferred = (
+            ("vendor_code", "Артикул"),
+            ("barcode", "Штрихкод"),
+            ("price", "Цена"),
+            ("cost", "Себестоимость"),
+            ("total_qty", "Остаток"),
+            ("product_id", "ID товара"),
+            ("description", "Описание"),
+        )
+        shown = set()
+        for key, label in preferred:
+            value = details.get(key)
+            if value not in (None, ""):
+                self.fields.addItem(f"{label}: {value}")
+                shown.add(key)
+        for key, value in details.items():
+            if key not in shown and value not in (None, ""):
+                self.fields.addItem(f"{key}: {value}")
+        layout.addWidget(self.fields, 1)
+
+        self.add_button = QPushButton("Добавить в очередь печати")
+        self.add_button.clicked.connect(self.add_to_queue)
+        layout.addWidget(self.add_button)
+
+    def add_to_queue(self):
+        product = self.product
+        self.printer.entries.append(
+            {
+                "st_code": product["st_code"],
+                "name": product["name"],
+                "vendor_code": product["vendor_code"],
+                "barcode": product["barcode"],
+                "source": product["source"],
+                "format": None,
+                "amount": None,
+                "quantity": 1,
+            }
+        )
+        self.printer.refresh_queue()
+        self.printer.statusBar().showMessage(
+            f"Добавлен товар в очередь: {product['name']}", 5000
         )
 
 
@@ -647,6 +714,21 @@ class PrinterWindow(QMainWindow):
 
     def show_subwindow(self, key):
         subwindow = self.subwindows[key]
+        subwindow.show()
+        subwindow.raise_()
+        self.mdi.setActiveSubWindow(subwindow)
+
+    def show_product_card(self, product):
+        key = f"product:{product['st_code']}"
+        subwindow = self.subwindows.get(key)
+        if subwindow is None:
+            card = ProductCardWindow(self, product)
+            subwindow = self._add_internal_window(
+                key,
+                f"Карточка товара — {product['name']}",
+                card,
+                (540, 440),
+            )
         subwindow.show()
         subwindow.raise_()
         self.mdi.setActiveSubWindow(subwindow)
