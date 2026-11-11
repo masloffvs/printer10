@@ -124,6 +124,77 @@ def search_offline(barcode):
         conn.close()
 
 
+def search_products(query, limit=100):
+    """Search the local catalog by product name, vendor code, or barcode."""
+    query = str(query).strip()
+    if not query:
+        return []
+
+    # Treat SQL LIKE wildcards in user input literally.
+    pattern = (
+        "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    )
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    conn.create_function("CASEFOLD", 1, lambda value: str(value or "").casefold())
+    try:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()
+        }
+        searchable = [
+            column for column in ("name", "vendor_code", "barcode") if column in columns
+        ]
+        if not searchable or "product_id" not in columns:
+            raise sqlite3.OperationalError(
+                "В таблице products отсутствуют поля для поиска товаров."
+            )
+
+        fields = (
+            "product_id",
+            "name",
+            "vendor_code",
+            "barcode",
+            "price",
+            "cost",
+            "total_qty",
+            "main_image",
+            "description",
+        )
+        selected = [column for column in fields if column in columns]
+        conditions = " OR ".join(
+            f"CASEFOLD(CAST(\"{column}\" AS TEXT)) LIKE CASEFOLD(?) ESCAPE '\\'"
+            for column in searchable
+        )
+        order_column = '"name"' if "name" in columns else '"product_id"'
+        selected_columns = ", ".join('"' + column + '"' for column in selected)
+        rows = conn.execute(
+            f"SELECT {selected_columns} FROM products WHERE {conditions} "
+            f"ORDER BY {order_column} LIMIT ?",
+            [pattern] * len(searchable) + [max(1, min(int(limit), 500))],
+        ).fetchall()
+
+        products = []
+        for row in rows:
+            product = dict(row)
+            products.append(
+                {
+                    "st_code": str(product.get("product_id") or ""),
+                    "name": product.get("name") or "Без названия",
+                    "vendor_code": product.get("vendor_code") or "",
+                    "barcode": str(product.get("barcode") or ""),
+                    "source": "offline",
+                    "price": product.get("price"),
+                    "cost": product.get("cost"),
+                    "total_qty": product.get("total_qty"),
+                    "main_image": product.get("main_image"),
+                    "description": product.get("description"),
+                }
+            )
+        return products
+    finally:
+        conn.close()
+
+
 def online_rpc(payload, timeout=15):
     """Отправляет JSON-RPC запрос в SetRetailX."""
     if active_session is None:

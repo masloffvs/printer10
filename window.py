@@ -158,6 +158,147 @@ class ScannerWindow(QWidget):
         self.status_label.setText(f"Назначено неназначенных товаров: {len(entries)}")
 
 
+class ProductSearchWindow(QWidget):
+    """Search the local product catalog and add selected results to the queue."""
+
+    def __init__(self, printer):
+        super().__init__()
+        self.printer = printer
+
+        layout = QVBoxLayout(self)
+        search_row = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Название, артикул или штрихкод")
+        self.search_input.returnPressed.connect(self.search)
+        search_row.addWidget(self.search_input, 1)
+        self.search_button = QPushButton("Найти")
+        self.search_button.clicked.connect(self.search)
+        search_row.addWidget(self.search_button)
+        layout.addLayout(search_row)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["Товар", "Артикул", "Штрихкод", "Цена", "Остаток"]
+        )
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.itemSelectionChanged.connect(self.show_product_details)
+        self.table.itemDoubleClicked.connect(lambda _item: self.add_selected())
+        layout.addWidget(self.table, 1)
+
+        self.details = QLabel("Введите запрос для поиска в локальной базе.")
+        self.details.setWordWrap(True)
+        layout.addWidget(self.details)
+
+        footer = QHBoxLayout()
+        self.result_label = QLabel("")
+        footer.addWidget(self.result_label, 1)
+        self.add_button = QPushButton("Добавить выбранные в очередь")
+        self.add_button.clicked.connect(self.add_selected)
+        self.add_button.setEnabled(False)
+        footer.addWidget(self.add_button)
+        layout.addLayout(footer)
+
+    def set_busy(self, busy):
+        self.search_input.setEnabled(not busy)
+        self.search_button.setEnabled(not busy)
+        if busy:
+            self.add_button.setEnabled(False)
+        else:
+            self.add_button.setEnabled(bool(self.table.selectedItems()))
+
+    def search(self):
+        query = self.search_input.text().strip()
+        if not query:
+            self.result_label.setText("Введите название, артикул или штрихкод.")
+            return
+        self.printer.set_busy(True, "Ищем товары в локальной базе…")
+        self.details.setText("Ищем в локальной базе…")
+        self.printer.start_task(
+            lambda: retail.search_products(query),
+            self.search_finished,
+        )
+
+    def search_finished(self, products):
+        self.products = products
+        self.table.setRowCount(len(products))
+        for row, product in enumerate(products):
+            price = product.get("price")
+            quantity = product.get("total_qty")
+            values = [
+                product["name"],
+                product["vendor_code"],
+                product["barcode"],
+                "—" if price is None else price,
+                "—" if quantity is None else quantity,
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column in (3, 4):
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row)
+                self.table.setItem(row, column, item)
+        self.printer.set_busy(False)
+        self.result_label.setText(f"Найдено товаров: {len(products)}")
+        self.details.setText("Выберите товар, чтобы посмотреть описание.")
+        self.add_button.setEnabled(False)
+
+    def show_product_details(self):
+        rows = sorted({item.row() for item in self.table.selectedItems()})
+        self.add_button.setEnabled(bool(rows))
+        if len(rows) != 1:
+            self.details.setText(
+                f"Выбрано товаров: {len(rows)}"
+                if rows
+                else "Выберите товар, чтобы посмотреть описание."
+            )
+            return
+        product = self.products[rows[0]]
+        description = product.get("description") or "Описание отсутствует."
+        price = product.get("price")
+        quantity = product.get("total_qty")
+        self.details.setText(
+            f"{product['name']}\n"
+            f"Артикул: {product['vendor_code'] or '—'} · "
+            f"Штрихкод: {product['barcode'] or '—'}\n"
+            f"Цена: {price if price is not None else '—'} · "
+            f"Остаток: {quantity if quantity is not None else '—'}\n{description}"
+        )
+
+    def add_selected(self):
+        rows = sorted({item.row() for item in self.table.selectedItems()})
+        if not rows:
+            return
+        for row in rows:
+            product = self.products[row]
+            self.printer.entries.append(
+                {
+                    "st_code": product["st_code"],
+                    "name": product["name"],
+                    "vendor_code": product["vendor_code"],
+                    "barcode": product["barcode"],
+                    "source": product["source"],
+                    "format": None,
+                    "amount": None,
+                    "quantity": 1,
+                }
+            )
+        self.printer.refresh_queue()
+        self.printer.statusBar().showMessage(
+            f"Добавлено товаров в очередь: {len(rows)}", 5000
+        )
+
+
 class QueueWindow(QWidget):
     """Shared product queue with assignment and print actions."""
 
@@ -421,12 +562,16 @@ class PrinterWindow(QMainWindow):
         self.statusBar().showMessage("Подключаемся к SetRetailX…")
 
         self.scanner = ScannerWindow(self)
+        self.product_search = ProductSearchWindow(self)
         self.queue = QueueWindow(self)
         self._add_internal_window(
             "exchange", "Обмен с SetRetailX", self.exchange_log, (800, 450)
         )
         self.subwindows["exchange"].hide()
         self._add_internal_window("scanner", "Сканирование", self.scanner, (430, 230))
+        self._add_internal_window(
+            "search", "Поиск товаров", self.product_search, (900, 560)
+        )
         self._add_internal_window("queue", "Очередь печати", self.queue, (820, 480))
 
         self._create_menus()
@@ -456,6 +601,7 @@ class PrinterWindow(QMainWindow):
 
         view_menu = self.menuBar().addMenu("Вид")
         self._add_window_action(view_menu, "Сканирование", "scanner")
+        self._add_window_action(view_menu, "Поиск товаров", "search")
         self._add_window_action(view_menu, "Очередь печати", "queue")
         self._add_window_action(view_menu, "Обмен с SetRetailX", "exchange")
 
@@ -480,6 +626,7 @@ class PrinterWindow(QMainWindow):
         toolbar = self.addToolBar("Окна")
         toolbar.setMovable(False)
         toolbar.addAction("Сканирование", lambda: self.show_subwindow("scanner"))
+        toolbar.addAction("Поиск товаров", lambda: self.show_subwindow("search"))
         toolbar.addAction("Очередь печати", lambda: self.show_subwindow("queue"))
         toolbar.addAction("Обмен с SetRetailX", lambda: self.show_subwindow("exchange"))
         toolbar.addSeparator()
@@ -521,6 +668,7 @@ class PrinterWindow(QMainWindow):
     def set_busy(self, busy, message=None):
         self.is_busy = busy
         self.scanner.set_busy(busy)
+        self.product_search.set_busy(busy)
         for widget in (
             self.queue.assign_button,
             self.queue.remove_button,
