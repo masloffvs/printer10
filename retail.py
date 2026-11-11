@@ -185,6 +185,163 @@ def search_products(query, limit=100):
         conn.close()
 
 
+def _normalized_field_name(value):
+    return re.sub(r"[^a-zа-я0-9]", "", str(value).casefold())
+
+
+def _category_text(value):
+    """Turn common category representations into a readable breadcrumb."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        if text[:1] in '[{"':
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                parsed = None
+            if parsed is not None and not isinstance(parsed, str):
+                return _category_text(parsed)
+        return " › ".join(
+            part.strip() for part in re.split(r"\s*(?:/|\\|>)\s*", text) if part.strip()
+        )
+    if isinstance(value, (list, tuple)):
+        parts = [_category_text(item) for item in value]
+        return " › ".join(dict.fromkeys(part for part in parts if part))
+    if isinstance(value, dict):
+        for key in ("path", "fullPath", "full_path", "breadcrumb", "namePath"):
+            if value.get(key):
+                return _category_text(value[key])
+        name = next(
+            (
+                value[key]
+                for key in ("name", "title", "categoryName", "label")
+                if value.get(key)
+            ),
+            "",
+        )
+        parent = next(
+            (
+                value[key]
+                for key in ("parent", "parentCategory", "parent_category")
+                if value.get(key)
+            ),
+            None,
+        )
+        parent_text = _category_text(parent)
+        name_text = (
+            _category_text(name)
+            if isinstance(name, (dict, list, tuple))
+            else str(name).strip()
+        )
+        return " › ".join(part for part in (parent_text, name_text) if part)
+    return ""
+
+
+def product_category(product):
+    """Extract a human-readable category path from varied catalog schemas."""
+    details = (
+        product.get("details") if isinstance(product.get("details"), dict) else product
+    )
+    aliases = {
+        "category",
+        "categoryname",
+        "categorypath",
+        "productcategory",
+        "productcategoryname",
+        "productcategorypath",
+        "group",
+        "groupname",
+        "productgroup",
+        "productgroupname",
+        "department",
+        "departmentname",
+        "parentcategory",
+        "categorytree",
+        "categoryhierarchy",
+        "categories",
+    }
+    for key, value in details.items():
+        if _normalized_field_name(key) in aliases:
+            text = _category_text(value)
+            if text:
+                return text
+    return ""
+
+
+def product_image_url(product):
+    """Extract an image URL from the catalog's common image field shapes."""
+    details = (
+        product.get("details") if isinstance(product.get("details"), dict) else product
+    )
+    aliases = {
+        "mainimage",
+        "mainimageurl",
+        "image",
+        "imageurl",
+        "photourl",
+        "photo",
+        "pictures",
+        "images",
+    }
+    value = next(
+        (
+            value
+            for key, value in details.items()
+            if _normalized_field_name(key) in aliases and value
+        ),
+        None,
+    )
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("[", "{")):
+            try:
+                return product_image_url({"details": {"images": json.loads(text)}})
+            except (TypeError, ValueError):
+                pass
+        return text
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            url = _image_url_from_value(item)
+            if url:
+                return url
+    return _image_url_from_value(value)
+
+
+def _image_url_from_value(value):
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("url", "src", "path", "href", "original", "large"):
+            if value.get(key):
+                return str(value[key]).strip()
+    return ""
+
+
+def download_product_image(url):
+    """Download a product image with a size limit and the authenticated session."""
+    if url.startswith("//"):
+        url = "https:" + url
+    elif not url.lower().startswith(("http://", "https://")):
+        url = BASE_URL.rstrip("/") + "/" + url.lstrip("/")
+    session = active_session or requests
+    response = session.get(url, timeout=12, stream=True)
+    try:
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "").lower()
+        if content_type and not content_type.startswith("image/"):
+            raise ValueError("Сервер вернул не изображение.")
+        data = bytearray()
+        for chunk in response.iter_content(64 * 1024):
+            if chunk:
+                data.extend(chunk)
+                if len(data) > 12 * 1024 * 1024:
+                    raise ValueError("Изображение товара слишком большое.")
+        return bytes(data)
+    finally:
+        response.close()
+
+
 def online_rpc(payload, timeout=15):
     """Отправляет JSON-RPC запрос в SetRetailX."""
     if active_session is None:

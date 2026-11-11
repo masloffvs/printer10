@@ -1,16 +1,17 @@
 from collections import defaultdict
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMainWindow,
     QMdiArea,
     QMdiSubWindow,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStatusBar,
+    QGroupBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -30,6 +32,7 @@ import auth
 from auth import get_authenticated_session
 import retail
 from config import DB_PATH, PRINT_FORMATS
+from print_history import PrintHistory
 
 
 class TaskThread(QThread):
@@ -308,45 +311,189 @@ class ProductSearchWindow(QWidget):
 
 
 class ProductCardWindow(QWidget):
-    """Detailed view of one local catalog product."""
+    """Readable product card with async image loading and parsed attributes."""
 
     def __init__(self, printer, product):
         super().__init__()
         self.printer = printer
         self.product = product
-        self.setMinimumSize(440, 320)
-
-        layout = QVBoxLayout(self)
+        self.setMinimumSize(620, 500)
         details = product.get("details", product)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
         self.title_label = QLabel(product.get("name") or "Без названия")
         self.title_label.setWordWrap(True)
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.title_label.setStyleSheet("font-size: 22px; font-weight: 700;")
         layout.addWidget(self.title_label)
 
-        self.fields = QListWidget()
-        preferred = (
-            ("vendor_code", "Артикул"),
-            ("barcode", "Штрихкод"),
-            ("price", "Цена"),
-            ("cost", "Себестоимость"),
-            ("total_qty", "Остаток"),
-            ("product_id", "ID товара"),
-            ("description", "Описание"),
+        self.category_label = QLabel(
+            retail.product_category(product) or "Категория не указана"
         )
-        shown = set()
-        for key, label in preferred:
-            value = details.get(key)
+        self.category_label.setWordWrap(True)
+        self.category_label.setStyleSheet("color: palette(mid); font-size: 13px;")
+        layout.addWidget(self.category_label)
+
+        content = QHBoxLayout()
+        content.setSpacing(18)
+        self.image_frame = QFrame()
+        self.image_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self.image_frame.setMinimumSize(270, 310)
+        self.image_frame.setMaximumWidth(360)
+        image_layout = QVBoxLayout(self.image_frame)
+        self.image_label = QLabel("Загружаем фото…")
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setMinimumSize(240, 280)
+        self.image_label.setWordWrap(True)
+        image_layout.addWidget(self.image_label)
+        content.addWidget(self.image_frame, 1)
+
+        info = QVBoxLayout()
+        stats = QGridLayout()
+        stats.setSpacing(10)
+        self.price_label = self._stat_card(
+            "Цена", self._display_price(product.get("price"))
+        )
+        self.stock_label = self._stat_card(
+            "Остаток", self._display_stock(product.get("total_qty"))
+        )
+        stats.addWidget(self.price_label, 0, 0)
+        stats.addWidget(self.stock_label, 0, 1)
+        info.addLayout(stats)
+
+        description = (
+            product.get("description") or details.get("description") or ""
+        ).strip()
+        if description:
+            description_title = QLabel("Описание")
+            description_title.setStyleSheet("font-weight: 600; margin-top: 8px;")
+            info.addWidget(description_title)
+            self.description_label = QLabel(description)
+            self.description_label.setWordWrap(True)
+            self.description_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            info.addWidget(self.description_label)
+
+        specs = QGroupBox("Реквизиты товара")
+        form = QFormLayout(specs)
+        for label, value in (
+            ("Артикул", product.get("vendor_code")),
+            ("Штрихкод", product.get("barcode")),
+            ("Код SetRetailX", product.get("st_code")),
+            ("Ед. измерения", product.get("uom") or "ST"),
+        ):
             if value not in (None, ""):
-                self.fields.addItem(f"{label}: {value}")
-                shown.add(key)
+                value_label = QLabel(str(value))
+                value_label.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
+                form.addRow(label + ":", value_label)
+        known_attributes = {
+            "brand": "Бренд",
+            "brandname": "Бренд",
+            "manufacturer": "Производитель",
+            "manufacturername": "Производитель",
+            "model": "Модель",
+            "color": "Цвет",
+            "colorname": "Цвет",
+            "size": "Размер",
+            "sizename": "Размер",
+            "material": "Материал",
+            "composition": "Состав",
+            "country": "Страна производства",
+            "countryoforigin": "Страна производства",
+            "season": "Сезон",
+            "weight": "Вес",
+            "volume": "Объём",
+            "cost": "Себестоимость",
+            "warranty": "Гарантия",
+            "series": "Серия",
+            "collection": "Коллекция",
+        }
         for key, value in details.items():
-            if key not in shown and value not in (None, ""):
-                self.fields.addItem(f"{key}: {value}")
-        layout.addWidget(self.fields, 1)
+            normalized = retail._normalized_field_name(key)
+            label = known_attributes.get(normalized)
+            if label and value not in (None, "", [], {}, ()):
+                value_text = (
+                    ", ".join(map(str, value))
+                    if isinstance(value, (list, tuple))
+                    else str(value)
+                )
+                value_label = QLabel(value_text)
+                value_label.setWordWrap(True)
+                value_label.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
+                form.addRow(label + ":", value_label)
+        info.addWidget(specs)
+        info.addStretch(1)
+        content.addLayout(info, 2)
+        layout.addLayout(content, 1)
 
         self.add_button = QPushButton("Добавить в очередь печати")
         self.add_button.clicked.connect(self.add_to_queue)
         layout.addWidget(self.add_button)
+
+        image_url = retail.product_image_url(product)
+        if not image_url:
+            self.image_label.setText("Для этого товара нет фотографии")
+        else:
+            self.image_thread = TaskThread(
+                lambda: retail.download_product_image(image_url), self
+            )
+            self.image_thread.succeeded.connect(self.show_image)
+            self.image_thread.failed.connect(self.show_image_error)
+            self.image_thread.start()
+
+    @staticmethod
+    def _display_price(value):
+        if value in (None, ""):
+            return "—"
+        try:
+            return f"{float(value):,.2f} ₽".replace(",", " ")
+        except (TypeError, ValueError):
+            return f"{value} ₽"
+
+    @staticmethod
+    def _display_stock(value):
+        return "—" if value in (None, "") else str(value)
+
+    @staticmethod
+    def _stat_card(title, value):
+        card = QFrame()
+        card.setFrameShape(QFrame.Shape.StyledPanel)
+        card.setMinimumWidth(110)
+        box = QVBoxLayout(card)
+        box.setContentsMargins(10, 8, 10, 8)
+        caption = QLabel(title)
+        caption.setStyleSheet("color: palette(mid);")
+        value_label = QLabel(value)
+        value_label.setStyleSheet("font-size: 17px; font-weight: 700;")
+        value_label.setWordWrap(True)
+        box.addWidget(caption)
+        box.addWidget(value_label)
+        card.value_label = value_label
+        return card
+
+    def show_image(self, image_data):
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(image_data):
+            self.show_image_error("Не удалось распознать файл изображения.")
+            return
+        self.image_label.setText("")
+        self.image_label.setPixmap(
+            pixmap.scaled(
+                QSize(340, 360),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def show_image_error(self, _error):
+        self.image_label.setPixmap(QPixmap())
+        self.image_label.setText("Фото товара временно недоступно")
 
     def add_to_queue(self):
         product = self.product
@@ -366,6 +513,73 @@ class ProductCardWindow(QWidget):
         self.printer.refresh_queue()
         self.printer.statusBar().showMessage(
             f"Добавлен товар в очередь: {product['name']}", 5000
+        )
+
+
+class PrintHistoryWindow(QWidget):
+    """Local archive of submitted print batches with queue restoration."""
+
+    def __init__(self, printer):
+        super().__init__()
+        self.printer = printer
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["№", "Дата", "Статус", "Товаров"])
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        header = self.table.horizontalHeader()
+        for column in range(3):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        self.info_label = QLabel("Партии печати сохраняются локально.")
+        footer.addWidget(self.info_label, 1)
+        self.restore_button = QPushButton("Восстановить в очередь")
+        self.restore_button.clicked.connect(self.restore_selected)
+        footer.addWidget(self.restore_button)
+        layout.addLayout(footer)
+        self.refresh()
+
+    def refresh(self):
+        self.batches = self.printer.print_history.batches()
+        self.table.setRowCount(len(self.batches))
+        for row, batch in enumerate(self.batches):
+            values = (
+                batch["id"],
+                batch["created_at"].replace("T", " "),
+                batch["status"],
+                len(batch["entries"]),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column in (0, 3):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row, column, item)
+        self.info_label.setText(f"Сохранено партий: {len(self.batches)}")
+        self.restore_button.setEnabled(bool(self.batches))
+
+    def restore_selected(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            self.info_label.setText("Выберите партию для восстановления.")
+            return
+        batch = self.batches[rows[0].row()]
+        entries = batch["entries"]
+        if batch["status"] == "Частично отправлено":
+            successful = set(batch["successful_indexes"])
+            entries = [
+                entry for index, entry in enumerate(entries) if index not in successful
+            ]
+        self.printer.entries.extend(dict(entry) for entry in entries)
+        self.printer.refresh_queue()
+        self.printer.show_subwindow("queue")
+        self.printer.statusBar().showMessage(
+            f"Восстановлено товаров из истории: {len(entries)}", 5000
         )
 
 
@@ -577,10 +791,12 @@ class QueueWindow(QWidget):
         )
 
     def print_entries(self, entries, description):
+        candidates = [
+            entry for entry in entries if entry["format"] and entry["amount"] in (1, 2)
+        ]
         groups = defaultdict(list)
-        for entry in entries:
-            if entry["format"] and entry["amount"] in (1, 2):
-                groups[(entry["format"], entry["amount"])].append(entry)
+        for index, entry in enumerate(candidates):
+            groups[(entry["format"], entry["amount"])].append((index, entry))
         if not groups:
             self.printer.statusBar().showMessage(
                 "Нет назначенных товаров для печати", 4000
@@ -596,15 +812,41 @@ class QueueWindow(QWidget):
             groups.items(),
             key=lambda item: (("А", "Б", "Ц").index(item[0][0]), item[0][1]),
         )
+        try:
+            batch_id = self.printer.print_history.add_batch(
+                [dict(entry) for entry in candidates]
+            )
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Не удалось сохранить историю",
+                f"Задание не отправлено, потому что его не удалось сохранить локально:\n{error}",
+            )
+            return
+        self.printer.active_print_batch_id = batch_id
+        self.printer.print_history_window.refresh()
         self.printer.set_busy(True, f"Отправляем задания для {description} товаров…")
         self.printer.show_subwindow("exchange")
 
         def print_groups():
             successful_ids = []
-            for (format_key, amount), group_entries in ordered_groups:
-                if retail.print_group(format_key, amount, group_entries):
+            successful_indexes = []
+            failures = []
+            for (format_key, amount), group_items in ordered_groups:
+                group_entries = [entry for _index, entry in group_items]
+                try:
+                    printed = retail.print_group(format_key, amount, group_entries)
+                except Exception as error:
+                    failures.append(str(error))
+                    continue
+                if printed:
                     successful_ids.extend(id(entry) for entry in group_entries)
-            return successful_ids
+                    successful_indexes.extend(index for index, _entry in group_items)
+            return {
+                "successful_ids": successful_ids,
+                "successful_indexes": successful_indexes,
+                "failures": failures,
+            }
 
         self.printer.start_task(print_groups, self.printer.print_finished)
 
@@ -615,6 +857,8 @@ class PrinterWindow(QMainWindow):
         self.entries = []
         self.task = None
         self.is_busy = False
+        self.print_history = PrintHistory()
+        self.active_print_batch_id = None
         self.subwindows = {}
         self.exchange_bridge = ExchangeLogBridge(self)
         self.exchange_log = ExchangeLogWindow()
@@ -634,6 +878,7 @@ class PrinterWindow(QMainWindow):
         self.scanner = ScannerWindow(self)
         self.product_search = ProductSearchWindow(self)
         self.queue = QueueWindow(self)
+        self.print_history_window = PrintHistoryWindow(self)
         self._add_internal_window(
             "exchange", "Обмен с SetRetailX", self.exchange_log, (800, 450)
         )
@@ -643,6 +888,9 @@ class PrinterWindow(QMainWindow):
             "search", "Поиск товаров", self.product_search, (900, 560)
         )
         self._add_internal_window("queue", "Очередь печати", self.queue, (820, 480))
+        self._add_internal_window(
+            "history", "История печати", self.print_history_window, (760, 420)
+        )
 
         self._create_menus()
         self._create_toolbar()
@@ -673,6 +921,7 @@ class PrinterWindow(QMainWindow):
         self._add_window_action(view_menu, "Поиск товаров", "search")
         self._add_window_action(view_menu, "Очередь печати", "queue")
         self._add_window_action(view_menu, "Обмен с SetRetailX", "exchange")
+        self._add_window_action(view_menu, "История печати", "history")
 
         window_menu = self.menuBar().addMenu("Окна")
         window_menu.addAction("Каскадом", self.mdi.cascadeSubWindows)
@@ -698,6 +947,7 @@ class PrinterWindow(QMainWindow):
         toolbar.addAction("Поиск товаров", lambda: self.show_subwindow("search"))
         toolbar.addAction("Очередь печати", lambda: self.show_subwindow("queue"))
         toolbar.addAction("Обмен с SetRetailX", lambda: self.show_subwindow("exchange"))
+        toolbar.addAction("История печати", lambda: self.show_subwindow("history"))
         toolbar.addSeparator()
         toolbar.addAction("Каскадом", self.mdi.cascadeSubWindows)
         toolbar.addAction("Плиткой", self.mdi.tileSubWindows)
@@ -776,6 +1026,10 @@ class PrinterWindow(QMainWindow):
         self.scanner.barcode_input.setFocus()
 
     def task_failed(self, error):
+        if self.active_print_batch_id is not None:
+            self.print_history.fail_batch(self.active_print_batch_id)
+            self.active_print_batch_id = None
+            self.print_history_window.refresh()
         self.scanner.status_label.setText(f"Ошибка: {error}")
         self.set_busy(False, f"Ошибка: {error}")
         if retail.active_session is None:
@@ -788,16 +1042,42 @@ class PrinterWindow(QMainWindow):
     def refresh_queue(self):
         self.queue.refresh()
 
-    def print_finished(self, successful_ids):
+    def print_finished(self, result):
+        successful_ids = result["successful_ids"]
+        successful_indexes = result["successful_indexes"]
+        failures = result["failures"]
         successful = set(successful_ids)
         self.entries = [entry for entry in self.entries if id(entry) not in successful]
+        batch_id = self.active_print_batch_id
+        if batch_id is not None:
+            batch_entries = next(
+                (
+                    batch["entries"]
+                    for batch in self.print_history.batches()
+                    if batch["id"] == batch_id
+                ),
+                [],
+            )
+            if successful_indexes:
+                status = (
+                    "Отправлено"
+                    if len(successful_indexes) == len(batch_entries) and not failures
+                    else "Частично отправлено"
+                )
+            else:
+                status = "Ошибка отправки" if failures else "Не отправлено"
+            self.print_history.finish_batch(batch_id, successful_indexes, status)
+            self.active_print_batch_id = None
+            self.print_history_window.refresh()
         self.refresh_queue()
-        count = len(successful_ids)
+        count = len(successful_indexes)
         message = (
             f"Отправлено на печать товаров: {count}"
             if count
             else "Не удалось отправить задания. Очередь сохранена."
         )
+        if failures:
+            message += f" · ошибок: {len(failures)}"
         self.set_busy(False, message)
         self.scanner.barcode_input.setFocus()
 
