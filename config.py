@@ -4,7 +4,7 @@ from pathlib import Path
 
 # SQLite lives beside the script, or in the extracted PyInstaller bundle.
 APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-DB_PATH = APP_DIR / "products.db"
+DB_PATH = APP_DIR / "all_products.sqlite"
 
 PRINT_FORMATS = {
     "А": {"name": "Формат А", "printer_id": 9974664, "template_id": "22766"},
