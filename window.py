@@ -1,4 +1,5 @@
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QPixmap
@@ -33,6 +34,18 @@ from auth import get_authenticated_session
 import retail
 from config import DB_PATH, PRINT_FORMATS
 from print_history import PrintHistory
+
+
+def _format_price(value):
+    """Format a catalog price stored in kopecks as rubles and kopecks."""
+    if value in (None, ""):
+        return "—"
+    try:
+        rubles = Decimal(str(value)) / 100
+        formatted = f"{rubles:,.2f}"
+        return formatted.replace(",", "\0").replace(".", ",").replace("\0", " ") + " ₽"
+    except (InvalidOperation, TypeError, ValueError):
+        return f"{value} ₽"
 
 
 class TaskThread(QThread):
@@ -241,7 +254,7 @@ class ProductSearchWindow(QWidget):
                 product["name"],
                 product["vendor_code"],
                 product["barcode"],
-                "—" if price is None else price,
+                _format_price(price),
                 "—" if quantity is None else quantity,
             ]
             for column, value in enumerate(values):
@@ -276,7 +289,7 @@ class ProductSearchWindow(QWidget):
             f"{product['name']}\n"
             f"Артикул: {product['vendor_code'] or '—'} · "
             f"Штрихкод: {product['barcode'] or '—'}\n"
-            f"Цена: {price if price is not None else '—'} · "
+            f"Цена: {_format_price(price)} · "
             f"Остаток: {quantity if quantity is not None else '—'}\n{description}"
         )
 
@@ -449,12 +462,7 @@ class ProductCardWindow(QWidget):
 
     @staticmethod
     def _display_price(value):
-        if value in (None, ""):
-            return "—"
-        try:
-            return f"{float(value):,.2f} ₽".replace(",", " ")
-        except (TypeError, ValueError):
-            return f"{value} ₽"
+        return _format_price(value)
 
     @staticmethod
     def _display_stock(value):
@@ -978,6 +986,14 @@ class PrinterWindow(QMainWindow):
 
     def show_subwindow(self, key):
         subwindow = self.subwindows[key]
+        self._present_subwindow(subwindow)
+
+    def _present_subwindow(self, subwindow):
+        if subwindow.isMinimized():
+            subwindow.showNormal()
+        widget = subwindow.widget()
+        if widget is not None:
+            widget.show()
         subwindow.show()
         subwindow.raise_()
         self.mdi.setActiveSubWindow(subwindow)
@@ -993,9 +1009,7 @@ class PrinterWindow(QMainWindow):
                 card,
                 (540, 440),
             )
-        subwindow.show()
-        subwindow.raise_()
-        self.mdi.setActiveSubWindow(subwindow)
+        self._present_subwindow(subwindow)
 
     def _about(self):
         QMessageBox.about(
