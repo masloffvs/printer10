@@ -7,11 +7,13 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMdiArea,
     QMdiSubWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -112,6 +114,7 @@ class ScannerWindow(QWidget):
             "source": product["source"],
             "format": None,
             "amount": None,
+            "quantity": 1,
         }
         self.printer.entries.append(entry)
         self.printer.refresh_queue()
@@ -154,9 +157,9 @@ class QueueWindow(QWidget):
         controls.addStretch()
         layout.addLayout(controls)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
-            ["№", "Товар", "Штрихкод", "ST-код", "Формат", "Тираж"]
+            ["№", "Товар", "Штрихкод", "ST-код", "Формат", "Тираж", "Количество"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -166,8 +169,10 @@ class QueueWindow(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in (2, 3, 4, 5):
+        for column in (2, 3, 4, 5, 6):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_queue_context_menu)
         layout.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
@@ -193,6 +198,7 @@ class QueueWindow(QWidget):
                 if entry["format"]
                 else "Не назначен"
             )
+            entry.setdefault("quantity", 1)
             values = [
                 row + 1,
                 entry["name"],
@@ -200,10 +206,11 @@ class QueueWindow(QWidget):
                 entry["st_code"],
                 format_name,
                 entry["amount"] or "—",
+                entry["quantity"],
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                if column in (0, 5):
+                if column in (0, 5, 6):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row, column, item)
         assigned = sum(bool(entry["format"]) for entry in entries)
@@ -214,6 +221,68 @@ class QueueWindow(QWidget):
     def selected_indexes(self):
         return sorted(
             {index.row() for index in self.table.selectionModel().selectedRows()}
+        )
+
+    def show_queue_context_menu(self, position):
+        row = self.table.rowAt(position.y())
+        if row < 0:
+            return
+
+        if row not in self.selected_indexes():
+            self.table.clearSelection()
+            self.table.selectRow(row)
+
+        menu = QMenu(self)
+        set_amount_action = menu.addAction("Изменить тираж выбранных…")
+        set_quantity_action = menu.addAction("Изменить количество выбранных…")
+        selected_action = menu.exec(self.table.viewport().mapToGlobal(position))
+
+        if selected_action == set_amount_action:
+            self.change_selected_amount()
+        elif selected_action == set_quantity_action:
+            self.change_selected_quantity()
+
+    def change_selected_amount(self):
+        indexes = self.selected_indexes()
+        if not indexes:
+            return
+        amount, accepted = QInputDialog.getInt(
+            self,
+            "Массовое изменение тиража",
+            "Ценников на каждый товар:",
+            1,
+            1,
+            2,
+        )
+        if not accepted:
+            return
+        for index in indexes:
+            self.printer.entries[index]["amount"] = amount
+        self.printer.refresh_queue()
+        self.printer.statusBar().showMessage(
+            f"Тираж {amount} применён к товарам: {len(indexes)}", 5000
+        )
+
+    def change_selected_quantity(self):
+        indexes = self.selected_indexes()
+        if not indexes:
+            return
+        first_entry = self.printer.entries[indexes[0]]
+        quantity, accepted = QInputDialog.getInt(
+            self,
+            "Массовое изменение количества",
+            "Экземпляров каждого выбранного товара:",
+            first_entry.get("quantity", 1),
+            1,
+            999,
+        )
+        if not accepted:
+            return
+        for index in indexes:
+            self.printer.entries[index]["quantity"] = quantity
+        self.printer.refresh_queue()
+        self.printer.statusBar().showMessage(
+            f"Количество {quantity} применено к товарам: {len(indexes)}", 5000
         )
 
     def assign_selected(self):

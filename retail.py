@@ -149,7 +149,9 @@ def lookup_product(barcode):
 def print_group(format_key, amount_to_print, entries):
     """Отправляет одну группу товаров на печать."""
     format_info = PRINT_FORMATS[format_key]
-    basket = [entry["st_code"] for entry in entries]
+    basket = [
+        entry["st_code"] for entry in entries for _ in range(entry.get("quantity", 1))
+    ]
 
     if not basket:
         return False
@@ -196,7 +198,7 @@ def print_group(format_key, amount_to_print, entries):
 
     print(
         f"\n[Печать] {format_info['name']}, "
-        f"ценников на товар: {amount_to_print}, товаров: {len(basket)}"
+        f"ценников на товар: {amount_to_print}, экземпляров товаров: {len(basket)}"
     )
 
     try:
