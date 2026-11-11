@@ -117,6 +117,7 @@ def search_offline(barcode):
             "st_code": str(product_id),
             "name": name or "Без названия",
             "vendor_code": vendor_code or "",
+            "uom": "ST",
             "barcode": str(found_barcode or barcode),
             "source": "offline",
         }
@@ -168,6 +169,7 @@ def search_products(query, limit=100):
                     "st_code": str(product.get("product_id") or ""),
                     "name": product.get("name") or "Без названия",
                     "vendor_code": product.get("vendor_code") or "",
+                    "uom": product.get("uom") or "ST",
                     "barcode": str(product.get("barcode") or ""),
                     "source": "offline",
                     "price": product.get("price"),
@@ -305,6 +307,7 @@ def search_online(barcode):
         "st_code": str(st_code),
         "name": selected.get("name") or "Без названия",
         "vendor_code": selected.get("vendorCode") or "",
+        "uom": selected.get("uom") or "ST",
         "barcode": str(selected.get("barcode") or barcode),
         "source": "online",
     }
@@ -322,11 +325,21 @@ def lookup_product(barcode):
     return search_online(barcode)
 
 
+def product_print_code(entry):
+    """Build the SetRetailX basket code from vendor code and unit of measure."""
+    vendor_code = entry.get("vendor_code")
+    if vendor_code:
+        return f"{vendor_code}_{entry.get('uom') or 'ST'}"
+    return entry["st_code"]
+
+
 def print_group(format_key, amount_to_print, entries):
     """Отправляет одну группу товаров на печать."""
     format_info = PRINT_FORMATS[format_key]
     basket = [
-        entry["st_code"] for entry in entries for _ in range(entry.get("quantity", 1))
+        product_print_code(entry)
+        for entry in entries
+        for _ in range(entry.get("quantity", 1))
     ]
 
     if not basket:
