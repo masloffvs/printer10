@@ -1,6 +1,9 @@
+import json
 import re
 import sqlite3
 import time
+from datetime import datetime
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -9,6 +12,63 @@ from config import DB_PATH, PRINT_FORMATS
 
 active_session = None
 session_token = None
+exchange_event_handler = None
+
+
+def _emit_exchange_event(title, details, tone="info"):
+    """Send a redacted request/response note to the UI without affecting work."""
+    if exchange_event_handler is None:
+        return
+    event = {
+        "timestamp": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "title": title,
+        "details": details,
+        "tone": tone,
+    }
+    try:
+        exchange_event_handler(event)
+    except Exception:
+        # Diagnostics must never break a product lookup or print operation.
+        pass
+
+
+def _redact(value, key=""):
+    """Remove secret-like fields from objects before showing them in the log."""
+    if any(
+        secret in key.lower()
+        for secret in ("token", "password", "authorization", "cookie")
+    ):
+        return "[скрыто]"
+    if isinstance(value, dict):
+        return {k: _redact(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
+
+
+def _format_log_body(value):
+    text = json.dumps(_redact(value), ensure_ascii=False, indent=2, default=str)
+    max_chars = 16000
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n… [ответ сокращён в журнале]"
+    return text
+
+
+def _redact_text(text, secrets=()):
+    if URL_RPC:
+        text = text.replace(URL_RPC, _safe_rpc_url())
+    for secret in secrets:
+        if secret:
+            text = text.replace(str(secret), "[скрыто]")
+    return text
+
+
+def _safe_rpc_url():
+    parsed = urlsplit(URL_RPC)
+    hostname = parsed.hostname or ""
+    if parsed.port:
+        hostname = f"{hostname}:{parsed.port}"
+    return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
 
 
 def extract_barcode(user_input):
@@ -68,10 +128,67 @@ def online_rpc(payload, timeout=15):
     """Отправляет JSON-RPC запрос в SetRetailX."""
     if active_session is None:
         raise RuntimeError("Сессия авторизации не создана.")
+    safe_payload = _redact(payload)
+    method = payload.get("method", "JSON-RPC")
+    known_secrets = [session_token]
+    # Login credentials and product-search session tokens are positional params.
+    if method == "login" and isinstance(safe_payload.get("params"), list):
+        known_secrets.extend(payload.get("params", [])[:2])
+        safe_payload["params"][:2] = ["[скрыто]", "[скрыто]"]
+    elif method == "getSimpleProductsByFilter":
+        safe_payload["params"][0] = "[скрыто]"
 
-    response = active_session.post(URL_RPC, json=payload, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+    endpoint = payload.get("endpoint", "")
+    _emit_exchange_event(
+        f"Отправлен запрос: {method}",
+        f"URL: {_safe_rpc_url()}\nEndpoint: {endpoint}\n\n"
+        f"{_redact_text(_format_log_body(safe_payload), known_secrets)}",
+    )
+    try:
+        response = active_session.post(URL_RPC, json=payload, timeout=timeout)
+        try:
+            response_body = response.json()
+            if method == "login" and isinstance(response_body, dict):
+                response_body = dict(response_body)
+                if "result" in response_body:
+                    response_body["result"] = "[скрыто: токен авторизации]"
+            formatted_response = _format_log_body(response_body)
+        except ValueError:
+            formatted_response = _redact_text(response.text[:16000], known_secrets)
+            if len(response.text) > 16000:
+                formatted_response += "\n… [ответ сокращён в журнале]"
+        formatted_response = _redact_text(formatted_response, known_secrets)
+
+        tone = "success" if response.ok else "error"
+        _emit_exchange_event(
+            f"Ответ SetRetailX: HTTP {response.status_code}",
+            f"Метод: {method}\nВремя ответа: {response.elapsed.total_seconds():.2f} с\n\n"
+            f"{formatted_response}",
+            tone,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as error:
+        _emit_exchange_event(
+            f"Ошибка запроса: {method}",
+            _redact_text(f"{type(error).__name__}: {error}", known_secrets),
+            "error",
+        )
+        raise
+    except ValueError as error:
+        _emit_exchange_event(
+            f"Не удалось разобрать ответ: {method}",
+            _redact_text(f"{type(error).__name__}: {error}", known_secrets),
+            "error",
+        )
+        raise
+    except Exception as error:
+        _emit_exchange_event(
+            f"Ошибка обмена: {method}",
+            _redact_text(f"{type(error).__name__}: {error}", known_secrets),
+            "error",
+        )
+        raise
 
 
 def search_online(barcode):

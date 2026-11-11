@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMdiSubWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QStatusBar,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import auth
 from auth import get_authenticated_session
 import retail
 from config import DB_PATH, PRINT_FORMATS
@@ -42,6 +44,29 @@ class TaskThread(QThread):
             self.succeeded.emit(self.function())
         except Exception as error:
             self.failed.emit(str(error))
+
+
+class ExchangeLogBridge(QObject):
+    event_received = Signal(object)
+
+
+class ExchangeLogWindow(QWidget):
+    """Visible, bounded log of requests and responses exchanged with SetRetailX."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.document().setMaximumBlockCount(4000)
+        layout.addWidget(self.output)
+
+    def append_event(self, event):
+        self.output.appendPlainText(
+            f"[{event['timestamp']}] {event['title']}\n{event['details']}\n" + "─" * 72
+        )
+        scrollbar = self.output.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
 
 class ScannerWindow(QWidget):
@@ -187,6 +212,11 @@ class QueueWindow(QWidget):
         self.print_button = QPushButton("Печать назначенных")
         self.print_button.clicked.connect(self.print_assigned_groups)
         footer.addWidget(self.print_button)
+        self.print_selected_button = QPushButton("Печать выбранных")
+        self.print_selected_button.clicked.connect(self.print_selected_groups)
+        self.print_selected_button.setEnabled(False)
+        footer.addWidget(self.print_selected_button)
+        self.table.itemSelectionChanged.connect(self.update_selection_actions)
         layout.addLayout(footer)
 
     def refresh(self):
@@ -221,6 +251,11 @@ class QueueWindow(QWidget):
     def selected_indexes(self):
         return sorted(
             {index.row() for index in self.table.selectionModel().selectedRows()}
+        )
+
+    def update_selection_actions(self):
+        self.print_selected_button.setEnabled(
+            bool(self.selected_indexes()) and not self.printer.is_busy
         )
 
     def show_queue_context_menu(self, position):
@@ -319,8 +354,20 @@ class QueueWindow(QWidget):
             self.printer.statusBar().showMessage("Очередь очищена", 4000)
 
     def print_assigned_groups(self):
+        self.print_entries(self.printer.entries, "назначенных")
+
+    def print_selected_groups(self):
+        indexes = self.selected_indexes()
+        if not indexes:
+            self.printer.statusBar().showMessage("Выберите товары в очереди", 4000)
+            return
+        self.print_entries(
+            [self.printer.entries[index] for index in indexes], "выбранных"
+        )
+
+    def print_entries(self, entries, description):
         groups = defaultdict(list)
-        for entry in self.printer.entries:
+        for entry in entries:
             if entry["format"] and entry["amount"] in (1, 2):
                 groups[(entry["format"], entry["amount"])].append(entry)
         if not groups:
@@ -328,17 +375,18 @@ class QueueWindow(QWidget):
                 "Нет назначенных товаров для печати", 4000
             )
             return
-        if any(not entry["format"] for entry in self.printer.entries):
+        if any(not entry["format"] for entry in entries):
             QMessageBox.information(
                 self,
                 "Есть неназначенные товары",
-                "Назначенные товары будут напечатаны. Остальные останутся в очереди.",
+                "Назначенные товары будут напечатаны. Неназначенные останутся в очереди.",
             )
         ordered_groups = sorted(
             groups.items(),
             key=lambda item: (("А", "Б", "Ц").index(item[0][0]), item[0][1]),
         )
-        self.printer.set_busy(True, "Отправляем задания на печать…")
+        self.printer.set_busy(True, f"Отправляем задания для {description} товаров…")
+        self.printer.show_subwindow("exchange")
 
         def print_groups():
             successful_ids = []
@@ -355,7 +403,13 @@ class PrinterWindow(QMainWindow):
         super().__init__()
         self.entries = []
         self.task = None
+        self.is_busy = False
         self.subwindows = {}
+        self.exchange_bridge = ExchangeLogBridge(self)
+        self.exchange_log = ExchangeLogWindow()
+        self.exchange_bridge.event_received.connect(self.exchange_log.append_event)
+        retail.exchange_event_handler = self.exchange_bridge.event_received.emit
+        auth.exchange_event_handler = self.exchange_bridge.event_received.emit
         self.setWindowTitle("SetRetailX — Печать ценников")
         self.resize(1200, 800)
         self.setMinimumSize(800, 560)
@@ -368,6 +422,10 @@ class PrinterWindow(QMainWindow):
 
         self.scanner = ScannerWindow(self)
         self.queue = QueueWindow(self)
+        self._add_internal_window(
+            "exchange", "Обмен с SetRetailX", self.exchange_log, (800, 450)
+        )
+        self.subwindows["exchange"].hide()
         self._add_internal_window("scanner", "Сканирование", self.scanner, (430, 230))
         self._add_internal_window("queue", "Очередь печати", self.queue, (820, 480))
 
@@ -399,6 +457,7 @@ class PrinterWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("Вид")
         self._add_window_action(view_menu, "Сканирование", "scanner")
         self._add_window_action(view_menu, "Очередь печати", "queue")
+        self._add_window_action(view_menu, "Обмен с SetRetailX", "exchange")
 
         window_menu = self.menuBar().addMenu("Окна")
         window_menu.addAction("Каскадом", self.mdi.cascadeSubWindows)
@@ -422,6 +481,7 @@ class PrinterWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.addAction("Сканирование", lambda: self.show_subwindow("scanner"))
         toolbar.addAction("Очередь печати", lambda: self.show_subwindow("queue"))
+        toolbar.addAction("Обмен с SetRetailX", lambda: self.show_subwindow("exchange"))
         toolbar.addSeparator()
         toolbar.addAction("Каскадом", self.mdi.cascadeSubWindows)
         toolbar.addAction("Плиткой", self.mdi.tileSubWindows)
@@ -459,14 +519,17 @@ class PrinterWindow(QMainWindow):
         self.task.start()
 
     def set_busy(self, busy, message=None):
+        self.is_busy = busy
         self.scanner.set_busy(busy)
         for widget in (
             self.queue.assign_button,
             self.queue.remove_button,
             self.queue.clear_button,
             self.queue.print_button,
+            self.queue.print_selected_button,
         ):
             widget.setEnabled(not busy)
+        self.queue.update_selection_actions()
         if message:
             self.statusBar().showMessage(message)
 
