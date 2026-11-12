@@ -1,4 +1,4 @@
-package com.setretailx.printer;
+package com.setretailx.printer.model;
 
 /** The subset of a catalog product currently needed by lookup and the print queue. */
 public record Product(
@@ -8,7 +8,7 @@ public record Product(
         String barcode,
         String uom,
         String source,
-        String price,
+        Price price,
         String totalQuantity) {
 
     public Product {
@@ -18,7 +18,6 @@ public record Product(
         barcode = value(barcode);
         uom = value(uom).isEmpty() ? "ST" : value(uom);
         source = value(source);
-        price = value(price);
         totalQuantity = value(totalQuantity);
     }
 

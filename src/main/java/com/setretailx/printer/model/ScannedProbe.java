@@ -1,4 +1,4 @@
-package com.setretailx.printer;
+package com.setretailx.printer.model;
 
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;

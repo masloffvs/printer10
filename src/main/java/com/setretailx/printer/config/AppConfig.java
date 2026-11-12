@@ -1,21 +1,21 @@
-package com.setretailx.printer;
+package com.setretailx.printer.config;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
-final class AppConfig {
-    static final Path APP_DIR = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
-    static final Path DB_PATH = APP_DIR.resolve("all_products.sqlite");
-    static final List<PrintFormat> PRINT_FORMATS = List.of(
+public final class AppConfig {
+    public static final Path APP_DIR = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+    public static final Path DB_PATH = APP_DIR.resolve("all_products.sqlite");
+    public static final List<PrintFormat> PRINT_FORMATS = List.of(
             new PrintFormat("А", "Формат А", 9974664, "22766"),
             new PrintFormat("Б", "Формат Б", 9974666, "23841"),
             new PrintFormat("Ц", "Формат Ц", 9975059, "23574"));
 
     private AppConfig() { }
 
-    static void loadDotEnv() {
+    public static void loadDotEnv() {
         Path env = APP_DIR.resolve(".env");
         if (!Files.isRegularFile(env)) return;
         try {
@@ -37,7 +37,7 @@ final class AppConfig {
         }
     }
 
-    record PrintFormat(String key, String name, int printerId, String templateId) {
+    public record PrintFormat(String key, String name, int printerId, String templateId) {
         @Override public String toString() { return name; }
     }
 }

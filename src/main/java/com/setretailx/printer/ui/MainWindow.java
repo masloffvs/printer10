@@ -1,4 +1,9 @@
-package com.setretailx.printer;
+package com.setretailx.printer.ui;
+
+import com.setretailx.printer.config.AppConfig;
+import com.setretailx.printer.model.Product;
+import com.setretailx.printer.model.ScannedProbe;
+import com.setretailx.printer.repository.ProductRepository;
 
 import javax.swing.BorderFactory;
 import javax.swing.JFrame;
@@ -11,11 +16,11 @@ import java.util.List;
 
 /** Main application shell; feature screens and MDI window management live in separate classes. */
 @SuppressWarnings("serial")
-final class MainWindow extends JFrame {
-    private final CatalogService catalog = new CatalogService();
+public final class MainWindow extends JFrame {
+    private final ProductRepository products = new ProductRepository();
     private final MdiWorkspace workspace = new MdiWorkspace();
     private final List<QueueEntry> entries = new ArrayList<>();
-    private final ScannerPanel scanner = new ScannerPanel(this::submitScan, this::assignUnassigned);
+    private final ScannerPanel scanner = new ScannerPanel(this::submitScan);
     private final ComparisonPanel comparison = new ComparisonPanel();
     private final SearchPanel search = new SearchPanel(this::search, this::updateSearchSelection,
             this::addSelectedSearchResults);
@@ -25,7 +30,7 @@ final class MainWindow extends JFrame {
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
     private List<Product> searchResults = new ArrayList<>();
 
-    MainWindow() {
+    public MainWindow() {
         super("SetRetailX — Печать ценников (Java)");
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setSize(1120, 720);
@@ -45,6 +50,10 @@ final class MainWindow extends JFrame {
                 "Локальная история партий будет перенесена вместе с печатью."), 620, 360);
         workspace.addWindow("tasks", new MigrationNoticePanel(
                 "Планировщик фоновых задач будет перенесён после сетевого клиента."), 680, 400);
+        scanner.registerRecipient("comparison", "Сверка ценников");
+        scanner.registerRecipient("search", "Поиск товаров");
+        scanner.registerRecipient("queue", "Очередь печати");
+        workspace.setWindowVisibilityListener(scanner::setRecipientOpen);
         workspace.showWindow("scanner");
         log("Java UI запущен. Локальная база: " + AppConfig.DB_PATH);
     }
@@ -58,45 +67,45 @@ final class MainWindow extends JFrame {
             probe = ScannedProbe.fromText(raw);
             if (probe.hasPriceData()) probe.pricesAsDecimals();
         } catch (IllegalArgumentException error) {
-            scanner.setStatus(error.getMessage());
+            status.setText(error.getMessage());
             log("Ошибка разбора скана: " + error.getMessage());
             return;
         }
 
         int receivers = 0;
-        if (scanner.isSubscribed() && !probe.hasPriceData()) {
+        if (scanner.sendsTo("queue") && !probe.hasPriceData()) {
             receivers++;
             receiveProductScan(probe);
         }
-        if (comparison.isSubscribed() && probe.hasPriceData()) {
+        if (scanner.sendsTo("comparison") && probe.hasPriceData()) {
             receivers++;
             receivePriceScan(probe);
         }
-        if (search.isSubscribed() && !probe.hasPriceData() && !probe.barcode().isEmpty()) {
+        if (scanner.sendsTo("search") && !probe.hasPriceData() && !probe.barcode().isEmpty()) {
             receivers++;
             search.setQuery(probe.barcode());
             search();
         }
-        if (receivers == 0) scanner.setStatus("Для этого типа скана нет подписанных окон-получателей.");
+        if (receivers == 0) status.setText("Для этого типа скана нет отмеченных открытых окон-получателей.");
         else status.setText("Скан передан в окна: " + receivers);
         scanner.focusInput();
     }
 
     private void receiveProductScan(ScannedProbe probe) {
         if (probe.barcode().isEmpty()) {
-            scanner.setStatus("В скане товара не заполнен barcode.");
+            status.setText("В скане товара не заполнен barcode.");
             return;
         }
-        scanner.setStatus("Ищем " + probe.barcode() + " в локальной базе…");
-        runBackground(() -> catalog.findByBarcode(probe.barcode()), product -> {
+        status.setText("Ищем " + probe.barcode() + " в локальной базе…");
+        runBackground(() -> products.findByBarcode(probe.barcode()), product -> {
             if (product == null) {
-                scanner.setStatus("Штрихкод " + probe.barcode() + " не найден в локальной базе.");
+                status.setText("Штрихкод " + probe.barcode() + " не найден в локальной базе.");
                 return;
             }
             entries.add(new QueueEntry(product));
             refreshQueue();
-            scanner.setStatus("Добавлен товар из локальной базы: " + product.name());
-        }, error -> scanner.setStatus("Ошибка локального поиска: " + error));
+            status.setText("Добавлен товар из локальной базы: " + product.name());
+        }, error -> status.setText("Ошибка локального поиска: " + error));
     }
 
     private void receivePriceScan(ScannedProbe probe) {
@@ -114,10 +123,10 @@ final class MainWindow extends JFrame {
             return;
         }
         search.setStatus("Ищем в локальной базе…");
-        runBackground(() -> catalog.search(query), products -> {
-            searchResults = new ArrayList<>(products);
-            search.showResults(products);
-            search.setStatus("Найдено товаров: " + products.size());
+        runBackground(() -> products.search(query), results -> {
+            searchResults = new ArrayList<>(results);
+            search.showResults(results);
+            search.setStatus("Найдено товаров: " + results.size());
         }, error -> search.setStatus("Ошибка поиска: " + error));
     }
 
@@ -134,21 +143,6 @@ final class MainWindow extends JFrame {
         }
         refreshQueue();
         status.setText("Добавлено товаров в очередь: " + selectedCount);
-    }
-
-    private void assignUnassigned() {
-        AppConfig.PrintFormat format = scanner.selectedFormat();
-        int amount = scanner.amount();
-        int count = 0;
-        for (QueueEntry entry : entries) {
-            if (entry.format == null) {
-                entry.format = format;
-                entry.amount = amount;
-                count++;
-            }
-        }
-        refreshQueue();
-        scanner.setStatus("Назначено неназначенных товаров: " + count);
     }
 
     private void assignSelected() {

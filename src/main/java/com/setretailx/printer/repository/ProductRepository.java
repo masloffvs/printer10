@@ -1,4 +1,8 @@
-package com.setretailx.printer;
+package com.setretailx.printer.repository;
+
+import com.setretailx.printer.config.AppConfig;
+import com.setretailx.printer.model.Price;
+import com.setretailx.printer.model.Product;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -12,8 +16,8 @@ import java.util.List;
 import java.util.Set;
 
 /** Exact barcode lookup and local catalog search against all_products.sqlite. */
-final class CatalogService {
-    List<Product> search(String query) throws SQLException {
+public final class ProductRepository {
+    public List<Product> search(String query) throws SQLException {
         String text = query == null ? "" : query.trim();
         if (text.isEmpty()) return List.of();
         String pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
@@ -43,7 +47,7 @@ final class CatalogService {
         }
     }
 
-    Product findByBarcode(String barcode) throws SQLException {
+    public Product findByBarcode(String barcode) throws SQLException {
         try (Connection connection = connect()) {
             Set<String> columns = columns(connection);
             if (!columns.contains("product_id") || !columns.contains("barcode")) {
@@ -87,6 +91,6 @@ final class CatalogService {
     private Product product(ResultSet row) throws SQLException {
         return new Product(row.getString("product_id"), row.getString("name"),
                 row.getString("vendor_code"), row.getString("barcode"), row.getString("uom"),
-                "offline", row.getString("price"), row.getString("total_qty"));
+                "offline", Price.fromDatabase(row.getString("price")), row.getString("total_qty"));
     }
 }

@@ -1,4 +1,4 @@
-package com.setretailx.printer;
+package com.setretailx.printer.ui;
 
 import javax.swing.BorderFactory;
 import javax.swing.JLabel;

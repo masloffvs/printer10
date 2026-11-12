@@ -1,5 +1,8 @@
 package com.setretailx.printer;
 
+import com.setretailx.printer.config.AppConfig;
+import com.setretailx.printer.ui.MainWindow;
+
 import com.formdev.flatlaf.FlatDarkLaf;
 
 import javax.swing.SwingUtilities;

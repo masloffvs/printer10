@@ -1,4 +1,4 @@
-package com.setretailx.printer;
+package com.setretailx.printer.ui;
 
 import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JDesktopPane;
@@ -12,9 +12,12 @@ import javax.swing.JToolBar;
 import javax.swing.event.MenuEvent;
 import javax.swing.event.MenuListener;
 import java.awt.BorderLayout;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.beans.PropertyVetoException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
 /** Owns the MDI desktop, its window menu, and window arrangement commands. */
 @SuppressWarnings("serial")
@@ -31,6 +34,7 @@ final class MdiWorkspace extends JPanel {
 
     private final JDesktopPane desktop = new JDesktopPane();
     private final Map<String, JInternalFrame> frames = new LinkedHashMap<>();
+    private BiConsumer<String, Boolean> visibilityListener = (key, open) -> { };
 
     MdiWorkspace() {
         super(new BorderLayout());
@@ -46,8 +50,17 @@ final class MdiWorkspace extends JPanel {
         frame.setSize(width, height);
         int offset = frames.size() * 28;
         frame.setLocation(18 + offset, 18 + offset);
+        frame.addComponentListener(new ComponentAdapter() {
+            @Override public void componentShown(ComponentEvent event) { visibilityListener.accept(key, true); }
+            @Override public void componentHidden(ComponentEvent event) { visibilityListener.accept(key, false); }
+        });
         desktop.add(frame);
         frames.put(key, frame);
+    }
+
+    void setWindowVisibilityListener(BiConsumer<String, Boolean> listener) {
+        visibilityListener = listener == null ? (key, open) -> { } : listener;
+        frames.forEach((key, frame) -> visibilityListener.accept(key, frame.isVisible()));
     }
 
     void showWindow(String key) {
