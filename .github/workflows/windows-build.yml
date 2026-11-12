@@ -1,0 +1,89 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows app
+    runs-on: windows-2025
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Build application
+        run: mvn --batch-mode --no-transfer-progress clean package
+
+      - name: Package portable app and installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appName = 'SetRetailXPrinter'
+          $mainJar = 'printer-1.0.0-SNAPSHOT.jar'
+          $staging = Join-Path $env:RUNNER_TEMP 'jpackage-input'
+
+          if (-not (Test-Path "target/$mainJar")) {
+            throw "Expected shaded application JAR was not created: target/$mainJar"
+          }
+
+          New-Item -ItemType Directory -Force -Path $staging, 'dist/portable', 'dist/installer' | Out-Null
+          Copy-Item "target/$mainJar" (Join-Path $staging $mainJar)
+
+          jpackage `
+            --type app-image `
+            --input $staging `
+            --dest 'dist/portable' `
+            --name $appName `
+            --main-jar $mainJar `
+            --main-class 'com.setretailx.printer.PrinterApp' `
+            --app-version '1.0.0'
+
+          jpackage `
+            --type exe `
+            --input $staging `
+            --dest 'dist/installer' `
+            --name $appName `
+            --main-jar $mainJar `
+            --main-class 'com.setretailx.printer.PrinterApp' `
+            --app-version '1.0.0' `
+            --win-menu `
+            --win-shortcut
+
+          Compress-Archive -Path "dist/portable/$appName" -DestinationPath "dist/$appName-portable-windows-x64.zip" -Force
+
+          $installer = Get-ChildItem 'dist/installer' -Filter '*.exe' | Select-Object -First 1
+          if (-not $installer) {
+            throw 'jpackage did not produce the Windows installer EXE.'
+          }
+          Move-Item $installer.FullName "dist/$appName-setup-windows-x64.exe" -Force
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: SetRetailXPrinter-windows-installer
+          path: dist/SetRetailXPrinter-setup-windows-x64.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload portable Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: SetRetailXPrinter-windows-portable
+          path: dist/SetRetailXPrinter-portable-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
