@@ -153,9 +153,27 @@ class LongTasksWindow(QWidget):
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
-        self.changes = QTableWidget(0, 5)
+        history = QGroupBox("История изменений цен")
+        history_layout = QVBoxLayout(history)
+        filters = QHBoxLayout()
+        filters.addWidget(QLabel("Поиск товара:"))
+        self.change_search = QLineEdit()
+        self.change_search.setPlaceholderText("Артикул, название или штрихкод")
+        self.change_search.textChanged.connect(self._refresh_changes)
+        filters.addWidget(self.change_search, 1)
+        filters.addWidget(QLabel("Тип цены:"))
+        self.price_type_filter = QComboBox()
+        self.price_type_filter.addItem("Все", "all")
+        self.price_type_filter.addItem("Обычная", "pricesMap")
+        self.price_type_filter.addItem("99", "prices99Map")
+        self.price_type_filter.currentIndexChanged.connect(self._refresh_changes)
+        filters.addWidget(self.price_type_filter)
+        history_layout.addLayout(filters)
+        self.changes_count = QLabel()
+        history_layout.addWidget(self.changes_count)
+        self.changes = QTableWidget(0, 7)
         self.changes.setHorizontalHeaderLabels(
-            ["Время", "Артикул", "Товар", "Штрихкод", "Изменившиеся цены"]
+            ["Когда", "Артикул", "Товар", "Штрихкод", "Тип цены", "Было", "Стало"]
         )
         self.changes.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.changes.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -165,8 +183,11 @@ class LongTasksWindow(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.changes, 1)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        history_layout.addWidget(self.changes, 1)
+        layout.addWidget(history, 1)
         self.timer = QTimer(self)
         self.timer.setInterval(5000)
         self.timer.timeout.connect(self.poll_scheduler)
@@ -239,42 +260,57 @@ class LongTasksWindow(QWidget):
         self.refresh_task_controls()
         self._refresh_changes()
 
-    def _refresh_changes(self):
+    def _refresh_changes(self, *_args):
         if not hasattr(self, "tasks_by_id"):
             return
-        selected_id = self.task_select.currentData()
-        changes = self.store.recent_changes(task_id=selected_id)
-        self.changes.setRowCount(len(changes))
-        for row, change in enumerate(changes):
-            values = (
-                datetime.fromtimestamp(change["detected_at"])
-                .astimezone()
-                .strftime("%Y-%m-%d %H:%M:%S"),
-                change["marking"],
-                change["name"],
-                change["barcode"],
-            )
-            for column, value in enumerate(values):
-                self.changes.setItem(row, column, QTableWidgetItem(str(value)))
+        changes = self.store.recent_changes(limit=1000)
+        query = self.change_search.text().strip().casefold()
+        selected_price_type = self.price_type_filter.currentData()
+        entries = []
+        for change in changes:
             try:
                 old_prices = json.loads(change["old_prices_json"])
                 new_prices = json.loads(change["new_prices_json"])
             except (TypeError, ValueError):
                 old_prices, new_prices = {}, {}
-            changed = []
             for label, key in (("Обычные", "pricesMap"), ("99", "prices99Map")):
+                if selected_price_type not in ("all", key):
+                    continue
                 old_map = old_prices.get(key, {})
                 new_map = new_prices.get(key, {})
                 for price_number in sorted(set(old_map) | set(new_map)):
                     old_value = old_map.get(price_number, "—")
                     new_value = new_map.get(price_number, "—")
                     if old_value != new_value:
-                        changed.append(
-                            f"{label} #{price_number}: {old_value} → {new_value}"
+                        searchable = " ".join(
+                            str(change.get(field, ""))
+                            for field in ("marking", "name", "barcode")
+                        ).casefold()
+                        if query and query not in searchable:
+                            continue
+                        entries.append(
+                            (
+                                change["detected_at"],
+                                datetime.fromtimestamp(change["detected_at"])
+                                .astimezone()
+                                .strftime("%d.%m.%Y %H:%M:%S"),
+                                change["marking"],
+                                change["name"],
+                                change["barcode"],
+                                f"{label} #{price_number}",
+                                old_value,
+                                new_value,
+                            )
                         )
-            price_item = QTableWidgetItem("; ".join(changed) or "Изменились цены")
-            price_item.setToolTip("; ".join(changed))
-            self.changes.setItem(row, 4, price_item)
+        entries.sort(key=lambda entry: entry[0], reverse=True)
+        self.changes.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            for column, value in enumerate(entry[1:]):
+                self.changes.setItem(row, column, QTableWidgetItem(str(value)))
+        self.changes_count.setText(
+            f"Показано изменений цен: {len(entries)}"
+            + (" · просмотрены последние 1000 событий" if len(changes) >= 1000 else "")
+        )
 
     def refresh_task_controls(self, *_args):
         if not hasattr(self, "tasks_by_id"):
