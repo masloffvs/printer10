@@ -47,6 +47,7 @@ from long_tasks import (
     run_price_snapshots,
 )
 from setretail_client import SetRetailXClient
+from scanned_probe import ScannedProbe
 
 
 def _format_price(value):
@@ -96,7 +97,7 @@ class PriceComparisonThread(QThread):
             if not isinstance(value, dict):
                 continue
             number = str(value.get("number", key))
-            if number not in ("1", "2", "4"):
+            if number not in ("1", "2", "3", "4"):
                 continue
             try:
                 result[number] = Decimal(str(value.get("value")))
@@ -155,7 +156,7 @@ class PriceComparisonThread(QThread):
                     promo = self._prices(remote, "prices99Map")
                     scan = scans_by_id[scan_id]
                     comparisons = {}
-                    for number in ("1", "2", "4"):
+                    for number in ("1", "2", "3", "4"):
                         scanned_price = scan["prices"].get(number)
                         available = [
                             price
@@ -180,28 +181,6 @@ class PriceComparisonThread(QThread):
         self.completed.emit(results)
 
 
-def _parse_price_scan(value):
-    """Parse the scanner's prefix plus barcode/price query-string format."""
-    text = str(value).strip()
-    barcode_match = re.search(r"barcode=(\d+)", text, re.IGNORECASE)
-    if not barcode_match:
-        raise ValueError("В строке сканера не найден barcode")
-    prices = {}
-    for number, raw in re.findall(
-        r"(?:^|&)(price[124])=([^&\s]+)", text, re.IGNORECASE
-    ):
-        try:
-            price = Decimal(raw.replace(",", "."))
-        except (InvalidOperation, ValueError):
-            raise ValueError(f"Некорректная цена {number}")
-        if not price.is_finite() or price < 0:
-            raise ValueError(f"Некорректная цена {number}")
-        prices[number[-1]] = price
-    if not prices:
-        raise ValueError("В строке сканера не найдены price1, price2 или price4")
-    return {"barcode": barcode_match.group(1), "prices": prices}
-
-
 def _scan_price_text(value):
     if value is None:
         return "—"
@@ -215,6 +194,7 @@ class PriceComparisonWindow(QWidget):
         super().__init__()
         self.printer = printer
         self.records = []
+        self.status_label = QLabel("Ожидаю сканирование")
         self.next_scan_id = 1
         self.pending = []
         self.worker = None
@@ -224,20 +204,11 @@ class PriceComparisonWindow(QWidget):
         self.flush_timer.timeout.connect(self.process_pending)
 
         layout = QVBoxLayout(self)
-        input_row = QHBoxLayout()
-        input_row.addWidget(QLabel("Сканируйте ценник:"))
-        self.scan_input = QLineEdit()
-        self.scan_input.setPlaceholderText(
-            r"\000026barcode=…&price1=…&price2=…&price4=…"
-        )
-        self.scan_input.returnPressed.connect(self.add_scan)
-        input_row.addWidget(self.scan_input, 1)
-        self.add_button = QPushButton("Добавить")
-        self.add_button.clicked.connect(self.add_scan)
-        input_row.addWidget(self.add_button)
-        layout.addLayout(input_row)
+        self.scan_subscription = QCheckBox("Принимать ценники из общего потока сканера")
+        self.scan_subscription.setChecked(True)
+        layout.addWidget(self.scan_subscription)
 
-        self.table = QTableWidget(0, 16)
+        self.table = QTableWidget(0, 20)
         self.table.setHorizontalHeaderLabels(
             [
                 "Статус",
@@ -245,15 +216,19 @@ class PriceComparisonWindow(QWidget):
                 "Штрихкод",
                 "Ярлык 1",
                 "Ярлык 2",
+                "Ярлык 3",
                 "Ярлык 4",
                 "Обычная 1",
                 "Обычная 2",
+                "Обычная 3",
                 "Обычная 4",
                 "Акция 1",
                 "Акция 2",
+                "Акция 3",
                 "Акция 4",
                 "Сверка 1",
                 "Сверка 2",
+                "Сверка 3",
                 "Сверка 4",
                 "Результат",
             ]
@@ -265,35 +240,42 @@ class PriceComparisonWindow(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        for column in (0, *range(3, 16)):
+        for column in (0, *range(3, 20)):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
-        self.status_label = QLabel("Ожидаю сканирование")
         footer.addWidget(self.status_label, 1)
         self.clear_button = QPushButton("Очистить результаты")
         self.clear_button.clicked.connect(self.clear_results)
         footer.addWidget(self.clear_button)
         layout.addLayout(footer)
 
-    def add_scan(self):
-        text = self.scan_input.text()
-        if not text.strip():
+    def receive_scan(self, probe):
+        if not isinstance(probe, ScannedProbe) or not probe.has_price_data:
             return
         try:
-            scan = _parse_price_scan(text)
+            prices = probe.prices_as_decimals()
         except ValueError as error:
             self.status_label.setText(str(error))
             return
+        scan = {"barcode": probe.barcode, "prices": prices, "probe": probe}
         scan.update(id=self.next_scan_id, status="pending")
         self.next_scan_id += 1
         self.records.append(scan)
+        if not probe.barcode:
+            scan.update(status="error", error="В скане ценника не заполнен barcode")
+            self.refresh_table()
+            self.status_label.setText(scan["error"])
+            return
         self.pending.append(scan)
-        self.scan_input.clear()
         self.refresh_table()
         self.status_label.setText(f"В очереди проверки: {len(self.pending)}")
         self.flush_timer.start()
+
+    @staticmethod
+    def accepts_scan(probe):
+        return isinstance(probe, ScannedProbe) and probe.has_price_data
 
     def process_pending(self):
         if self.worker is not None and self.worker.isRunning():
@@ -382,22 +364,28 @@ class PriceComparisonWindow(QWidget):
                 record["barcode"],
                 *[
                     _scan_price_text(record["prices"].get(number))
-                    for number in ("1", "2", "4")
+                    for number in ("1", "2", "3", "4")
                 ],
-                *[_scan_price_text(normal.get(number)) for number in ("1", "2", "4")],
-                *[_scan_price_text(promo.get(number)) for number in ("1", "2", "4")],
+                *[
+                    _scan_price_text(normal.get(number))
+                    for number in ("1", "2", "3", "4")
+                ],
+                *[
+                    _scan_price_text(promo.get(number))
+                    for number in ("1", "2", "3", "4")
+                ],
                 *[
                     {True: "✓", False: "✗", None: "—"}.get(comparison.get(number), "—")
-                    for number in ("1", "2", "4")
+                    for number in ("1", "2", "3", "4")
                 ],
                 outcome,
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                if column in (0, *range(3, 16)):
+                if column in (0, *range(3, 20)):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column in (12, 13, 14):
-                    marker = comparison.get(str(column - 11))
+                if column in (15, 16, 17, 18):
+                    marker = comparison.get(str(column - 14))
                     if marker is True:
                         item.setForeground(Qt.GlobalColor.darkGreen)
                     elif marker is False:
@@ -777,19 +765,33 @@ class LongTasksWindow(QWidget):
 
 
 class ScannerWindow(QWidget):
-    """Barcode scanning and format assignment controls."""
+    """The single input point for scans, plus defaults for the print queue."""
 
     def __init__(self, printer):
         super().__init__()
         self.printer = printer
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
-        self.barcode_input = QLineEdit()
-        self.barcode_input.setPlaceholderText("Сканируйте или введите штрихкод")
-        self.barcode_input.returnPressed.connect(self.lookup_barcode)
-        form.addRow("Штрихкод:", self.barcode_input)
+        self.scan_subscription = QCheckBox(
+            "Добавлять товары из общего потока в очередь печати"
+        )
+        self.scan_subscription.setChecked(True)
+        layout.addWidget(self.scan_subscription)
 
+        input_row = QHBoxLayout()
+        input_row.addWidget(QLabel("Общий поток сканера:"))
+        self.scan_input = QLineEdit()
+        self.scan_input.setPlaceholderText(
+            "Сканируйте сюда; Enter отправит всем подписанным окнам"
+        )
+        self.scan_input.returnPressed.connect(self.submit_scan)
+        input_row.addWidget(self.scan_input, 1)
+        self.send_button = QPushButton("Передать скан")
+        self.send_button.clicked.connect(self.submit_scan)
+        input_row.addWidget(self.send_button)
+        layout.addLayout(input_row)
+
+        form = QFormLayout()
         self.format_combo = QComboBox()
         for key, info in PRINT_FORMATS.items():
             self.format_combo.addItem(info["name"], key)
@@ -801,9 +803,6 @@ class ScannerWindow(QWidget):
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
-        self.lookup_button = QPushButton("Найти и добавить")
-        self.lookup_button.clicked.connect(self.lookup_barcode)
-        buttons.addWidget(self.lookup_button)
         self.assign_all_button = QPushButton("Назначить всем неназначенным")
         self.assign_all_button.clicked.connect(self.assign_unassigned)
         buttons.addWidget(self.assign_all_button)
@@ -816,27 +815,39 @@ class ScannerWindow(QWidget):
         layout.addWidget(self.status_label)
 
     def set_busy(self, busy, message=None):
-        self.lookup_button.setEnabled(not busy)
-        self.barcode_input.setEnabled(not busy)
+        self.send_button.setEnabled(True)
         self.assign_all_button.setEnabled(not busy)
         if message:
             self.status_label.setText(message)
 
-    def lookup_barcode(self):
-        barcode = retail.extract_barcode(self.barcode_input.text())
-        if not barcode or retail.active_session is None:
+    def submit_scan(self):
+        text = self.scan_input.text().strip()
+        if not text:
             return
-        self.barcode_input.clear()
+        self.scan_input.clear()
+        self.printer.dispatch_scan(ScannedProbe.from_text(text))
+        self.scan_input.setFocus()
+
+    def receive_scan(self, probe):
+        barcode = probe.barcode
+        if not barcode:
+            return
+        if retail.active_session is None:
+            self.status_label.setText("Ожидаю подключения к SetRetailX")
+            return
         self.set_busy(True, f"Ищем товар {barcode}…")
         self.printer.start_task(
             lambda: retail.lookup_product(barcode),
             lambda product: self.product_found(product, barcode),
         )
 
+    @staticmethod
+    def accepts_scan(probe):
+        return isinstance(probe, ScannedProbe) and not probe.has_price_data
+
     def product_found(self, product, barcode):
         if not product:
             self.set_busy(False, f"Штрихкод {barcode} не найден.")
-            self.barcode_input.setFocus()
             return
         entry = {
             "st_code": product["st_code"],
@@ -853,7 +864,6 @@ class ScannerWindow(QWidget):
         self.printer.refresh_queue()
         source = "локальная база" if product["source"] == "offline" else "онлайн"
         self.set_busy(False, f"Добавлен товар из {source}: {product['name']}")
-        self.barcode_input.setFocus()
 
     def assign_unassigned(self):
         key = self.format_combo.currentData()
@@ -874,9 +884,14 @@ class ProductSearchWindow(QWidget):
         self.printer = printer
 
         layout = QVBoxLayout(self)
+        self.scan_subscription = QCheckBox(
+            "Искать товары по штрихкоду из общего потока"
+        )
+        self.scan_subscription.setChecked(False)
+        layout.addWidget(self.scan_subscription)
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Название, артикул или штрихкод")
+        self.search_input.setPlaceholderText("Название или артикул (ручной поиск)")
         self.search_input.returnPressed.connect(self.search)
         search_row.addWidget(self.search_input, 1)
         self.search_button = QPushButton("Найти")
@@ -923,7 +938,10 @@ class ProductSearchWindow(QWidget):
             self.add_button.setEnabled(bool(self.table.selectedItems()))
 
     def search(self):
-        query = self.search_input.text().strip()
+        self.search_query(self.search_input.text())
+
+    def search_query(self, query):
+        query = query.strip()
         if not query:
             self.result_label.setText("Введите название, артикул или штрихкод.")
             return
@@ -933,6 +951,16 @@ class ProductSearchWindow(QWidget):
             lambda: retail.search_products(query),
             self.search_finished,
         )
+
+    def receive_scan(self, probe):
+        barcode = probe.barcode
+        if not barcode:
+            return
+        self.search_query(barcode)
+
+    @staticmethod
+    def accepts_scan(probe):
+        return isinstance(probe, ScannedProbe) and not probe.has_price_data
 
     def search_finished(self, products):
         self.products = products
@@ -1566,12 +1594,14 @@ class PrinterWindow(QMainWindow):
         super().__init__()
         self.entries = []
         self.task = None
+        self.pending_tasks = []
         self.is_busy = False
         self.print_history = PrintHistory()
         self.task_store = TaskStore(TASKS_DB_PATH)
         self.setretail_client = None
         self.active_print_batch_id = None
         self.subwindows = {}
+        self.scan_receivers = []
         self.exchange_bridge = ExchangeLogBridge(self)
         self.exchange_log = ExchangeLogWindow()
         self.exchange_bridge.event_received.connect(self.exchange_log.append_event)
@@ -1596,7 +1626,7 @@ class PrinterWindow(QMainWindow):
         self._add_internal_window(
             "exchange", "Обмен с SetRetailX", self.exchange_log, (800, 450)
         )
-        self._add_internal_window("scanner", "Сканирование", self.scanner, (430, 230))
+        self._add_internal_window("scanner", "Единый сканер", self.scanner, (560, 260))
         self._add_internal_window(
             "price_comparison", "Сверка ценников", self.price_comparison, (1250, 600)
         )
@@ -1614,6 +1644,7 @@ class PrinterWindow(QMainWindow):
         self._create_menus()
         self._create_toolbar()
         self.refresh_queue()
+        self.show_subwindow("scanner")
 
         self.set_busy(True, "Авторизация в SetRetailX…")
         self.start_task(get_authenticated_session, self.auth_ready)
@@ -1627,6 +1658,8 @@ class PrinterWindow(QMainWindow):
         self.mdi.addSubWindow(subwindow)
         subwindow.hide()
         self.subwindows[key] = subwindow
+        if hasattr(widget, "scan_subscription") and hasattr(widget, "receive_scan"):
+            self.scan_receivers.append(widget)
         return subwindow
 
     def _create_menus(self):
@@ -1637,7 +1670,7 @@ class PrinterWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
         view_menu = self.menuBar().addMenu("Вид")
-        self._add_window_action(view_menu, "Сканирование", "scanner")
+        self._add_window_action(view_menu, "Единый сканер", "scanner")
         self._add_window_action(view_menu, "Сверка ценников", "price_comparison")
         self._add_window_action(view_menu, "Поиск товаров", "search")
         self._add_window_action(view_menu, "Очередь печати", "queue")
@@ -1665,7 +1698,7 @@ class PrinterWindow(QMainWindow):
     def _create_toolbar(self):
         toolbar = self.addToolBar("Окна")
         toolbar.setMovable(False)
-        toolbar.addAction("Сканирование", lambda: self.show_subwindow("scanner"))
+        toolbar.addAction("Единый сканер", lambda: self.show_subwindow("scanner"))
         toolbar.addAction(
             "Сверка ценников", lambda: self.show_subwindow("price_comparison")
         )
@@ -1725,6 +1758,9 @@ class PrinterWindow(QMainWindow):
         )
 
     def start_task(self, function, on_success):
+        if self.task is not None:
+            self.pending_tasks.append((function, on_success))
+            return
         self.task = TaskThread(function, self)
         self.task.succeeded.connect(on_success)
         self.task.failed.connect(self.task_failed)
@@ -1764,7 +1800,8 @@ class PrinterWindow(QMainWindow):
         message = f"Готово · локальная база: {DB_PATH.name}"
         self.scanner.status_label.setText(message)
         self.set_busy(False, message)
-        self.scanner.barcode_input.setFocus()
+        self.show_subwindow("scanner")
+        self.scanner.scan_input.setFocus()
 
     def task_failed(self, error):
         if self.active_print_batch_id is not None:
@@ -1779,6 +1816,28 @@ class PrinterWindow(QMainWindow):
 
     def task_finished(self):
         self.task = None
+        if self.pending_tasks:
+            function, on_success = self.pending_tasks.pop(0)
+            self.set_busy(True, "Обрабатываем следующий запрос…")
+            self.start_task(function, on_success)
+
+    def dispatch_scan(self, probe):
+        if not isinstance(probe, ScannedProbe):
+            probe = ScannedProbe.from_text(probe)
+        subscribed = [
+            receiver
+            for receiver in self.scan_receivers
+            if receiver.scan_subscription.isChecked()
+            and (not hasattr(receiver, "accepts_scan") or receiver.accepts_scan(probe))
+        ]
+        if not subscribed:
+            self.scanner.status_label.setText(
+                "Для этого типа скана нет подписанных окон-получателей"
+            )
+            return
+        for receiver in subscribed:
+            receiver.receive_scan(probe)
+        self.statusBar().showMessage(f"Скан передан в окна: {len(subscribed)}", 3000)
 
     def closeEvent(self, event):
         self.long_tasks_window.timer.stop()
@@ -1839,7 +1898,7 @@ class PrinterWindow(QMainWindow):
         if failures:
             message += f" · ошибок: {len(failures)}"
         self.set_busy(False, message)
-        self.scanner.barcode_input.setFocus()
+        self.scanner.scan_input.setFocus()
 
 
 def extract_barcode(user_input):
