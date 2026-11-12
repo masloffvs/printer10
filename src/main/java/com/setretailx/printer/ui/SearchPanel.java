@@ -18,6 +18,7 @@ import java.awt.FlowLayout;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.List;
+import java.util.function.Consumer;
 
 /** Local catalog search controls and result table. */
 @SuppressWarnings("serial")
@@ -26,8 +27,9 @@ final class SearchPanel extends JPanel {
     private final DefaultTableModel model = readOnlyModel("Товар", "Артикул", "Штрихкод", "Цена", "Остаток");
     private final JTable table = new JTable(model);
     private final JLabel status = new JLabel("Введите название, артикул или штрихкод для локального поиска.");
+    private List<Product> results = List.of();
 
-    SearchPanel(Runnable search, Runnable selectionChanged, Runnable addSelected) {
+    SearchPanel(Runnable search, Runnable selectionChanged, Runnable addSelected, Consumer<Product> openProduct) {
         super(new BorderLayout(8, 8));
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         JPanel top = new JPanel(new BorderLayout(8, 8));
@@ -48,12 +50,27 @@ final class SearchPanel extends JPanel {
         JMenuItem addToQueue = new JMenuItem("Добавить выбранные в очередь печати");
         addToQueue.addActionListener(event -> addSelected.run());
         contextMenu.add(addToQueue);
+        int[] popupRow = {-1};
+        JMenuItem openCard = new JMenuItem("Открыть карточку товара");
+        openCard.addActionListener(event -> {
+            int row = popupRow[0] >= 0 ? popupRow[0] : table.getSelectedRow();
+            Product product = row < 0 ? null : productAt(row);
+            if (product != null) openProduct.accept(product);
+        });
+        contextMenu.add(openCard);
         table.addMouseListener(new MouseAdapter() {
             private void showMenu(MouseEvent event) {
                 if (!event.isPopupTrigger()) return;
                 int row = table.rowAtPoint(event.getPoint());
-                if (row >= 0 && !table.isRowSelected(row)) table.setRowSelectionInterval(row, row);
-                if (table.getSelectedRowCount() > 0) contextMenu.show(table, event.getX(), event.getY());
+                if (row < 0) return;
+                if (!table.isRowSelected(row)) table.setRowSelectionInterval(row, row);
+                popupRow[0] = row;
+                contextMenu.show(table, event.getX(), event.getY());
+            }
+            @Override public void mouseClicked(MouseEvent event) {
+                if (event.getClickCount() != 2 || !javax.swing.SwingUtilities.isLeftMouseButton(event)) return;
+                int row = table.rowAtPoint(event.getPoint());
+                if (row >= 0 && row < model.getRowCount()) openProduct.accept(productAt(row));
             }
             @Override public void mousePressed(MouseEvent event) { showMenu(event); }
             @Override public void mouseReleased(MouseEvent event) { showMenu(event); }
@@ -72,12 +89,18 @@ final class SearchPanel extends JPanel {
     void setStatus(String message) { status.setText(message); }
 
     void showResults(List<Product> products) {
+        results = List.copyOf(products);
         model.setRowCount(0);
-        for (Product product : products) {
+        for (Product product : results) {
             model.addRow(new Object[]{product.name(), product.vendorCode(), product.barcode(),
                     product.price() == null ? "—" : product.price().format(),
                     product.totalQuantity().isEmpty() ? "—" : product.totalQuantity()});
         }
+    }
+
+    private Product productAt(int row) {
+        int modelRow = table.convertRowIndexToModel(row);
+        return modelRow >= 0 && modelRow < results.size() ? results.get(modelRow) : null;
     }
 
     private static DefaultTableModel readOnlyModel(String... columns) {

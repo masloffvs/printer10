@@ -23,7 +23,7 @@ public final class MainWindow extends JFrame {
     private final ScannerPanel scanner = new ScannerPanel(this::submitScan);
     private final ComparisonPanel comparison = new ComparisonPanel();
     private final SearchPanel search = new SearchPanel(this::search, this::updateSearchSelection,
-            this::addSelectedSearchResults);
+            this::addSelectedSearchResults, this::showProductCard);
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
             this::clearQueue);
     private final ExchangePanel exchange = new ExchangePanel();
@@ -143,6 +143,12 @@ public final class MainWindow extends JFrame {
         }
         refreshQueue();
         status.setText("Добавлено товаров в очередь: " + selectedCount);
+    }
+
+    private void showProductCard(Product product) {
+        if (product == null) return;
+        ProductCardDialog dialog = new ProductCardDialog(this, product);
+        dialog.setVisible(true);
     }
 
     private void assignSelected() {

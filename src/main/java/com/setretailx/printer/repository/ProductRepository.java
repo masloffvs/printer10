@@ -11,8 +11,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Exact barcode lookup and local catalog search against all_products.sqlite. */
@@ -64,7 +66,7 @@ public final class ProductRepository {
     }
 
     private Set<String> columns(Connection connection) throws SQLException {
-        Set<String> columns = new HashSet<>();
+        Set<String> columns = new LinkedHashSet<>();
         try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery("PRAGMA table_info(products)")) {
             while (rows.next()) columns.add(rows.getString("name").toLowerCase(java.util.Locale.ROOT));
         }
@@ -73,12 +75,22 @@ public final class ProductRepository {
 
     private String selectColumns(Set<String> columns) {
         StringBuilder select = new StringBuilder("SELECT ");
-        for (String column : List.of("product_id", "name", "vendor_code", "barcode", "uom", "price", "total_qty")) {
+        List<String> standard = List.of("product_id", "name", "vendor_code", "barcode", "uom", "price", "total_qty");
+        Set<String> selected = new LinkedHashSet<>();
+        for (String column : standard) {
             if (select.length() > 7) select.append(", ");
-            select.append(columns.contains(column) ? "\"" + column + "\"" : "NULL")
+            select.append(columns.contains(column) ? quote(column) : "NULL")
                     .append(" AS \"").append(column).append('"');
+            selected.add(column);
+        }
+        for (String column : columns) {
+            if (selected.add(column)) select.append(", ").append(quote(column));
         }
         return select.toString();
+    }
+
+    private static String quote(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     private Connection connect() throws SQLException {
@@ -89,8 +101,15 @@ public final class ProductRepository {
     }
 
     private Product product(ResultSet row) throws SQLException {
+        Map<String, String> details = new LinkedHashMap<>();
+        var metadata = row.getMetaData();
+        for (int i = 1; i <= metadata.getColumnCount(); i++) {
+            String name = metadata.getColumnLabel(i);
+            String value = row.getString(i);
+            if (value != null && !value.isBlank()) details.put(name, value);
+        }
         return new Product(row.getString("product_id"), row.getString("name"),
                 row.getString("vendor_code"), row.getString("barcode"), row.getString("uom"),
-                "offline", Price.fromDatabase(row.getString("price")), row.getString("total_qty"));
+                "offline", Price.fromDatabase(row.getString("price")), row.getString("total_qty"), details);
     }
 }
