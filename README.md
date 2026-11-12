@@ -15,7 +15,7 @@ mvn clean package
 java -jar target/printer-1.0.0-SNAPSHOT.jar
 ```
 
-On first launch FlatLaf is installed before Swing components are created. SetRetailX credentials can be supplied through environment variables or a root `.env` file (same variable names as `.env.example`).
+On first launch the dark FlatLaf theme is installed before Swing components are created. SetRetailX credentials can be supplied through environment variables or a root `.env` file (same variable names as `.env.example`).
 
 ## Windows builds
 
@@ -28,6 +28,6 @@ Both packages include a Java runtime. The workflow stages only the application J
 
 ## Migration status
 
-- Implemented: Swing/FlatLaf application shell, shared scanner routing, `ScannedProbe` parsing and price validation, asynchronous local catalog search, barcode lookup, queue, format and print-run assignment.
+- Implemented: Swing/FlatLaf MDI workspace with independently movable internal windows and separate Java classes for the workspace and scanner, comparison, search, queue, and exchange screens; shared scanner routing, `ScannedProbe` parsing and price validation, asynchronous local catalog search, barcode lookup, queue, format and print-run assignment.
 - In progress: server authentication and JSON-RPC client, actual price comparison and printing, print history, product cards, and persistent scheduled tasks.
 - Python source is intentionally retained until the remaining behavior has been ported and verified.
