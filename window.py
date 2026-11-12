@@ -1,10 +1,13 @@
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
+import json
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QFrame,
     QFormLayout,
     QGridLayout,
@@ -32,8 +35,16 @@ from PySide6.QtWidgets import (
 import auth
 from auth import get_authenticated_session
 import retail
-from config import DB_PATH, PRINT_FORMATS
+from config import DB_PATH, PRINT_FORMATS, TASKS_DB_PATH
 from print_history import PrintHistory
+from long_tasks import (
+    DISCOVERY_TASK_ID,
+    SNAPSHOT_TASK_ID,
+    TaskStore,
+    run_candidate_discovery,
+    run_price_snapshots,
+)
+from setretail_client import SetRetailXClient
 
 
 def _format_price(value):
@@ -84,6 +95,212 @@ class ExchangeLogWindow(QWidget):
         )
         scrollbar = self.output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+
+class LongTaskRunner(QThread):
+    completed = Signal(str, str)
+
+    def __init__(self, store, client, task_id, parent=None):
+        super().__init__(parent)
+        self.store = store
+        self.client = client
+        self.task_id = task_id
+
+    def run(self):
+        try:
+            task_functions = {
+                DISCOVERY_TASK_ID: run_candidate_discovery,
+                SNAPSHOT_TASK_ID: run_price_snapshots,
+            }
+            result = task_functions[self.task_id](self.store, self.client)
+            self.store.finish(self.task_id, "Успешно", result)
+            self.completed.emit("Успешно", result)
+        except Exception as error:
+            result = f"{type(error).__name__}: {error}"
+            self.store.finish(self.task_id, "Ошибка", result)
+            self.completed.emit("Ошибка", result)
+
+
+class LongTasksWindow(QWidget):
+    """Controls persisted schedules and shows the latest price-monitor results."""
+
+    def __init__(self, printer):
+        super().__init__()
+        self.printer = printer
+        self.store = printer.task_store
+        self.runner = None
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+        self.task_select = QComboBox()
+        self.task_select.addItem("Поиск NearlyPriceChanging", DISCOVERY_TASK_ID)
+        self.task_select.addItem("Снимки и сравнение цен", SNAPSHOT_TASK_ID)
+        self.task_select.currentIndexChanged.connect(self.on_task_selected)
+        controls.addWidget(self.task_select)
+        self.enabled = QCheckBox("Включена")
+        controls.addWidget(self.enabled)
+        controls.addWidget(QLabel("Интервал, минут:"))
+        self.interval = QSpinBox()
+        self.interval.setRange(1, 10080)
+        controls.addWidget(self.interval)
+        self.save_button = QPushButton("Сохранить расписание")
+        self.save_button.clicked.connect(self.save_schedule)
+        controls.addWidget(self.save_button)
+        self.run_button = QPushButton("Запустить сейчас")
+        self.run_button.clicked.connect(self.run_now)
+        controls.addWidget(self.run_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self.changes = QTableWidget(0, 5)
+        self.changes.setHorizontalHeaderLabels(
+            ["Время", "Артикул", "Товар", "Штрихкод", "Изменившиеся цены"]
+        )
+        self.changes.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.changes.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.changes.verticalHeader().setVisible(False)
+        header = self.changes.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.changes, 1)
+        self.timer = QTimer(self)
+        self.timer.setInterval(5000)
+        self.timer.timeout.connect(self.poll_scheduler)
+        self.refresh()
+
+    def start(self):
+        self.timer.start()
+        self.poll_scheduler()
+
+    def save_schedule(self):
+        self.store.configure(
+            self.task_select.currentData(),
+            self.enabled.isChecked(),
+            self.interval.value() * 60,
+        )
+        self.refresh()
+        self.poll_scheduler()
+
+    def run_now(self):
+        self._start_task(force=True)
+
+    def poll_scheduler(self):
+        if self.runner is not None:
+            return
+        task = self.store.claim_due()
+        if task is not None:
+            self._launch(task)
+
+    def _start_task(self, force=False):
+        if self.runner is not None:
+            return
+        task_id = self.task_select.currentData()
+        task = self.store.force_claim(task_id) if force else self.store.claim_due()
+        if task is not None:
+            self._launch(task)
+
+    def _launch(self, _task):
+        client = self.printer.setretail_client
+        if client is None:
+            self.store.finish(
+                _task["task_id"], "Ошибка", "Нет активной сессии SetRetailX."
+            )
+            self.refresh()
+            return
+        self.runner = LongTaskRunner(self.store, client, _task["task_id"], self)
+        self.runner.completed.connect(self.task_completed)
+        self.runner.finished.connect(self.runner_finished)
+        self.runner.finished.connect(self.runner.deleteLater)
+        self.run_button.setEnabled(False)
+        self.status_label.setText("Задача выполняется…")
+        self.runner.start()
+
+    @Slot(str, str)
+    def task_completed(self, status, result):
+        self.refresh()
+
+    @Slot()
+    def runner_finished(self):
+        self.runner = None
+        self.run_button.setEnabled(True)
+        self.refresh()
+
+    def refresh(self):
+        tasks = self.store.list_tasks()
+        self.tasks_by_id = {item["task_id"]: item for item in tasks}
+        self.refresh_task_controls()
+        self._refresh_changes()
+
+    def on_task_selected(self, *_args):
+        self.refresh_task_controls()
+        self._refresh_changes()
+
+    def _refresh_changes(self):
+        if not hasattr(self, "tasks_by_id"):
+            return
+        selected_id = self.task_select.currentData()
+        changes = self.store.recent_changes(task_id=selected_id)
+        self.changes.setRowCount(len(changes))
+        for row, change in enumerate(changes):
+            values = (
+                datetime.fromtimestamp(change["detected_at"])
+                .astimezone()
+                .strftime("%Y-%m-%d %H:%M:%S"),
+                change["marking"],
+                change["name"],
+                change["barcode"],
+            )
+            for column, value in enumerate(values):
+                self.changes.setItem(row, column, QTableWidgetItem(str(value)))
+            try:
+                old_prices = json.loads(change["old_prices_json"])
+                new_prices = json.loads(change["new_prices_json"])
+            except (TypeError, ValueError):
+                old_prices, new_prices = {}, {}
+            changed = []
+            for label, key in (("Обычные", "pricesMap"), ("99", "prices99Map")):
+                old_map = old_prices.get(key, {})
+                new_map = new_prices.get(key, {})
+                for price_number in sorted(set(old_map) | set(new_map)):
+                    old_value = old_map.get(price_number, "—")
+                    new_value = new_map.get(price_number, "—")
+                    if old_value != new_value:
+                        changed.append(
+                            f"{label} #{price_number}: {old_value} → {new_value}"
+                        )
+            price_item = QTableWidgetItem("; ".join(changed) or "Изменились цены")
+            price_item.setToolTip("; ".join(changed))
+            self.changes.setItem(row, 4, price_item)
+
+    def refresh_task_controls(self, *_args):
+        if not hasattr(self, "tasks_by_id"):
+            return
+        task = self.tasks_by_id.get(self.task_select.currentData())
+        if task is not None:
+            self.enabled.setChecked(bool(task["enabled"]))
+            self.interval.setValue(max(1, int(task["interval_seconds"]) // 60))
+            next_run = (
+                datetime.fromtimestamp(task["next_run_at"])
+                .astimezone()
+                .strftime("%Y-%m-%d %H:%M:%S")
+                if task["next_run_at"]
+                else "не запланирован"
+            )
+            last_run = (
+                datetime.fromtimestamp(task["last_finished_at"])
+                .astimezone()
+                .strftime("%Y-%m-%d %H:%M:%S")
+                if task["last_finished_at"]
+                else "ещё не выполнялась"
+            )
+            self.status_label.setText(
+                f"Статус: {task['last_status']} · последнее выполнение: {last_run} · "
+                f"следующий запуск: {next_run}\nРезультат: {task['last_result'] or '—'}"
+            )
 
 
 class ScannerWindow(QWidget):
@@ -878,6 +1095,8 @@ class PrinterWindow(QMainWindow):
         self.task = None
         self.is_busy = False
         self.print_history = PrintHistory()
+        self.task_store = TaskStore(TASKS_DB_PATH)
+        self.setretail_client = None
         self.active_print_batch_id = None
         self.subwindows = {}
         self.exchange_bridge = ExchangeLogBridge(self)
@@ -899,6 +1118,7 @@ class PrinterWindow(QMainWindow):
         self.product_search = ProductSearchWindow(self)
         self.queue = QueueWindow(self)
         self.print_history_window = PrintHistoryWindow(self)
+        self.long_tasks_window = LongTasksWindow(self)
         self._add_internal_window(
             "exchange", "Обмен с SetRetailX", self.exchange_log, (800, 450)
         )
@@ -909,6 +1129,9 @@ class PrinterWindow(QMainWindow):
         self._add_internal_window("queue", "Очередь печати", self.queue, (820, 480))
         self._add_internal_window(
             "history", "История печати", self.print_history_window, (760, 420)
+        )
+        self._add_internal_window(
+            "tasks", "Долгоживущие задачи", self.long_tasks_window, (950, 560)
         )
 
         self._create_menus()
@@ -942,6 +1165,7 @@ class PrinterWindow(QMainWindow):
         self._add_window_action(view_menu, "Очередь печати", "queue")
         self._add_window_action(view_menu, "Обмен с SetRetailX", "exchange")
         self._add_window_action(view_menu, "История печати", "history")
+        self._add_window_action(view_menu, "Долгоживущие задачи", "tasks")
 
         window_menu = self.menuBar().addMenu("Окна")
         window_menu.addAction("Каскадом", self.mdi.cascadeSubWindows)
@@ -968,6 +1192,7 @@ class PrinterWindow(QMainWindow):
         toolbar.addAction("Очередь печати", lambda: self.show_subwindow("queue"))
         toolbar.addAction("Обмен с SetRetailX", lambda: self.show_subwindow("exchange"))
         toolbar.addAction("История печати", lambda: self.show_subwindow("history"))
+        toolbar.addAction("Долгие задачи", lambda: self.show_subwindow("tasks"))
         toolbar.addSeparator()
         toolbar.addAction("Каскадом", self.mdi.cascadeSubWindows)
         toolbar.addAction("Плиткой", self.mdi.tileSubWindows)
@@ -1046,6 +1271,13 @@ class PrinterWindow(QMainWindow):
         if retail.active_session is None or retail.session_token is None:
             self.task_failed("Авторизация не вернула сессию или токен.")
             return
+        self.setretail_client = SetRetailXClient(
+            retail.active_session,
+            retail.session_token,
+            retail.exchange_event_handler,
+        )
+        self.long_tasks_window.refresh()
+        self.long_tasks_window.start()
         message = f"Готово · локальная база: {DB_PATH.name}"
         self.scanner.status_label.setText(message)
         self.set_busy(False, message)
@@ -1064,6 +1296,25 @@ class PrinterWindow(QMainWindow):
 
     def task_finished(self):
         self.task = None
+
+    def closeEvent(self, event):
+        self.long_tasks_window.timer.stop()
+        runner = self.long_tasks_window.runner
+        if runner is not None and runner.isRunning():
+            answer = QMessageBox.question(
+                self,
+                "Долгоживущая задача выполняется",
+                "Дождаться завершения текущей задачи перед выходом?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.long_tasks_window.timer.start()
+                event.ignore()
+                return
+            self.statusBar().showMessage("Ожидаем завершения текущей задачи…")
+            runner.wait()
+        event.accept()
 
     def refresh_queue(self):
         self.queue.refresh()

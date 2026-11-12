@@ -39,14 +39,6 @@ def _emit_exchange_event(title, details, tone="info"):
         pass
 
 
-def _safe_rpc_url():
-    parsed = urlparse(URL_RPC)
-    hostname = parsed.hostname or ""
-    if parsed.port:
-        hostname = f"{hostname}:{parsed.port}"
-    return parsed._replace(netloc=hostname, params="", query="", fragment="").geturl()
-
-
 URL_RPC = os.getenv("SETRETAILX_RPC_URL", "").strip()
 _parsed_rpc_url = urlparse(URL_RPC)
 HOST_DOMAIN = _parsed_rpc_url.hostname or ""
@@ -113,39 +105,18 @@ def get_authenticated_session(username=None, password=None):
         "params": [username, password, "MAIN"],
     }
 
-    safe_payload = dict(login_payload)
-    safe_payload["params"] = ["[скрыто]", "[скрыто]", "MAIN"]
-    _emit_exchange_event(
-        "Отправлен запрос: login",
-        f"URL: {_safe_rpc_url()}\n\n"
-        f"{json.dumps(safe_payload, ensure_ascii=False, indent=2)}",
-    )
     print("[Auth] Отправка запроса на авторизацию...")
     try:
-        response = session.post(URL_RPC, json=login_payload, timeout=10)
-        try:
-            response_body = response.json()
-            if isinstance(response_body, dict) and "result" in response_body:
-                response_body = dict(response_body)
-                response_body["result"] = "[скрыто: токен авторизации]"
-            response_text = json.dumps(
-                response_body, ensure_ascii=False, indent=2, default=str
-            )
-        except ValueError:
-            response_text = (
-                f"[ответ не в формате JSON; длина: {len(response.content)} байт]"
-            )
-        _emit_exchange_event(
-            f"Ответ SetRetailX: HTTP {response.status_code}",
-            f"Метод: login\n"
-            f"Время ответа: {response.elapsed.total_seconds():.2f} с\n\n"
-            f"{response_text}",
-            "success" if response.ok else "error",
-        )
-        response.raise_for_status()
-        data = response.json()
+        # Import lazily to avoid a module cycle: the client reads URL_RPC and
+        # BASE_URL from this module.
+        from setretail_client import SetRetailXClient
 
-        if "JsonRpcSuccessResponse" in data.get("@class", ""):
+        data = SetRetailXClient(session, event_handler=_emit_exchange_event).rpc(
+            login_payload, timeout=10
+        )
+        if isinstance(data, dict) and "JsonRpcSuccessResponse" in data.get(
+            "@class", ""
+        ):
             raw_token = data.get("result")
             if raw_token:
                 session.cookies.set(
@@ -159,32 +130,6 @@ def get_authenticated_session(username=None, password=None):
                 return session, raw_token
 
         raise ValueError("Сервер отклонил авторизацию или вернул неожиданный ответ.")
-    except requests.exceptions.RequestException as error:
-        safe_error = str(error)
-        if username:
-            safe_error = safe_error.replace(username, "[скрыто]")
-        if password:
-            safe_error = safe_error.replace(password, "[скрыто]")
-        if URL_RPC:
-            safe_error = safe_error.replace(URL_RPC, _safe_rpc_url())
-        _emit_exchange_event(
-            "Ошибка запроса: login",
-            f"{type(error).__name__}: {safe_error}",
-            "error",
-        )
-        print(f"[Auth] Ошибка сети при авторизации: {error}")
-        raise
     except Exception as error:
-        safe_error = str(error)
-        if username:
-            safe_error = safe_error.replace(username, "[скрыто]")
-        if password:
-            safe_error = safe_error.replace(password, "[скрыто]")
-        if URL_RPC:
-            safe_error = safe_error.replace(URL_RPC, _safe_rpc_url())
-        _emit_exchange_event(
-            "Ошибка обмена: login",
-            f"{type(error).__name__}: {safe_error}",
-            "error",
-        )
+        print(f"[Auth] Ошибка при авторизации: {error}")
         raise

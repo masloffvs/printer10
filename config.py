@@ -20,6 +20,7 @@ def _user_data_dir():
 
 DATA_DIR = _user_data_dir()
 PRINT_HISTORY_PATH = DATA_DIR / "print_history.sqlite"
+TASKS_DB_PATH = DATA_DIR / "printer12.db"
 
 PRINT_FORMATS = {
     "А": {"name": "Формат А", "printer_id": 9974664, "template_id": "22766"},
