@@ -5,9 +5,9 @@ import time
 
 import requests
 
-from auth import BASE_URL
-from config import DB_PATH, PRINT_FORMATS
-from setretail_client import SetRetailXClient
+from printer.config import DB_PATH, FORMAT_ALIASES, PRINT_FORMATS
+from printer.services.auth import BASE_URL
+from printer.services.setretail_client import SetRetailXClient
 
 active_session = None
 session_token = None

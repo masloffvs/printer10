@@ -34,20 +34,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import auth
-from auth import get_authenticated_session
-import retail
-from config import DB_PATH, PRINT_FORMATS, TASKS_DB_PATH
-from print_history import PrintHistory
-from long_tasks import (
+from printer.config import DB_PATH, PRINT_FORMATS, TASKS_DB_PATH
+from printer.models.scanned_probe import ScannedProbe
+from printer.services import auth
+from printer.services.auth import get_authenticated_session
+from printer.services.long_tasks import (
     DISCOVERY_TASK_ID,
     SNAPSHOT_TASK_ID,
     TaskStore,
     run_candidate_discovery,
     run_price_snapshots,
 )
-from setretail_client import SetRetailXClient
-from scanned_probe import ScannedProbe
+from printer.services.print_history import PrintHistory
+import printer.services.retail as retail
+from printer.services.setretail_client import SetRetailXClient
 
 
 def _format_price(value):

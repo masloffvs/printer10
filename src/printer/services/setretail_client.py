@@ -6,7 +6,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
-from auth import BASE_URL, URL_RPC
+from printer.services.auth import BASE_URL, URL_RPC
 
 
 class SetRetailXClient:

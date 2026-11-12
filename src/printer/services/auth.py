@@ -12,10 +12,12 @@ import requests
 from dotenv import load_dotenv
 
 
+from printer.config import APP_DIR
+
 if getattr(sys, "frozen", False):
     ENV_PATH = Path(sys.executable).resolve().with_name(".env")
 else:
-    ENV_PATH = Path(__file__).resolve().with_name(".env")
+    ENV_PATH = APP_DIR / ".env"
 
 # Environment variables already provided by the OS take precedence over .env.
 load_dotenv(ENV_PATH)

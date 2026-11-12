@@ -2,9 +2,9 @@ import sys
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from config import DB_PATH
-from theme import APP_STYLESHEET
-from window import PrinterWindow
+from printer.config import DB_PATH
+from printer.ui.theme import APP_STYLESHEET
+from printer.ui.window import PrinterWindow
 
 
 def main():

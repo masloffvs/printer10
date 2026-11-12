@@ -17,6 +17,7 @@ if errorlevel 1 exit /b 1
 python -m PyInstaller --noconfirm --clean --onefile --windowed ^
     --name SetRetailXPrinter ^
     --add-data "products.db;." ^
+    --paths src ^
     p.py
 if errorlevel 1 exit /b 1
 

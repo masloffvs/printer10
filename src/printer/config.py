@@ -3,8 +3,16 @@ import sys
 from pathlib import Path
 
 
-# SQLite lives beside the script, or in the extracted PyInstaller bundle.
-APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+# SQLite lives beside the project root when running from source, or next to the
+# PyInstaller executable when running as a frozen bundle.
+def _app_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    # src/printer/config.py -> src -> project root
+    return Path(__file__).resolve().parents[2]
+
+
+APP_DIR = _app_dir()
 DB_PATH = APP_DIR / "all_products.sqlite"
 
 

@@ -2,7 +2,7 @@ import json
 import sqlite3
 from datetime import datetime
 
-from config import PRINT_HISTORY_PATH
+from printer.config import PRINT_HISTORY_PATH
 
 
 class PrintHistory:
