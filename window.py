@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -463,7 +464,7 @@ class LongTaskRunner(QThread):
 
 
 class LongTasksWindow(QWidget):
-    """Controls persisted schedules and shows the latest price-monitor results."""
+    """Lists persistent background tasks and keeps price history secondary."""
 
     def __init__(self, printer):
         super().__init__()
@@ -471,12 +472,39 @@ class LongTasksWindow(QWidget):
         self.store = printer.task_store
         self.runner = None
         layout = QVBoxLayout(self)
+
+        self.tabs = QTabWidget()
+        tasks_tab = QWidget()
+        tasks_layout = QVBoxLayout(tasks_tab)
+        self.tasks_summary = QLabel()
+        tasks_layout.addWidget(self.tasks_summary)
+        self.tasks = QTableWidget(0, 6)
+        self.tasks.setHorizontalHeaderLabels(
+            [
+                "Задача",
+                "Состояние",
+                "Расписание",
+                "Последний запуск",
+                "Следующий запуск",
+                "Результат",
+            ]
+        )
+        self.tasks.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tasks.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tasks.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.tasks.setAlternatingRowColors(True)
+        self.tasks.verticalHeader().setVisible(False)
+        task_header = self.tasks.horizontalHeader()
+        task_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        task_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        task_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        task_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        task_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        task_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.tasks.itemSelectionChanged.connect(self.on_task_selected)
+        tasks_layout.addWidget(self.tasks, 1)
+
         controls = QHBoxLayout()
-        self.task_select = QComboBox()
-        self.task_select.addItem("Поиск NearlyPriceChanging", DISCOVERY_TASK_ID)
-        self.task_select.addItem("Снимки и сравнение цен", SNAPSHOT_TASK_ID)
-        self.task_select.currentIndexChanged.connect(self.on_task_selected)
-        controls.addWidget(self.task_select)
         self.enabled = QCheckBox("Включена")
         controls.addWidget(self.enabled)
         controls.addWidget(QLabel("Интервал, минут:"))
@@ -490,10 +518,12 @@ class LongTasksWindow(QWidget):
         self.run_button.clicked.connect(self.run_now)
         controls.addWidget(self.run_button)
         controls.addStretch()
-        layout.addLayout(controls)
+        tasks_layout.addLayout(controls)
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+        tasks_layout.addWidget(self.status_label)
+        self.tabs.addTab(tasks_tab, "Задачи")
+
         history = QGroupBox("История изменений цен")
         history_layout = QVBoxLayout(history)
         filters = QHBoxLayout()
@@ -528,7 +558,12 @@ class LongTasksWindow(QWidget):
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         history_layout.addWidget(self.changes, 1)
-        layout.addWidget(history, 1)
+        history_tab = QWidget()
+        history_layout_tab = QVBoxLayout(history_tab)
+        history_layout_tab.addWidget(history)
+        self.tabs.addTab(history_tab, "История цен")
+        layout.addWidget(self.tabs, 1)
+
         self.timer = QTimer(self)
         self.timer.setInterval(5000)
         self.timer.timeout.connect(self.poll_scheduler)
@@ -539,8 +574,11 @@ class LongTasksWindow(QWidget):
         self.poll_scheduler()
 
     def save_schedule(self):
+        task_id = self.selected_task_id()
+        if task_id is None:
+            return
         self.store.configure(
-            self.task_select.currentData(),
+            task_id,
             self.enabled.isChecked(),
             self.interval.value() * 60,
         )
@@ -560,7 +598,9 @@ class LongTasksWindow(QWidget):
     def _start_task(self, force=False):
         if self.runner is not None:
             return
-        task_id = self.task_select.currentData()
+        task_id = self.selected_task_id()
+        if task_id is None:
+            return
         task = self.store.force_claim(task_id) if force else self.store.claim_due()
         if task is not None:
             self._launch(task)
@@ -577,7 +617,7 @@ class LongTasksWindow(QWidget):
         self.runner.completed.connect(self.task_completed)
         self.runner.finished.connect(self.runner_finished)
         self.runner.finished.connect(self.runner.deleteLater)
-        self.run_button.setEnabled(False)
+        self.refresh()
         self.status_label.setText("Задача выполняется…")
         self.runner.start()
 
@@ -594,12 +634,74 @@ class LongTasksWindow(QWidget):
     def refresh(self):
         tasks = self.store.list_tasks()
         self.tasks_by_id = {item["task_id"]: item for item in tasks}
+        enabled_count = sum(bool(task["enabled"]) for task in tasks)
+        running_count = sum(task["last_status"] == "Выполняется" for task in tasks)
+        self.tasks_summary.setText(
+            f"Всего задач: {len(tasks)} · включено: {enabled_count} · сейчас выполняется: {running_count}"
+        )
+        selected_task_id = self.selected_task_id()
+        self.tasks.blockSignals(True)
+        self.tasks.setRowCount(len(tasks))
+        selected_row = None
+        for row, task in enumerate(tasks):
+            task_id = task["task_id"]
+            if task_id == selected_task_id:
+                selected_row = row
+            interval = max(1, int(task["interval_seconds"]) // 60)
+            last_run = self._format_task_time(
+                task["last_finished_at"], "ещё не запускалась"
+            )
+            next_run = (
+                self._format_task_time(task["next_run_at"], "не запланирован")
+                if task["enabled"]
+                else "—"
+            )
+            result = task["last_result"] or "—"
+            values = (
+                task["name"],
+                task["last_status"],
+                f"{'Включена' if task['enabled'] else 'Выключена'} · каждые {interval} мин",
+                last_run,
+                next_run,
+                result,
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, task_id)
+                if column in (1, 2, 3, 4):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column == 5:
+                    item.setToolTip(str(result))
+                self.tasks.setItem(row, column, item)
+        if selected_row is None and tasks:
+            selected_row = 0
+        if selected_row is not None:
+            self.tasks.selectRow(selected_row)
+        self.tasks.blockSignals(False)
         self.refresh_task_controls()
         self._refresh_changes()
 
     def on_task_selected(self, *_args):
         self.refresh_task_controls()
         self._refresh_changes()
+
+    def selected_task_id(self):
+        rows = (
+            self.tasks.selectionModel().selectedRows() if hasattr(self, "tasks") else []
+        )
+        if not rows:
+            return None
+        item = self.tasks.item(rows[0].row(), 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    @staticmethod
+    def _format_task_time(timestamp, fallback):
+        if not timestamp:
+            return fallback
+        return (
+            datetime.fromtimestamp(timestamp).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        )
 
     def _refresh_changes(self, *_args):
         if not hasattr(self, "tasks_by_id"):
@@ -656,28 +758,22 @@ class LongTasksWindow(QWidget):
     def refresh_task_controls(self, *_args):
         if not hasattr(self, "tasks_by_id"):
             return
-        task = self.tasks_by_id.get(self.task_select.currentData())
+        task = self.tasks_by_id.get(self.selected_task_id())
+        editable = self.runner is None and task is not None
+        self.enabled.setEnabled(editable)
+        self.interval.setEnabled(editable)
         if task is not None:
             self.enabled.setChecked(bool(task["enabled"]))
             self.interval.setValue(max(1, int(task["interval_seconds"]) // 60))
-            next_run = (
-                datetime.fromtimestamp(task["next_run_at"])
-                .astimezone()
-                .strftime("%Y-%m-%d %H:%M:%S")
-                if task["next_run_at"]
-                else "не запланирован"
-            )
-            last_run = (
-                datetime.fromtimestamp(task["last_finished_at"])
-                .astimezone()
-                .strftime("%Y-%m-%d %H:%M:%S")
-                if task["last_finished_at"]
-                else "ещё не выполнялась"
-            )
             self.status_label.setText(
-                f"Статус: {task['last_status']} · последнее выполнение: {last_run} · "
-                f"следующий запуск: {next_run}\nРезультат: {task['last_result'] or '—'}"
+                f"Выбрана задача: {task['name']} · статус: {task['last_status']}\n"
+                f"Результат последнего запуска: {task['last_result'] or '—'}"
             )
+            self.save_button.setEnabled(editable)
+            self.run_button.setEnabled(editable)
+        else:
+            self.save_button.setEnabled(False)
+            self.run_button.setEnabled(False)
 
 
 class ScannerWindow(QWidget):
