@@ -4,6 +4,7 @@ import com.setretailx.printer.config.AppConfig;
 import com.setretailx.printer.model.Product;
 import com.setretailx.printer.model.ScannedProbe;
 import com.setretailx.printer.repository.ProductRepository;
+import com.setretailx.printer.service.SetRetailXClient;
 
 import javax.swing.BorderFactory;
 import javax.swing.JFrame;
@@ -13,6 +14,8 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletionException;
+import javax.swing.SwingUtilities;
 
 /** Main application shell; feature screens and MDI window management live in separate classes. */
 @SuppressWarnings("serial")
@@ -26,7 +29,8 @@ public final class MainWindow extends JFrame {
             this::addSelectedSearchResults, this::showProductCard);
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
             this::clearQueue);
-    private final ExchangePanel exchange = new ExchangePanel();
+    private final ExchangePanel exchange = new ExchangePanel(this::checkNetworkConnection);
+    private final SetRetailXClient network = new SetRetailXClient(event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
     private List<Product> searchResults = new ArrayList<>();
 
@@ -56,6 +60,28 @@ public final class MainWindow extends JFrame {
         workspace.setWindowVisibilityListener(scanner::setRecipientOpen);
         workspace.showWindow("scanner");
         log("Java UI запущен. Локальная база: " + AppConfig.DB_PATH);
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowClosing(java.awt.event.WindowEvent event) { network.close(); }
+        });
+    }
+
+    private void checkNetworkConnection() {
+        exchange.setBusy(true);
+        exchange.setStatus("Проверка соединения…");
+        network.checkConnection().whenComplete((response, error) -> SwingUtilities.invokeLater(() -> {
+            exchange.setBusy(false);
+            if (error != null) {
+                Throwable cause = error;
+                while ((cause instanceof CompletionException || cause instanceof java.util.concurrent.ExecutionException)
+                        && cause.getCause() != null) cause = cause.getCause();
+                String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+                exchange.setStatus("Ошибка подключения");
+                log("Ошибка подключения SetRetailX: " + message);
+            } else {
+                exchange.setStatus("Подключено");
+                status.setText("Соединение с SetRetailX проверено");
+            }
+        }));
     }
 
     private void submitScan() {
