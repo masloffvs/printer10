@@ -2,6 +2,7 @@ from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import json
+import re
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QPixmap
@@ -72,6 +73,346 @@ class TaskThread(QThread):
             self.succeeded.emit(self.function())
         except Exception as error:
             self.failed.emit(str(error))
+
+
+class PriceComparisonThread(QThread):
+    """Look up scanned labels locally, then compare them in one RPC batch."""
+
+    completed = Signal(object)
+
+    def __init__(self, client, scans, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self.scans = scans
+
+    @staticmethod
+    def _prices(product, map_name):
+        prices = product.get(map_name) or {}
+        if not isinstance(prices, dict):
+            return {}
+        result = {}
+        for key, value in prices.items():
+            if not isinstance(value, dict):
+                continue
+            number = str(value.get("number", key))
+            if number not in ("1", "2", "4"):
+                continue
+            try:
+                result[number] = Decimal(str(value.get("value")))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+        return result
+
+    def run(self):
+        results = []
+        products_by_id = {}
+        markings = []
+        for scan in self.scans:
+            result = {"id": scan["id"], "product": None, "status": "error"}
+            try:
+                product = retail.search_offline(scan["barcode"])
+            except Exception as error:
+                result["error"] = str(error)
+                results.append(result)
+                continue
+            if product is None:
+                result["error"] = "Штрихкод не найден в локальной базе"
+                results.append(result)
+                continue
+            marking = retail.product_print_code(product)
+            result["product"] = product
+            result["marking"] = marking
+            products_by_id[scan["id"]] = result
+            markings.append(marking)
+            results.append(result)
+
+        if markings:
+            try:
+                remote_products = self.client.get_products(
+                    list(dict.fromkeys(markings)), shelf=12
+                )
+                by_marking = {
+                    str(product.get("marking")): product
+                    for product in remote_products
+                    if product.get("marking") is not None
+                }
+                by_barcode = {
+                    str(product.get("barCode") or product.get("barcode")): product
+                    for product in remote_products
+                    if product.get("barCode") or product.get("barcode")
+                }
+                scans_by_id = {scan["id"]: scan for scan in self.scans}
+                for scan_id, result in products_by_id.items():
+                    product = result["product"]
+                    remote = by_barcode.get(
+                        str(product.get("barcode"))
+                    ) or by_marking.get(result["marking"])
+                    if remote is None:
+                        result["error"] = "Товар не вернулся из SetRetailX"
+                        continue
+                    normal = self._prices(remote, "pricesMap")
+                    promo = self._prices(remote, "prices99Map")
+                    scan = scans_by_id[scan_id]
+                    comparisons = {}
+                    for number in ("1", "2", "4"):
+                        scanned_price = scan["prices"].get(number)
+                        available = [
+                            price
+                            for price in (normal.get(number), promo.get(number))
+                            if price is not None
+                        ]
+                        comparisons[number] = (
+                            None
+                            if scanned_price is None or not available
+                            else any(scanned_price == price for price in available)
+                        )
+                    result.update(
+                        status="checked",
+                        remote=remote,
+                        normal=normal,
+                        promo=promo,
+                        comparisons=comparisons,
+                    )
+            except Exception as error:
+                for result in products_by_id.values():
+                    result["error"] = str(error)
+        self.completed.emit(results)
+
+
+def _parse_price_scan(value):
+    """Parse the scanner's prefix plus barcode/price query-string format."""
+    text = str(value).strip()
+    barcode_match = re.search(r"barcode=(\d+)", text, re.IGNORECASE)
+    if not barcode_match:
+        raise ValueError("В строке сканера не найден barcode")
+    prices = {}
+    for number, raw in re.findall(
+        r"(?:^|&)(price[124])=([^&\s]+)", text, re.IGNORECASE
+    ):
+        try:
+            price = Decimal(raw.replace(",", "."))
+        except (InvalidOperation, ValueError):
+            raise ValueError(f"Некорректная цена {number}")
+        if not price.is_finite() or price < 0:
+            raise ValueError(f"Некорректная цена {number}")
+        prices[number[-1]] = price
+    if not prices:
+        raise ValueError("В строке сканера не найдены price1, price2 или price4")
+    return {"barcode": barcode_match.group(1), "prices": prices}
+
+
+def _scan_price_text(value):
+    if value is None:
+        return "—"
+    return f"{value:.2f}".replace(".", ",")
+
+
+class PriceComparisonWindow(QWidget):
+    """Non-blocking scan queue and comparison with SetRetailX prices."""
+
+    def __init__(self, printer):
+        super().__init__()
+        self.printer = printer
+        self.records = []
+        self.next_scan_id = 1
+        self.pending = []
+        self.worker = None
+        self.flush_timer = QTimer(self)
+        self.flush_timer.setSingleShot(True)
+        self.flush_timer.setInterval(120)
+        self.flush_timer.timeout.connect(self.process_pending)
+
+        layout = QVBoxLayout(self)
+        input_row = QHBoxLayout()
+        input_row.addWidget(QLabel("Сканируйте ценник:"))
+        self.scan_input = QLineEdit()
+        self.scan_input.setPlaceholderText(
+            r"\000026barcode=…&price1=…&price2=…&price4=…"
+        )
+        self.scan_input.returnPressed.connect(self.add_scan)
+        input_row.addWidget(self.scan_input, 1)
+        self.add_button = QPushButton("Добавить")
+        self.add_button.clicked.connect(self.add_scan)
+        input_row.addWidget(self.add_button)
+        layout.addLayout(input_row)
+
+        self.table = QTableWidget(0, 16)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Статус",
+                "Артикул",
+                "Штрихкод",
+                "Ярлык 1",
+                "Ярлык 2",
+                "Ярлык 4",
+                "Обычная 1",
+                "Обычная 2",
+                "Обычная 4",
+                "Акция 1",
+                "Акция 2",
+                "Акция 4",
+                "Сверка 1",
+                "Сверка 2",
+                "Сверка 4",
+                "Результат",
+            ]
+        )
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        for column in (0, *range(3, 16)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        self.status_label = QLabel("Ожидаю сканирование")
+        footer.addWidget(self.status_label, 1)
+        self.clear_button = QPushButton("Очистить результаты")
+        self.clear_button.clicked.connect(self.clear_results)
+        footer.addWidget(self.clear_button)
+        layout.addLayout(footer)
+
+    def add_scan(self):
+        text = self.scan_input.text()
+        if not text.strip():
+            return
+        try:
+            scan = _parse_price_scan(text)
+        except ValueError as error:
+            self.status_label.setText(str(error))
+            return
+        scan.update(id=self.next_scan_id, status="pending")
+        self.next_scan_id += 1
+        self.records.append(scan)
+        self.pending.append(scan)
+        self.scan_input.clear()
+        self.refresh_table()
+        self.status_label.setText(f"В очереди проверки: {len(self.pending)}")
+        self.flush_timer.start()
+
+    def process_pending(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        if not self.pending:
+            return
+        if self.printer.setretail_client is None:
+            self.status_label.setText("Ожидаю подключения к SetRetailX")
+            return
+        scans = self.pending[:50]
+        del self.pending[: len(scans)]
+        for scan in scans:
+            scan["status"] = "checking"
+        self.refresh_table()
+        self.status_label.setText(f"Проверяем {len(scans)} ценников…")
+        self.worker = PriceComparisonThread(self.printer.setretail_client, scans, self)
+        self.worker.completed.connect(self.batch_completed)
+        self.worker.finished.connect(self.batch_finished)
+        self.worker.start()
+
+    def batch_completed(self, results):
+        by_id = {record["id"]: record for record in self.records}
+        queued = 0
+        for result in results:
+            record = by_id.get(result["id"])
+            if record is None:
+                continue
+            record.update(result)
+            if result.get("status") != "checked":
+                record["status"] = "error"
+                continue
+            record["status"] = "checked"
+            mismatched = any(value is False for value in result["comparisons"].values())
+            if mismatched and not record.get("queued_for_print"):
+                product = result["product"]
+                self.printer.entries.append(
+                    {
+                        "st_code": product["st_code"],
+                        "name": product["name"],
+                        "vendor_code": product["vendor_code"],
+                        "uom": product.get("uom") or "ST",
+                        "barcode": product["barcode"],
+                        "source": "offline",
+                        "format": self.printer.scanner.format_combo.currentData(),
+                        "amount": self.printer.scanner.amount_spin.value(),
+                        "quantity": 1,
+                    }
+                )
+                record["queued_for_print"] = True
+                queued += 1
+        if queued:
+            self.printer.refresh_queue()
+        self.refresh_table()
+        self.status_label.setText(
+            f"Проверено · в очередь печати добавлено: {queued}"
+            if queued
+            else "Проверка завершена"
+        )
+
+    def batch_finished(self):
+        self.worker = None
+        if self.pending:
+            self.process_pending()
+
+    def refresh_table(self):
+        self.table.setRowCount(len(self.records))
+        for row, record in enumerate(self.records):
+            product = record.get("product") or {}
+            normal = record.get("normal") or {}
+            promo = record.get("promo") or {}
+            comparison = record.get("comparisons") or {}
+            state = {
+                "pending": "В очереди",
+                "checking": "Проверка…",
+                "checked": "Готово",
+                "error": record.get("error", "Ошибка"),
+            }.get(record.get("status"), "—")
+            outcome = (
+                "В очередь печати"
+                if record.get("queued_for_print")
+                else ("Совпадает" if record.get("status") == "checked" else "—")
+            )
+            values = [
+                state,
+                product.get("vendor_code") or "—",
+                record["barcode"],
+                *[
+                    _scan_price_text(record["prices"].get(number))
+                    for number in ("1", "2", "4")
+                ],
+                *[_scan_price_text(normal.get(number)) for number in ("1", "2", "4")],
+                *[_scan_price_text(promo.get(number)) for number in ("1", "2", "4")],
+                *[
+                    {True: "✓", False: "✗", None: "—"}.get(comparison.get(number), "—")
+                    for number in ("1", "2", "4")
+                ],
+                outcome,
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column in (0, *range(3, 16)):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column in (12, 13, 14):
+                    marker = comparison.get(str(column - 11))
+                    if marker is True:
+                        item.setForeground(Qt.GlobalColor.darkGreen)
+                    elif marker is False:
+                        item.setForeground(Qt.GlobalColor.red)
+                if column == 0 and record.get("error"):
+                    item.setToolTip(record["error"])
+                self.table.setItem(row, column, item)
+
+    def clear_results(self):
+        if self.worker is not None and self.worker.isRunning():
+            self.status_label.setText("Дождитесь завершения текущей проверки")
+            return
+        self.records.clear()
+        self.pending.clear()
+        self.refresh_table()
+        self.status_label.setText("Ожидаю сканирование")
 
 
 class ExchangeLogBridge(QObject):
@@ -1151,6 +1492,7 @@ class PrinterWindow(QMainWindow):
         self.statusBar().showMessage("Подключаемся к SetRetailX…")
 
         self.scanner = ScannerWindow(self)
+        self.price_comparison = PriceComparisonWindow(self)
         self.product_search = ProductSearchWindow(self)
         self.queue = QueueWindow(self)
         self.print_history_window = PrintHistoryWindow(self)
@@ -1159,6 +1501,9 @@ class PrinterWindow(QMainWindow):
             "exchange", "Обмен с SetRetailX", self.exchange_log, (800, 450)
         )
         self._add_internal_window("scanner", "Сканирование", self.scanner, (430, 230))
+        self._add_internal_window(
+            "price_comparison", "Сверка ценников", self.price_comparison, (1250, 600)
+        )
         self._add_internal_window(
             "search", "Поиск товаров", self.product_search, (900, 560)
         )
@@ -1197,6 +1542,7 @@ class PrinterWindow(QMainWindow):
 
         view_menu = self.menuBar().addMenu("Вид")
         self._add_window_action(view_menu, "Сканирование", "scanner")
+        self._add_window_action(view_menu, "Сверка ценников", "price_comparison")
         self._add_window_action(view_menu, "Поиск товаров", "search")
         self._add_window_action(view_menu, "Очередь печати", "queue")
         self._add_window_action(view_menu, "Обмен с SetRetailX", "exchange")
@@ -1224,6 +1570,9 @@ class PrinterWindow(QMainWindow):
         toolbar = self.addToolBar("Окна")
         toolbar.setMovable(False)
         toolbar.addAction("Сканирование", lambda: self.show_subwindow("scanner"))
+        toolbar.addAction(
+            "Сверка ценников", lambda: self.show_subwindow("price_comparison")
+        )
         toolbar.addAction("Поиск товаров", lambda: self.show_subwindow("search"))
         toolbar.addAction("Очередь печати", lambda: self.show_subwindow("queue"))
         toolbar.addAction("Обмен с SetRetailX", lambda: self.show_subwindow("exchange"))
@@ -1314,6 +1663,8 @@ class PrinterWindow(QMainWindow):
         )
         self.long_tasks_window.refresh()
         self.long_tasks_window.start()
+        if self.price_comparison.pending:
+            self.price_comparison.process_pending()
         message = f"Готово · локальная база: {DB_PATH.name}"
         self.scanner.status_label.setText(message)
         self.set_busy(False, message)
