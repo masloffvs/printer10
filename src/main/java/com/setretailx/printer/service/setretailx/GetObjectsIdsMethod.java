@@ -21,14 +21,18 @@ public final class GetObjectsIdsMethod {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     public CompletableFuture<List<String>> execute(SetRetailXConnector connector) {
+        return execute(connector, 12);
+    }
+
+    public CompletableFuture<List<String>> execute(SetRetailXConnector connector, int shelf) {
         ObjectNode payload = JSON.createObjectNode();
         payload.put("@class", "ru.crystals.commons.jsonrpc.domain.JsonRpcRequest");
-        payload.put("id", System.nanoTime() & Long.MAX_VALUE);
+        payload.put("id", 953);
         payload.put("version", "1.0.0");
         payload.put("endpoint", ENDPOINT);
         payload.put("method", "getObjectsIds");
         ArrayNode params = payload.putArray("params");
-        params.add(JSON.valueToTree(new PrintModeDto(12)));
+        params.add(JSON.valueToTree(new PrintModeDto(shelf)));
         params.add(JSON.valueToTree(new GroupingObjectsFilterDto(
                 List.of(new SearchArgumentDto("NearlyPriceChanging")), List.of(new GroupingNodeDto()))));
 

@@ -10,6 +10,9 @@ import com.setretailx.printer.repository.ProductRepository;
 import com.setretailx.printer.repository.PrintHistoryRepository;
 import com.setretailx.printer.service.SetRetailXConnector;
 import com.setretailx.printer.service.ExchangeEvent;
+import com.setretailx.printer.service.PriceMonitoringTaskService;
+import com.setretailx.printer.service.setretailx.dto.PrintGroupItemDto;
+import com.setretailx.printer.service.setretailx.dto.PrintGroupResponseDto;
 
 import javax.swing.BorderFactory;
 import javax.swing.JFrame;
@@ -18,6 +21,8 @@ import javax.swing.SwingWorker;
 import java.awt.BorderLayout;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.CompletionException;
 import javax.swing.SwingUtilities;
 
@@ -29,16 +34,19 @@ public final class MainWindow extends JFrame {
     private final MdiWorkspace workspace = new MdiWorkspace();
     private final List<QueueEntry> entries = new ArrayList<>();
     private final ScannerPanel scanner = new ScannerPanel(this::submitScan);
-    private final ComparisonPanel comparison = new ComparisonPanel();
+    private final ComparisonPanel comparison = new ComparisonPanel(products);
     private final SearchPanel search = new SearchPanel(this::search, this::updateSearchSelection,
             this::addSelectedSearchResults, this::showProductCard);
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
-            this::clearQueue, this::moveSelected);
+            this::clearQueue, this::moveSelected, this::printAssigned);
     private final ExchangePanel exchange = new ExchangePanel(this::checkNetworkConnection);
     private final PrintHistoryPanel history = new PrintHistoryPanel(this::restoreBatch, this::refreshHistory);
     private final SetRetailXConnector network = new SetRetailXConnector(event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
+    private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
+    private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService);
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
     private List<Product> searchResults = new ArrayList<>();
+    private boolean printInProgress;
 
     public MainWindow() {
         super("SetRetailX — Печать ценников (Java)");
@@ -47,6 +55,8 @@ public final class MainWindow extends JFrame {
         setMinimumSize(new java.awt.Dimension(850, 560));
         setLocationRelativeTo(null);
         setJMenuBar(workspace.createMenuBar(this::dispose, this::showAbout));
+        comparison.setConnector(network);
+        comparison.setMismatchHandler(this::enqueueMismatchedProduct);
         add(workspace, BorderLayout.CENTER);
         status.setBorder(BorderFactory.createEmptyBorder(6, 10, 6, 10));
         add(status, BorderLayout.SOUTH);
@@ -57,8 +67,12 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("queue", queue, 760, 440);
         workspace.addWindow("exchange", exchange, 650, 400);
         workspace.addWindow("history", history, 760, 420);
-        workspace.addWindow("tasks", new MigrationNoticePanel(
-                "Планировщик фоновых задач будет перенесён отдельным этапом."), 680, 400);
+        workspace.addWindow("tasks", taskPanel, 900, 520);
+        workspace.addWindow("environment", new EnvironmentPanel(() -> {
+            network.reloadSettings();
+            log("Настройки .env сохранены и применены. При необходимости нажмите «Проверить подключение».");
+            status.setText("Настройки SetRetailX обновлены.");
+        }), 760, 520);
         scanner.registerRecipient("comparison", "Сверка ценников");
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Очередь печати");
@@ -67,7 +81,10 @@ public final class MainWindow extends JFrame {
         refreshHistory();
         log("Java UI запущен. Локальная база: " + AppConfig.DB_PATH);
         addWindowListener(new java.awt.event.WindowAdapter() {
-            @Override public void windowClosing(java.awt.event.WindowEvent event) { network.close(); }
+            @Override public void windowClosing(java.awt.event.WindowEvent event) {
+                taskPanel.close();
+                network.close();
+            }
         });
     }
 
@@ -129,23 +146,29 @@ public final class MainWindow extends JFrame {
             return;
         }
         status.setText("Ищем " + probe.barcode() + " в локальной базе…");
-        runBackground(() -> products.findByBarcode(probe.barcode()), product -> {
+        runBackground(() -> {
+            Product local = products.findByBarcode(probe.barcode());
+            return local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+        }, product -> {
             if (product == null) {
-                status.setText("Штрихкод " + probe.barcode() + " не найден в локальной базе.");
+                status.setText("Штрихкод " + probe.barcode() + " не найден.");
                 return;
             }
             entries.add(new QueueEntry(product));
             refreshQueue();
-            status.setText("Добавлен товар из локальной базы: " + product.name());
-        }, error -> status.setText("Ошибка локального поиска: " + error));
+            status.setText("Добавлен товар (" + product.source() + "): " + product.name());
+        }, error -> status.setText("Ошибка поиска товара: " + error));
     }
 
     private void receivePriceScan(ScannedProbe probe) {
-        String[] prices = {probe.price1(), probe.price2(), probe.price3(), probe.price4()};
-        comparison.model().addRow(new Object[]{"Ожидает сверки", "—", probe.barcode(),
-                prices[0], prices[1], prices[2], prices[3], "Нужен SetRetailX"});
-        comparison.setStatus("Ценник принят. Сверка с SetRetailX появится после переноса JSON-RPC клиента.");
-        log("Скан ценника: barcode=" + probe.barcode() + ", prices=" + String.join(" / ", prices));
+        comparison.receiveScan(probe);
+        log("Скан ценника принят для сверки: barcode=" + probe.barcode());
+    }
+
+    private void enqueueMismatchedProduct(Product product) {
+        entries.add(new QueueEntry(product));
+        refreshQueue();
+        log("Несовпавший ценник добавлен в очередь без назначения формата и тиража: " + product.name());
     }
 
     private void search() {
@@ -155,11 +178,115 @@ public final class MainWindow extends JFrame {
             return;
         }
         search.setStatus("Ищем в локальной базе…");
-        runBackground(() -> products.search(query), results -> {
+        runBackground(() -> {
+            List<Product> local = products.search(query);
+            if (!local.isEmpty()) return local;
+            SwingUtilities.invokeLater(() -> search.setStatus("Локально не найдено; ищем в SetRetailX…"));
+            return network.searchOnlineProduct(query).join().map(List::of).orElseGet(List::of);
+        }, results -> {
             searchResults = new ArrayList<>(results);
             search.showResults(results);
             search.setStatus("Найдено товаров: " + results.size());
         }, error -> search.setStatus("Ошибка поиска: " + error));
+    }
+
+    private void printAssigned() {
+        if (printInProgress) {
+            status.setText("Задания печати уже отправляются.");
+            return;
+        }
+        Map<PrintGroupKey, List<Integer>> groups = new LinkedHashMap<>();
+        List<PrintHistoryEntry> candidates = new ArrayList<>();
+        List<QueueEntry> candidateEntries = new ArrayList<>();
+        List<Integer> candidateQueueIndexes = new ArrayList<>();
+        Map<Integer, PrintHistoryEntry> snapshotsByQueueIndex = new LinkedHashMap<>();
+        for (int index = 0; index < entries.size(); index++) {
+            QueueEntry entry = entries.get(index);
+            if (entry.format == null) continue;
+            if (entry.amount == null || entry.amount < 1 || entry.amount > 999) {
+                status.setText("У товара «" + entry.product.name() + "» некорректный тираж.");
+                return;
+            }
+            groups.computeIfAbsent(new PrintGroupKey(entry.format, entry.amount), ignored -> new ArrayList<>())
+                    .add(index);
+            PrintHistoryEntry snapshot = entry.snapshot();
+            candidates.add(snapshot);
+            candidateEntries.add(entry);
+            snapshotsByQueueIndex.put(index, snapshot);
+            candidateQueueIndexes.add(index);
+        }
+        if (candidates.isEmpty()) {
+            status.setText("Нет назначенных товаров для печати.");
+            return;
+        }
+
+        printInProgress = true;
+        new SwingWorker<PrintOutcome, Void>() {
+            @Override protected PrintOutcome doInBackground() throws Exception {
+                long batchId = printHistory.addBatch(candidates);
+                List<Integer> successfulCandidateIndexes = new ArrayList<>();
+                List<String> failures = new ArrayList<>();
+                for (Map.Entry<PrintGroupKey, List<Integer>> group : groups.entrySet()) {
+                    PrintGroupKey key = group.getKey();
+                    List<PrintGroupItemDto> items = group.getValue().stream()
+                            .map(index -> PrintGroupItemDto.from(snapshotsByQueueIndex.get(index).product(),
+                                    snapshotsByQueueIndex.get(index).quantity()))
+                            .toList();
+                    try {
+                        PrintGroupResponseDto result = network.printGroup(key.format(), key.amount(), items).join();
+                        if (!result.started()) {
+                            failures.add("Задание для " + key.format().name() + " не было запущено.");
+                            continue;
+                        }
+                        for (int queueIndex : group.getValue()) {
+                            successfulCandidateIndexes.add(candidateQueueIndexes.indexOf(queueIndex));
+                        }
+                    } catch (Exception error) {
+                        Throwable cause = error;
+                        while ((cause instanceof java.util.concurrent.CompletionException
+                                || cause instanceof java.util.concurrent.ExecutionException)
+                                && cause.getCause() != null) cause = cause.getCause();
+                        failures.add(cause.getMessage() == null ? cause.toString() : cause.getMessage());
+                    }
+                }
+                String batchStatus = successfulCandidateIndexes.isEmpty()
+                        ? (failures.isEmpty() ? "Не отправлено" : "Ошибка отправки")
+                        : (successfulCandidateIndexes.size() == candidates.size() && failures.isEmpty()
+                        ? "Отправлено" : "Частично отправлено");
+                try {
+                    printHistory.finishBatch(batchId, successfulCandidateIndexes, batchStatus);
+                } catch (Exception error) {
+                    failures.add("Не удалось обновить историю партии: "
+                            + (error.getMessage() == null ? error.toString() : error.getMessage()));
+                    log("Ошибка обновления истории партии " + batchId + ": " + error);
+                }
+                return new PrintOutcome(batchId, successfulCandidateIndexes, failures);
+            }
+
+            @Override protected void done() {
+                try {
+                    PrintOutcome outcome = get();
+                    java.util.Set<Integer> successfulCandidateIndexes =
+                            new java.util.HashSet<>(outcome.successfulCandidateIndexes());
+                    for (int candidateIndex : outcome.successfulCandidateIndexes()) {
+                        entries.remove(candidateEntries.get(candidateIndex));
+                    }
+                    refreshQueue();
+                    refreshHistory();
+                    status.setText("Печать завершена: отправлено товаров " + successfulCandidateIndexes.size()
+                            + (outcome.failures().isEmpty() ? "" : "; ошибок: " + outcome.failures().size()));
+                    outcome.failures().forEach(MainWindow.this::log);
+                } catch (Exception error) {
+                    Throwable cause = error.getCause() == null ? error : error.getCause();
+                    status.setText("Ошибка печати: " + cause.getMessage());
+                    log("Ошибка печати: " + cause.getMessage());
+                    refreshHistory();
+                } finally {
+                    printInProgress = false;
+                }
+            }
+        }.execute();
+        status.setText("Подготавливаем задания печати…");
     }
 
     private void updateSearchSelection() {
@@ -302,4 +429,7 @@ public final class MainWindow extends JFrame {
             return PrintHistoryEntry.fromQueue(product, format, amount, quantity, priceType);
         }
     }
+
+    private record PrintGroupKey(AppConfig.PrintFormat format, int amount) { }
+    private record PrintOutcome(long batchId, List<Integer> successfulCandidateIndexes, List<String> failures) { }
 }

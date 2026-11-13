@@ -12,6 +12,8 @@ import javax.swing.JEditorPane;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JTabbedPane;
+import javax.swing.JTextArea;
 import javax.swing.SwingConstants;
 import javax.swing.SwingWorker;
 import javax.swing.text.html.HTMLEditorKit;
@@ -31,6 +33,7 @@ import java.awt.Toolkit;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -82,10 +85,11 @@ final class ProductCardDialog extends JDialog {
         header.add(categoryLabel(product), BorderLayout.CENTER);
         content.add(header, BorderLayout.NORTH);
 
-        JPanel body = new JPanel(new BorderLayout(18, 0));
-        body.add(createPhotoPanel(), BorderLayout.WEST);
-        body.add(createDetails(product), BorderLayout.CENTER);
-        content.add(body, BorderLayout.CENTER);
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab("Общее", createOverview(product));
+        tabs.addTab("Характеристики", createCharacteristics(product));
+        tabs.addTab("Raw JSON", createRawJson(product));
+        content.add(tabs, BorderLayout.CENTER);
 
         setContentPane(content);
         pack();
@@ -130,15 +134,15 @@ final class ProductCardDialog extends JDialog {
         showEnlargedImage();
     }
 
-    private JPanel createDetails(Product product) {
+    private JPanel createOverview(Product product) {
+        JPanel overview = new JPanel(new BorderLayout(16, 10));
+        overview.setBorder(BorderFactory.createEmptyBorder(10, 0, 0, 0));
+        overview.add(createPhotoPanel(), BorderLayout.WEST);
         JPanel details = new JPanel(new BorderLayout(0, 10));
         JLabel price = new JLabel("Цена: " + (product.price() == null ? "—" : product.price().format()));
         price.setFont(price.getFont().deriveFont(Font.BOLD, 19f));
         details.add(price, BorderLayout.NORTH);
 
-        JPanel columns = new JPanel(new BorderLayout(0, 10));
-
-        // 1. Key fields, always at hand.
         JPanel keyFields = new JPanel(new GridBagLayout());
         keyFields.setBorder(BorderFactory.createTitledBorder("Основное"));
         addField(keyFields, 0, "Остаток", blankAsDash(product.totalQuantity()));
@@ -146,11 +150,28 @@ final class ProductCardDialog extends JDialog {
         addField(keyFields, 2, "Штрихкод", blankAsDash(product.barcode()));
         addField(keyFields, 3, "Код SetRetailX", blankAsDash(product.stCode()));
         addField(keyFields, 4, "Ед. измерения", blankAsDash(product.uom()));
-        columns.add(keyFields, BorderLayout.NORTH);
+        JPanel content = new JPanel(new BorderLayout(0, 10));
+        content.add(keyFields, BorderLayout.NORTH);
 
-        // 2. Remaining catalog characteristics.
+        String description = findDetail(product.details(), "description");
+        if (!description.isBlank()) {
+            JEditorPane descriptionPane = new JEditorPane();
+            descriptionPane.setEditorKit(new HTMLEditorKit());
+            descriptionPane.setEditable(false);
+            descriptionPane.setText(asHtml(description));
+            descriptionPane.setCaretPosition(0);
+            JScrollPane descriptionScroll = new JScrollPane(descriptionPane);
+            descriptionScroll.setBorder(BorderFactory.createTitledBorder("Описание"));
+            content.add(descriptionScroll, BorderLayout.CENTER);
+        }
+        details.add(content, BorderLayout.CENTER);
+        overview.add(details, BorderLayout.CENTER);
+        return overview;
+    }
+
+    private JScrollPane createCharacteristics(Product product) {
         JPanel characteristics = new JPanel(new GridBagLayout());
-        characteristics.setBorder(BorderFactory.createTitledBorder("Характеристики"));
+        characteristics.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
         int row = 0;
         for (Map.Entry<String, String> detail : product.details().entrySet()) {
             String normalized = normalizeKey(detail.getKey());
@@ -166,25 +187,40 @@ final class ProductCardDialog extends JDialog {
             characteristics.add(empty, gridBagConstraints(0));
         }
         JScrollPane characteristicsScroll = new JScrollPane(characteristics);
-        characteristicsScroll.setBorder(null);
         characteristicsScroll.getVerticalScrollBar().setUnitIncrement(16);
-        columns.add(characteristicsScroll, BorderLayout.CENTER);
+        return characteristicsScroll;
+    }
 
-        // 3. Description as a separate section.
-        String description = findDetail(product.details(), "description");
-        if (!description.isBlank()) {
-            JEditorPane descriptionPane = new JEditorPane();
-            descriptionPane.setEditorKit(new HTMLEditorKit());
-            descriptionPane.setEditable(false);
-            descriptionPane.setText(asHtml(description));
-            descriptionPane.setCaretPosition(0);
-            JScrollPane descriptionScroll = new JScrollPane(descriptionPane);
-            descriptionScroll.setBorder(BorderFactory.createTitledBorder("Описание"));
-            descriptionScroll.setPreferredSize(new Dimension(390, 160));
-            columns.add(descriptionScroll, BorderLayout.SOUTH);
+    private JScrollPane createRawJson(Product product) {
+        JTextArea raw = new JTextArea(rawJson(product));
+        raw.setEditable(false);
+        raw.setLineWrap(false);
+        raw.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        raw.setCaretPosition(0);
+        JScrollPane scroll = new JScrollPane(raw);
+        scroll.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        return scroll;
+    }
+
+    private static String rawJson(Product product) {
+        if (!product.rawJson().isBlank()) return product.rawJson();
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("stCode", product.stCode());
+        values.put("name", product.name());
+        values.put("vendorCode", product.vendorCode());
+        values.put("barcode", product.barcode());
+        values.put("uom", product.uom());
+        values.put("source", product.source());
+        values.put("price", product.price() == null ? null : product.price().format());
+        values.put("totalQuantity", product.totalQuantity());
+        values.put("details", product.details());
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().writerWithDefaultPrettyPrinter()
+                    .writeValueAsString(values);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            return values.toString();
         }
-        details.add(columns, BorderLayout.CENTER);
-        return details;
     }
 
     private void addField(JPanel panel, int row, String label, String value) {

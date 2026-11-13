@@ -40,15 +40,18 @@ final class QueuePanel extends JPanel {
     private final Consumer<List<Integer>> removeSelected;
     private final Runnable clearQueue;
     private final java.util.function.BiConsumer<List<Integer>, AppConfig.PrintFormat> moveSelected;
+    private final Runnable printAssigned;
 
     QueuePanel(QuadConsumer<List<Integer>, AppConfig.PrintFormat, PriceType, Integer> assignSelected,
                Consumer<List<Integer>> removeSelected, Runnable clearQueue,
-               java.util.function.BiConsumer<List<Integer>, AppConfig.PrintFormat> moveSelected) {
+               java.util.function.BiConsumer<List<Integer>, AppConfig.PrintFormat> moveSelected,
+               Runnable printAssigned) {
         super(new BorderLayout(8, 8));
         this.assignSelected = assignSelected;
         this.removeSelected = removeSelected;
         this.clearQueue = clearQueue;
         this.moveSelected = moveSelected;
+        this.printAssigned = printAssigned;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
@@ -120,8 +123,7 @@ final class QueuePanel extends JPanel {
         clear.addActionListener(event -> clearQueue.run());
         menu.add(clear);
         JMenuItem print = new JMenuItem("Печать назначенных");
-        print.setEnabled(false);
-        print.setToolTipText("Отправка заданий на печать в Java пока не подключена.");
+        print.addActionListener(event -> printAssigned.run());
         menu.add(print);
         return menu;
     }

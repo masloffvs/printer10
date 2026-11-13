@@ -29,7 +29,8 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("queue", "Очередь печати", "Очередь"),
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
             new WindowSpec("history", "История печати", "История"),
-            new WindowSpec("tasks", "Долгие задачи", "Задачи")
+            new WindowSpec("tasks", "Долгие задачи", "Задачи"),
+            new WindowSpec("environment", "Настройки .env", ".env")
     };
 
     private final JDesktopPane desktop = new JDesktopPane();

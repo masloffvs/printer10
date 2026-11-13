@@ -185,6 +185,15 @@ final class SetRetailXClient implements AutoCloseable {
             return CompletableFuture.failedFuture(new IllegalArgumentException("Используйте connect() для авторизации."));
         }
         return connect().thenCompose(ignored -> {
+            // ProductsFinder expects the authenticated token as params[0] in addition to
+            // the session cookie. Keep token handling in the transport, where it is owned.
+            if ("getSimpleProductsByFilter".equals(requestPayload.path("method").asText())) {
+                JsonNode paramsNode = requestPayload.get("params");
+                if (paramsNode instanceof ArrayNode params && params.size() == 3
+                        && params.get(0).isObject()) {
+                    params.insert(0, token);
+                }
+            }
             String method = requestPayload.path("method").asText("JSON-RPC");
             emit("Отправлен запрос: " + method, "URL: " + safeUrl() + "\n" + safeRequestBody(requestPayload));
             HttpRequest request = requestBuilder(requestPayload, Duration.ofSeconds(15))
@@ -388,6 +397,7 @@ final class SetRetailXClient implements AutoCloseable {
     }
 
     private String refererFor(String method) {
+        if ("print".equals(method)) return baseUrl + "/price-tags/custom-printing/printing";
         String page = "getObjectsIds".equals(method) || "getProducts".equals(method)
                 ? "/price-tags/not-printed" : "/price-tags/custom-printing";
         return baseUrl + page;

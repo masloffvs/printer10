@@ -1,13 +1,18 @@
 package com.setretailx.printer.config;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 
 public final class AppConfig {
     public static final Path APP_DIR = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+    public static final Path DOT_ENV_PATH = APP_DIR.resolve(".env");
     public static final Path DB_PATH = APP_DIR.resolve("all_products.sqlite");
     public static final Path PRINT_HISTORY_PATH = printHistoryPath();
     public static final List<PrintFormat> PRINT_FORMATS = List.of(
@@ -16,6 +21,8 @@ public final class AppConfig {
             new PrintFormat("C", "Формат C", 9975059, "23574"));
 
     private AppConfig() { }
+
+    private static final Map<String, Optional<String>> previousDotEnvProperties = new HashMap<>();
 
     /** Normalize canonical Latin keys and legacy Cyrillic aliases to A/B/C. */
     public static String normalizeFormatKey(String key) {
@@ -50,11 +57,31 @@ public final class AppConfig {
                 "SetRetailX", "print_history.sqlite");
     }
 
-    public static void loadDotEnv() {
-        Path env = APP_DIR.resolve(".env");
-        if (!Files.isRegularFile(env)) return;
+    public static synchronized String readDotEnv() throws IOException {
+        if (Files.isRegularFile(DOT_ENV_PATH)) {
+            return Files.readString(DOT_ENV_PATH, StandardCharsets.UTF_8);
+        }
+        return "# SetRetailX connection settings\n"
+                + "SETRETAILX_RPC_URL=http://localhost:8090/SetXRMI/json-rpc/\n"
+                + "SETRETAILX_USERNAME=\n"
+                + "SETRETAILX_PASSWORD=\n"
+                + "SETRETAILX_CONNECTION_RETRIES=5\n";
+    }
+
+    public static synchronized void saveDotEnv(String contents) throws IOException {
+        Files.writeString(DOT_ENV_PATH, contents == null ? "" : contents, StandardCharsets.UTF_8);
+        loadDotEnv();
+    }
+
+    public static synchronized void loadDotEnv() {
+        for (Map.Entry<String, Optional<String>> entry : previousDotEnvProperties.entrySet()) {
+            if (entry.getValue().isPresent()) System.setProperty(entry.getKey(), entry.getValue().get());
+            else System.clearProperty(entry.getKey());
+        }
+        previousDotEnvProperties.clear();
+        if (!Files.isRegularFile(DOT_ENV_PATH)) return;
         try {
-            for (String line : Files.readAllLines(env)) {
+            for (String line : Files.readAllLines(DOT_ENV_PATH, StandardCharsets.UTF_8)) {
                 String trimmed = line.trim();
                 if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
                 int split = trimmed.indexOf('=');
@@ -65,7 +92,10 @@ public final class AppConfig {
                         || (value.startsWith("'") && value.endsWith("'")))) {
                     value = value.substring(1, value.length() - 1);
                 }
-                if (System.getenv(key) == null) System.setProperty(key, value);
+                if (System.getenv(key) == null) {
+                    previousDotEnvProperties.putIfAbsent(key, Optional.ofNullable(System.getProperty(key)));
+                    System.setProperty(key, value);
+                }
             }
         } catch (IOException error) {
             System.err.println("Не удалось прочитать .env: " + error.getMessage());

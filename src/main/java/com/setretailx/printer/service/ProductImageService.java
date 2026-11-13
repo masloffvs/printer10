@@ -4,9 +4,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLConnection;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -14,6 +14,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.security.GeneralSecurityException;
+import java.security.cert.X509Certificate;
 
 /** Resolves common catalog image fields and downloads image bytes with bounded size. */
 public final class ProductImageService {
@@ -21,11 +27,6 @@ public final class ProductImageService {
     private static final Pattern URL = Pattern.compile("https?://[^\\s\\\"'<>]+", Pattern.CASE_INSENSITIVE);
     private static final Pattern URL_VALUE = Pattern.compile(
             "(?i)[\\\"']?(?:url|src|path|href|original|large)[\\\"']?\\s*[:=]\\s*[\\\"']([^\\\"']+)[\\\"']");
-    private static final HttpClient CLIENT = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(8))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
-
     private ProductImageService() { }
 
     public static String findImageUrl(Map<String, String> details) {
@@ -75,18 +76,27 @@ public final class ProductImageService {
         if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
             throw new IOException("Ссылка на фотографию должна использовать HTTP или HTTPS.");
         }
-        HttpRequest request = HttpRequest.newBuilder(uri)
-                .timeout(Duration.ofSeconds(15))
-                .header("Accept", "image/*")
-                .header("User-Agent", "SetRetailXPrinter/1.0")
-                .GET()
-                .build();
-        HttpResponse<InputStream> response = CLIENT.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        try (InputStream stream = response.body()) {
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IOException("Сервер фотографии ответил HTTP " + response.statusCode() + ".");
-            }
-            String contentType = response.headers().firstValue("Content-Type").orElse("");
+        URLConnection connection = new URL(uri.toString()).openConnection();
+        connection.setConnectTimeout((int) Duration.ofSeconds(8).toMillis());
+        connection.setReadTimeout((int) Duration.ofSeconds(15).toMillis());
+        connection.setRequestProperty("Accept", "image/*");
+        connection.setRequestProperty("User-Agent", "SetRetailXPrinter/1.0");
+        if (connection instanceof HttpsURLConnection https) {
+            // Catalog image hosts may use private/self-signed certificates. This is deliberately
+            // scoped to this image connection; SetRetailX JSON-RPC keeps normal TLS validation.
+            https.setSSLSocketFactory(trustAllSocketFactory());
+            https.setHostnameVerifier((hostname, session) -> true);
+        }
+        HttpURLConnection http = (HttpURLConnection) connection;
+        http.setInstanceFollowRedirects(true);
+        int status = http.getResponseCode();
+        if (status < 200 || status >= 300) {
+            http.disconnect();
+            throw new IOException("Сервер фотографии ответил HTTP " + status + ".");
+        }
+        try (InputStream stream = http.getInputStream()) {
+            String contentType = http.getHeaderField("Content-Type");
+            if (contentType == null) contentType = "";
             if (!contentType.isBlank() && !contentType.toLowerCase(Locale.ROOT).startsWith("image/")) {
                 throw new IOException("Сервер вернул не файл изображения.");
             }
@@ -100,6 +110,23 @@ public final class ProductImageService {
                 image.write(buffer, 0, read);
             }
             return image.toByteArray();
+        } finally {
+            http.disconnect();
+        }
+    }
+
+    private static javax.net.ssl.SSLSocketFactory trustAllSocketFactory() throws IOException {
+        try {
+            TrustManager[] trustAll = {new X509TrustManager() {
+                @Override public void checkClientTrusted(X509Certificate[] chain, String authType) { }
+                @Override public void checkServerTrusted(X509Certificate[] chain, String authType) { }
+                @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            }};
+            SSLContext context = SSLContext.getInstance("TLS");
+            context.init(null, trustAll, new java.security.SecureRandom());
+            return context.getSocketFactory();
+        } catch (GeneralSecurityException error) {
+            throw new IOException("Не удалось подготовить HTTPS для загрузки фотографии.", error);
         }
     }
 

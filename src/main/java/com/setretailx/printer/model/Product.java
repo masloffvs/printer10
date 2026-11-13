@@ -14,7 +14,13 @@ public record Product(
         String source,
         Price price,
         String totalQuantity,
-        Map<String, String> details) {
+        Map<String, String> details,
+        String rawJson) {
+
+    public Product(String stCode, String name, String vendorCode, String barcode, String uom,
+                   String source, Price price, String totalQuantity, Map<String, String> details) {
+        this(stCode, name, vendorCode, barcode, uom, source, price, totalQuantity, details, "");
+    }
 
     public Product {
         stCode = value(stCode);
@@ -25,6 +31,7 @@ public record Product(
         source = value(source);
         totalQuantity = value(totalQuantity);
         details = details == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(details));
+        rawJson = value(rawJson);
     }
 
     private static String value(String text) {
