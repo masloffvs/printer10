@@ -43,6 +43,7 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
             new WindowSpec("storage", "Сканирование единичных коробок", "Единичные коробки"),
             new WindowSpec("storageAddresses", "Адреса хранения", "Адреса"),
+            new WindowSpec("salesPoints", "Виртуальные точки продаж", "Точки продаж"),
             new WindowSpec("palletScanning", "Сканирование паллет", "Паллеты"),
             new WindowSpec("priceChanges", "История изменения цен", "История цен"),
             new WindowSpec("environment", "Обслуживание и администрирование", "Администрирование")
@@ -243,6 +244,7 @@ final class MdiWorkspace extends JPanel {
         toolBar.setToolTipText("Навигация по разделам и открытым окнам");
         addNavigationGroup("ТОВАРЫ", "scanner", "comparison", "search", "queue");
         addNavigationGroup("СКЛАД", "storage", "storageAddresses", "palletScanning");
+        addNavigationGroup("ТОРГОВЫЕ ТОЧКИ", "salesPoints");
         addNavigationGroup("ИСТОРИЯ И ЗАДАЧИ", "history", "priceChanges", "tasks");
         addNavigationGroup("ОБМЕН И СЕРВИС", "exchange", "environment");
         dynamicToolbarIndex = toolBar.getComponentCount();
@@ -483,6 +485,7 @@ final class MdiWorkspace extends JPanel {
                 case "search" -> new Color(56, 133, 97);
                 case "queue", "history", "tasks" -> new Color(190, 125, 45);
                 case "storage", "storageAddresses", "palletScanning" -> new Color(46, 139, 132);
+                case "salesPoints" -> new Color(46, 139, 132);
                 default -> new Color(105, 113, 125);
             };
         }

@@ -10,6 +10,7 @@ import com.setretailx.printer.model.ScannedProbe;
 import com.setretailx.printer.repository.ProductRepository;
 import com.setretailx.printer.repository.PrintHistoryRepository;
 import com.setretailx.printer.repository.AddressStorageRepository;
+import com.setretailx.printer.repository.SalesPointRepository;
 import com.setretailx.printer.service.SetRetailXConnector;
 import com.setretailx.printer.service.ExchangeEvent;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
@@ -34,6 +35,7 @@ public final class MainWindow extends JFrame {
     private final ProductRepository products = new ProductRepository();
     private final PrintHistoryRepository printHistory = new PrintHistoryRepository();
     private final AddressStorageRepository addressStorage = new AddressStorageRepository();
+    private final SalesPointRepository salesPoints = new SalesPointRepository();
     private final MdiWorkspace workspace = new MdiWorkspace();
     private final List<QueueEntry> entries = new ArrayList<>();
     private final ScannerPanel scanner = new ScannerPanel(this::submitScan);
@@ -80,6 +82,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("tasks", taskPanel, 900, 520);
         workspace.addWindow("storage", addressStoragePanel, 900, 560);
         workspace.addWindow("storageAddresses", addressManagementPanel, 900, 520);
+        workspace.addWindow("salesPoints", salesPointsPanel, 1000, 680);
         workspace.addWindow("palletScanning", palletScanningPanel, 900, 600);
         workspace.addWindow("priceChanges", priceChanges, 900, 520);
         workspace.addWindow("environment", new EnvironmentPanel(() -> {
@@ -91,6 +94,7 @@ public final class MainWindow extends JFrame {
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Очередь печати");
         scanner.registerRecipient("storage", "Сканирование единичных коробок");
+        scanner.registerRecipient("salesPoints", "Точки продаж · ценники");
         workspace.setWindowVisibilityListener((key, open) -> {
             scanner.setRecipientOpen(key, open);
             if ("palletScanning".equals(key) && open) palletScanningPanel.focusScanner();
@@ -155,6 +159,10 @@ public final class MainWindow extends JFrame {
         if (scanner.sendsTo("comparison") && probe.hasPriceData()) {
             receivers++;
             receivePriceScan(probe);
+        }
+        if (scanner.sendsTo("salesPoints") && probe.hasPriceData()) {
+            receivers++;
+            receiveSalesPointPriceScan(probe);
         }
         if (scanner.sendsTo("search") && !probe.hasPriceData() && !probe.barcode().isEmpty()) {
             receivers++;
@@ -283,6 +291,29 @@ public final class MainWindow extends JFrame {
     private void receivePriceScan(ScannedProbe probe) {
         comparison.receiveScan(probe);
         log("Скан ценника принят для сверки: barcode=" + probe.barcode());
+    }
+
+    private void receiveSalesPointPriceScan(ScannedProbe probe) {
+        long targetPointId = salesPointsPanel.selectedPointId();
+        if (targetPointId < 0) {
+            status.setText("Выберите точку продаж на карте перед сканированием ценника.");
+            return;
+        }
+        if (probe.barcode().isBlank()) {
+            status.setText("Для ценника точки продаж нужен barcode.");
+            return;
+        }
+        runBackground(() -> {
+            Product product = products.findByBarcode(probe.barcode());
+            return product != null ? product : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+        }, product -> {
+            if (product == null) {
+                status.setText("Товар " + probe.barcode() + " не найден; ценник точки не обновлён.");
+                return;
+            }
+            salesPointsPanel.acceptPriceScan(targetPointId, product, probe);
+            workspace.showWindow("salesPoints");
+        }, error -> status.setText("Не удалось найти товар для точки продаж: " + error));
     }
 
     private void enqueueMismatchedProduct(Product product) {
