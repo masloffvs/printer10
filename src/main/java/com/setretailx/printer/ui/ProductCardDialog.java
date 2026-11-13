@@ -7,7 +7,6 @@ import javax.imageio.ImageIO;
 import javax.swing.BorderFactory;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
-import javax.swing.JDialog;
 import javax.swing.JEditorPane;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -15,6 +14,7 @@ import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTextArea;
 import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.text.html.HTMLEditorKit;
 import java.awt.BorderLayout;
@@ -44,7 +44,7 @@ import java.util.Map;
  * (key fields + characteristics) on the right, description below.
  */
 @SuppressWarnings("serial")
-final class ProductCardDialog extends JDialog {
+final class ProductCardDialog extends JPanel {
     private static final Map<String, String> LABELS = Map.ofEntries(
             Map.entry("brand", "Бренд"), Map.entry("brandname", "Бренд"),
             Map.entry("manufacturer", "Производитель"), Map.entry("manufacturername", "Производитель"),
@@ -70,11 +70,8 @@ final class ProductCardDialog extends JDialog {
     private final JButton openPhotoButton = new JButton("Открыть в новом окне");
     private BufferedImage originalImage;
 
-    ProductCardDialog(java.awt.Window owner, Product product) {
-        super(owner, "Карточка товара — " + product.name(), ModalityType.APPLICATION_MODAL);
-        setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setMinimumSize(new Dimension(720, 540));
-
+    ProductCardDialog(Product product) {
+        super(new BorderLayout());
         JPanel content = new JPanel(new BorderLayout(16, 10));
         content.setBorder(BorderFactory.createEmptyBorder(18, 18, 18, 18));
 
@@ -91,10 +88,8 @@ final class ProductCardDialog extends JDialog {
         tabs.addTab("Raw JSON", createRawJson(product));
         content.add(tabs, BorderLayout.CENTER);
 
-        setContentPane(content);
-        pack();
-        setSize(Math.max(760, getWidth()), Math.max(560, getHeight()));
-        setLocationRelativeTo(owner);
+        add(content, BorderLayout.CENTER);
+        setPreferredSize(new Dimension(620, 540));
         loadImage(product);
     }
 
@@ -306,8 +301,10 @@ final class ProductCardDialog extends JDialog {
         int height = Math.max(1, (int) Math.round(originalImage.getHeight() * scale));
         Image scaled = originalImage.getScaledInstance(width, height, Image.SCALE_SMOOTH);
         JLabel enlarged = new JLabel(new ImageIcon(scaled));
-        JDialog dialog = new JDialog(this, "Фотография товара", ModalityType.MODELESS);
-        dialog.setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+        java.awt.Window owner = SwingUtilities.getWindowAncestor(this);
+        javax.swing.JDialog dialog = new javax.swing.JDialog(owner, "Фотография товара",
+                java.awt.Dialog.ModalityType.MODELESS);
+        dialog.setDefaultCloseOperation(javax.swing.JDialog.DISPOSE_ON_CLOSE);
         dialog.add(new JScrollPane(enlarged));
         dialog.pack();
         dialog.setLocationRelativeTo(this);

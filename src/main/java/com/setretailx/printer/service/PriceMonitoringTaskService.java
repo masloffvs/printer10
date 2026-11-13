@@ -1,5 +1,6 @@
 package com.setretailx.printer.service;
 
+import com.setretailx.printer.config.AppConfig;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -49,7 +50,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
 
     /** Uses the same per-user database file as the Python task scheduler. */
     public PriceMonitoringTaskService(SetRetailXConnector connector) {
-        this(connector, defaultDatabasePath());
+        this(connector, AppConfig.tasksDatabasePath());
     }
 
     public PriceMonitoringTaskService(SetRetailXConnector connector, Path path) {
@@ -145,6 +146,22 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return result;
     }
 
+    public List<TaskRun> taskRuns(String taskId, int limit) throws SQLException {
+        List<TaskRun> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT id, task_id, started_at, finished_at, status, result FROM task_runs "
+                        + "WHERE task_id=? ORDER BY started_at DESC LIMIT ?")) {
+            statement.setString(1, taskId);
+            statement.setInt(2, Math.max(1, Math.min(limit, 1000)));
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new TaskRun(rows.getLong("id"), rows.getString("task_id"),
+                        rows.getDouble("started_at"), nullableDouble(rows, "finished_at"),
+                        rows.getString("status"), rows.getString("result")));
+            }
+        }
+        return result;
+    }
+
     private void pollDueTask() {
         if (!isTaskRunning.compareAndSet(false, true)) return;
         try {
@@ -158,15 +175,16 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     }
 
     private void executeTask(TaskInfo task) {
+        double startedAt = nowSeconds();
         try {
             String result = task.taskId().equals(DISCOVERY_TASK_ID)
                     ? runCandidateDiscovery() : runPriceSnapshots();
-            finish(task.taskId(), "Успешно", result);
+            finish(task.taskId(), startedAt, "Успешно", result);
         } catch (Throwable error) {
             Throwable cause = unwrap(error);
             String result = cause.getClass().getSimpleName() + ": "
                     + (cause.getMessage() == null ? cause.toString() : cause.getMessage());
-            try { finish(task.taskId(), "Ошибка", result); }
+            try { finish(task.taskId(), startedAt, "Ошибка", result); }
             catch (SQLException finishError) { cause.addSuppressed(finishError); }
         } finally {
             isTaskRunning.set(false);
@@ -202,20 +220,6 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         try (Connection connection = connect()) {
             connection.setAutoCommit(false);
             acquireWriteLock(connection);
-            for (String marking : markings) {
-                try (PreparedStatement query = connection.prepareStatement(
-                        "SELECT 1 FROM price_candidates WHERE marking=? AND expires_at>?")) {
-                    query.setString(1, marking);
-                    query.setDouble(2, now);
-                    try (ResultSet row = query.executeQuery()) {
-                        if (!row.next()) try (PreparedStatement delete = connection.prepareStatement(
-                                "DELETE FROM price_snapshots WHERE marking=?")) {
-                            delete.setString(1, marking);
-                            delete.executeUpdate();
-                        }
-                    }
-                }
-            }
             List<String> expired = new ArrayList<>();
             try (PreparedStatement query = connection.prepareStatement(
                     "SELECT marking FROM price_candidates WHERE expires_at<=?")) {
@@ -223,7 +227,6 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                 try (ResultSet rows = query.executeQuery()) { while (rows.next()) expired.add(rows.getString(1)); }
             }
             for (String marking : expired) {
-                deleteByMarking(connection, "price_snapshots", marking);
                 deleteByMarking(connection, "price_candidates", marking);
             }
             try (PreparedStatement insert = connection.prepareStatement(
@@ -365,11 +368,21 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         }
     }
 
-    private void finish(String taskId, String status, String result) throws SQLException {
-        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
-                "UPDATE long_tasks SET last_finished_at=?, last_status=?, last_result=? WHERE task_id=?")) {
-            statement.setDouble(1, nowSeconds()); statement.setString(2, status); statement.setString(3, result);
-            statement.setString(4, taskId); statement.executeUpdate();
+    private void finish(String taskId, double startedAt, String status, String result) throws SQLException {
+        double finishedAt = nowSeconds();
+        try (Connection connection = connect()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE long_tasks SET last_finished_at=?, last_status=?, last_result=? WHERE task_id=?")) {
+                statement.setDouble(1, finishedAt); statement.setString(2, status); statement.setString(3, result);
+                statement.setString(4, taskId); statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "INSERT INTO task_runs (task_id, started_at, finished_at, status, result) VALUES (?, ?, ?, ?, ?)")) {
+                statement.setString(1, taskId); statement.setDouble(2, startedAt); statement.setDouble(3, finishedAt);
+                statement.setString(4, status); statement.setString(5, result); statement.executeUpdate();
+            }
+            connection.commit();
         }
     }
 
@@ -389,6 +402,10 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS price_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                     + "marking TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', barcode TEXT NOT NULL DEFAULT '', detected_at REAL NOT NULL, "
                     + "old_prices_json TEXT NOT NULL, new_prices_json TEXT NOT NULL)");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    + "task_id TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, status TEXT NOT NULL, "
+                    + "result TEXT NOT NULL DEFAULT '')");
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_task_runs_task_started ON task_runs(task_id, started_at DESC)");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_price_changes_detected ON price_changes(detected_at DESC)");
             statement.executeUpdate("UPDATE long_tasks SET task_id='" + DISCOVERY_TASK_ID + "', name='"
                     + DISCOVERY_TASK_NAME + "' WHERE task_id='price_change_monitor' AND NOT EXISTS "
@@ -454,17 +471,6 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return error;
     }
 
-    private static Path defaultDatabasePath() {
-        String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
-        Path home = Path.of(System.getProperty("user.home"));
-        Path base;
-        if (os.contains("win")) base = Path.of(System.getenv().getOrDefault("LOCALAPPDATA",
-                home.resolve("AppData/Local").toString()));
-        else if (os.contains("mac") || os.contains("darwin")) base = home.resolve("Library/Application Support");
-        else base = Path.of(System.getenv().getOrDefault("XDG_DATA_HOME", home.resolve(".local/share").toString()));
-        return base.resolve("SetRetailX").resolve("printer12.db");
-    }
-
     @Override public void close() {
         running.set(false);
         executor.shutdownNow();
@@ -475,5 +481,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                            String lastStatus, String lastResult) { }
     public record PriceChange(String marking, String name, String barcode, double detectedAt,
                               String oldPricesJson, String newPricesJson) { }
+    public record TaskRun(long id, String taskId, double startedAt, Double finishedAt,
+                          String status, String result) { }
     private record SnapshotCounts(int snapshots, int changes, int unmatched) { }
 }

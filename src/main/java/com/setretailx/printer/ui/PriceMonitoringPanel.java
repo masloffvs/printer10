@@ -1,20 +1,16 @@
 package com.setretailx.printer.ui;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
-import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
-import javax.swing.JTabbedPane;
 import javax.swing.JTable;
-import javax.swing.JTextField;
+import javax.swing.JTextArea;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.ListSelectionModel;
 import javax.swing.Timer;
@@ -25,58 +21,39 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 
-/** Controls persistent price-monitor tasks and displays the recent price-change history. */
+/** Controls persistent price-monitor tasks and their schedules. */
 @SuppressWarnings("serial")
 public final class PriceMonitoringPanel extends JPanel implements AutoCloseable {
-    private static final ObjectMapper JSON = new ObjectMapper();
     private static final DateTimeFormatter TASK_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-    private static final DateTimeFormatter CHANGE_TIME = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
     private final PriceMonitoringTaskService service;
     private final DefaultTableModel taskModel = model("Задача", "Состояние", "Расписание",
             "Последний запуск", "Следующий запуск", "Результат");
     private final JTable taskTable = new JTable(taskModel);
-    private final DefaultTableModel changeModel = model("Когда", "Артикул", "Товар", "Штрихкод",
-            "Тип цены", "Было", "Стало");
-    private final JTable changeTable = new JTable(changeModel);
+    private final MdiWorkspace workspace;
     private final JLabel summary = new JLabel("Загрузка задач…");
     private final JLabel status = new JLabel(" ");
     private final JCheckBox enabled = new JCheckBox("Включена");
     private final JSpinner intervalMinutes = new JSpinner(new SpinnerNumberModel(60, 1, 10080, 1));
     private final JButton saveSchedule = new JButton("Сохранить расписание");
     private final JButton runNow = new JButton("Запустить сейчас");
-    private final JTextField changeSearch = new JTextField(18);
-    private final JComboBox<PriceFilter> priceType = new JComboBox<>(PriceFilter.values());
-    private final JLabel changesCount = new JLabel(" ");
     private final Timer refreshTimer;
     private List<PriceMonitoringTaskService.TaskInfo> tasks = List.of();
     private boolean refreshing;
 
-    public PriceMonitoringPanel(PriceMonitoringTaskService service) {
+    public PriceMonitoringPanel(PriceMonitoringTaskService service, MdiWorkspace workspace) {
         super(new BorderLayout(8, 8));
         this.service = java.util.Objects.requireNonNull(service, "service");
+        this.workspace = java.util.Objects.requireNonNull(workspace, "workspace");
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
-        JTabbedPane tabs = new JTabbedPane();
-        tabs.addTab("Задачи", createTasksTab());
-        tabs.addTab("История цен", createChangesTab());
-        add(tabs, BorderLayout.CENTER);
+        add(createTasksTab(), BorderLayout.CENTER);
 
         saveSchedule.addActionListener(event -> saveSchedule());
         runNow.addActionListener(event -> runSelectedNow());
         taskTable.getSelectionModel().addListSelectionListener(event -> {
             if (!event.getValueIsAdjusting()) updateTaskControls();
         });
-        changeSearch.addActionListener(event -> refreshChanges());
-        changeSearch.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            @Override public void insertUpdate(javax.swing.event.DocumentEvent event) { refreshChanges(); }
-            @Override public void removeUpdate(javax.swing.event.DocumentEvent event) { refreshChanges(); }
-            @Override public void changedUpdate(javax.swing.event.DocumentEvent event) { refreshChanges(); }
-        });
-        priceType.addActionListener(event -> refreshChanges());
-
         service.start();
         refresh();
         refreshTimer = new Timer(5000, event -> refresh());
@@ -97,25 +74,13 @@ public final class PriceMonitoringPanel extends JPanel implements AutoCloseable 
         controls.add(intervalMinutes);
         controls.add(saveSchedule);
         controls.add(runNow);
+        JButton logs = new JButton("Просмотр логов");
+        logs.addActionListener(event -> showTaskLogs());
+        controls.add(logs);
         bottom.add(controls, BorderLayout.NORTH);
         status.setVerticalAlignment(JLabel.TOP);
         bottom.add(status, BorderLayout.CENTER);
         panel.add(bottom, BorderLayout.SOUTH);
-        return panel;
-    }
-
-    private JPanel createChangesTab() {
-        JPanel panel = new JPanel(new BorderLayout(8, 8));
-        JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        filters.add(new JLabel("Поиск товара:"));
-        changeSearch.setToolTipText("Артикул, название или штрихкод");
-        filters.add(changeSearch);
-        filters.add(new JLabel("Тип цены:"));
-        filters.add(priceType);
-        panel.add(filters, BorderLayout.NORTH);
-        configureTable(changeTable);
-        panel.add(new JScrollPane(changeTable), BorderLayout.CENTER);
-        panel.add(changesCount, BorderLayout.SOUTH);
         return panel;
     }
 
@@ -132,7 +97,7 @@ public final class PriceMonitoringPanel extends JPanel implements AutoCloseable 
         };
     }
 
-    /** Refresh both views; database reads are short and confined to this UI action. */
+    /** Refresh task state from the shared SQLite store. */
     public void refresh() {
         if (refreshing) return;
         refreshing = true;
@@ -142,7 +107,7 @@ public final class PriceMonitoringPanel extends JPanel implements AutoCloseable 
             int enabledCount = (int) tasks.stream().filter(PriceMonitoringTaskService.TaskInfo::enabled).count();
             int runningCount = (int) tasks.stream().filter(task -> "Выполняется".equals(task.lastStatus())).count();
             summary.setText("Всего задач: " + tasks.size() + " · включено: " + enabledCount
-                    + " · сейчас выполняется: " + runningCount);
+                    + " · сейчас выполняется: " + runningCount + " · база истории: " + service.databasePath());
             taskModel.setRowCount(0);
             int selectedRow = -1;
             for (int row = 0; row < tasks.size(); row++) {
@@ -158,7 +123,6 @@ public final class PriceMonitoringPanel extends JPanel implements AutoCloseable 
             if (selectedRow < 0 && !tasks.isEmpty()) selectedRow = 0;
             if (selectedRow >= 0) taskTable.setRowSelectionInterval(selectedRow, selectedRow);
             updateTaskControls();
-            refreshChanges();
         } catch (SQLException error) {
             status.setText("Не удалось обновить задачи: " + error.getMessage());
         } finally {
@@ -210,56 +174,46 @@ public final class PriceMonitoringPanel extends JPanel implements AutoCloseable 
         }
     }
 
-    private void refreshChanges() {
+    private void showTaskLogs() {
+        PriceMonitoringTaskService.TaskInfo task = selectedTask();
+        if (task == null) return;
+        JPanel panel = new JPanel(new BorderLayout(8, 8));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        DefaultTableModel logsModel = model("Начало", "Завершение", "Статус", "Результат");
+        JTable logsTable = new JTable(logsModel);
+        logsTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        JTextArea details = new JTextArea();
+        details.setEditable(false);
+        details.setLineWrap(true);
+        details.setWrapStyleWord(true);
+        JLabel heading = new JLabel("Журнал запусков: " + task.name());
+        panel.add(heading, BorderLayout.NORTH);
+        panel.add(new JScrollPane(logsTable), BorderLayout.CENTER);
+        JScrollPane detailScroll = new JScrollPane(details);
+        detailScroll.setPreferredSize(new java.awt.Dimension(300, 100));
+        detailScroll.setBorder(BorderFactory.createTitledBorder("Подробности запуска"));
+        panel.add(detailScroll, BorderLayout.SOUTH);
         try {
-            String query = changeSearch.getText().trim().toLowerCase(Locale.ROOT);
-            PriceFilter filter = (PriceFilter) priceType.getSelectedItem();
-            List<ChangeRow> visible = new ArrayList<>();
-            List<PriceMonitoringTaskService.PriceChange> changes = service.recentChanges(1000);
-            for (var change : changes) {
-                String searchable = (change.marking() + " " + change.name() + " " + change.barcode())
-                        .toLowerCase(Locale.ROOT);
-                if (!query.isEmpty() && !searchable.contains(query)) continue;
-                JsonNode oldPrices = readJson(change.oldPricesJson());
-                JsonNode newPrices = readJson(change.newPricesJson());
-                appendChangedPrices(visible, change, oldPrices, newPrices, "Обычные", "pricesMap", filter);
-                appendChangedPrices(visible, change, oldPrices, newPrices, "99", "prices99Map", filter);
+            for (var run : service.taskRuns(task.taskId(), 500)) {
+                logsModel.addRow(new Object[]{formatEpoch(run.startedAt(), TASK_TIME),
+                        run.finishedAt() == null ? "Выполняется" : formatEpoch(run.finishedAt(), TASK_TIME),
+                        run.status(), run.result()});
             }
-            visible.sort((left, right) -> Double.compare(right.detectedAt(), left.detectedAt()));
-            changeModel.setRowCount(0);
-            for (ChangeRow entry : visible) {
-                changeModel.addRow(new Object[]{formatEpoch(entry.detectedAt(), CHANGE_TIME), entry.marking(),
-                        entry.name(), entry.barcode(), entry.priceType(), entry.oldValue(), entry.newValue()});
+            if (logsModel.getRowCount() == 0 && task.lastFinishedAt() != null) {
+                logsModel.addRow(new Object[]{formatEpoch(task.lastStartedAt() == null
+                                ? task.lastFinishedAt() : task.lastStartedAt(), TASK_TIME),
+                        formatEpoch(task.lastFinishedAt(), TASK_TIME), task.lastStatus(), task.lastResult()});
             }
-            changesCount.setText("Показано изменений цен: " + visible.size()
-                    + (changes.size() >= 1000 ? " · просмотрены последние 1000 событий" : ""));
+            if (logsModel.getRowCount() == 0) details.setText("Для этой задачи ещё нет сохранённых запусков.");
+            logsTable.getSelectionModel().addListSelectionListener(event -> {
+                int row = logsTable.getSelectedRow();
+                if (!event.getValueIsAdjusting() && row >= 0) details.setText(String.valueOf(logsModel.getValueAt(row, 3)));
+            });
+            if (logsModel.getRowCount() > 0) logsTable.setRowSelectionInterval(0, 0);
         } catch (SQLException error) {
-            changesCount.setText("Не удалось загрузить историю: " + error.getMessage());
+            details.setText("Не удалось загрузить логи: " + error.getMessage());
         }
-    }
-
-    private static void appendChangedPrices(List<ChangeRow> output,
-                                            PriceMonitoringTaskService.PriceChange change,
-                                            JsonNode oldPrices, JsonNode newPrices,
-                                            String label, String mapName, PriceFilter filter) {
-        if (filter != PriceFilter.ALL && !filter.mapName.equals(mapName)) return;
-        JsonNode oldMap = oldPrices.path(mapName);
-        JsonNode newMap = newPrices.path(mapName);
-        java.util.TreeSet<String> numbers = new java.util.TreeSet<>();
-        if (oldMap.isObject()) oldMap.fieldNames().forEachRemaining(numbers::add);
-        if (newMap.isObject()) newMap.fieldNames().forEachRemaining(numbers::add);
-        for (String number : numbers) {
-            JsonNode oldNode = oldMap.get(number), newNode = newMap.get(number);
-            String oldValue = oldNode == null ? "—" : oldNode.asText();
-            String newValue = newNode == null ? "—" : newNode.asText();
-            if (!oldValue.equals(newValue)) output.add(new ChangeRow(change.detectedAt(), change.marking(),
-                    change.name(), change.barcode(), label + " #" + number, oldValue, newValue));
-        }
-    }
-
-    private static JsonNode readJson(String value) {
-        try { return JSON.readTree(value == null ? "{}" : value); }
-        catch (Exception ignored) { return JSON.createObjectNode(); }
+        workspace.addDynamicWindow("Логи задачи — " + task.name(), panel, 760, 440);
     }
 
     private String selectedTaskId() {
@@ -285,14 +239,4 @@ public final class PriceMonitoringPanel extends JPanel implements AutoCloseable 
         service.close();
     }
 
-    private enum PriceFilter {
-        ALL("Все", null), NORMAL("Обычная", "pricesMap"), PROMO("99", "prices99Map");
-        private final String label;
-        private final String mapName;
-        PriceFilter(String label, String mapName) { this.label = label; this.mapName = mapName; }
-        @Override public String toString() { return label; }
-    }
-
-    private record ChangeRow(double detectedAt, String marking, String name, String barcode,
-                             String priceType, String oldValue, String newValue) { }
 }

@@ -57,6 +57,36 @@ public final class AppConfig {
                 "SetRetailX", "print_history.sqlite");
     }
 
+    public static Path tasksDatabasePath() {
+        String configured = System.getenv("SETRETAILX_TASKS_DB_PATH");
+        if (configured == null || configured.isBlank()) {
+            configured = System.getProperty("SETRETAILX_TASKS_DB_PATH", "").trim();
+        }
+        if (configured == null || configured.isBlank()) {
+            configured = dotEnvValue("SETRETAILX_TASKS_DB_PATH");
+        }
+        Path path;
+        if (!configured.isBlank()) {
+            path = Path.of(configured);
+            if (!path.isAbsolute()) path = APP_DIR.resolve(path);
+        } else {
+            String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+            if (os.contains("mac") || os.contains("darwin")) {
+                path = Path.of(System.getProperty("user.home"), "Library", "Application Support",
+                        "SetRetailX", "printer12.db");
+            } else if (os.contains("win")) {
+                path = Path.of(System.getenv().getOrDefault("LOCALAPPDATA",
+                        Path.of(System.getProperty("user.home"), "AppData", "Local").toString()),
+                        "SetRetailX", "printer12.db");
+            } else {
+                path = Path.of(System.getenv().getOrDefault("XDG_DATA_HOME",
+                                Path.of(System.getProperty("user.home"), ".local", "share").toString()),
+                        "SetRetailX", "printer12.db");
+            }
+        }
+        return path.toAbsolutePath().normalize();
+    }
+
     public static synchronized String readDotEnv() throws IOException {
         if (Files.isRegularFile(DOT_ENV_PATH)) {
             return Files.readString(DOT_ENV_PATH, StandardCharsets.UTF_8);
@@ -65,7 +95,9 @@ public final class AppConfig {
                 + "SETRETAILX_RPC_URL=http://localhost:8090/SetXRMI/json-rpc/\n"
                 + "SETRETAILX_USERNAME=\n"
                 + "SETRETAILX_PASSWORD=\n"
-                + "SETRETAILX_CONNECTION_RETRIES=5\n";
+                + "SETRETAILX_CONNECTION_RETRIES=5\n"
+                + "# SQLite: история изменения цен и фоновых задач (путь можно изменить)\n"
+                + "SETRETAILX_TASKS_DB_PATH=" + tasksDatabasePath() + "\n";
     }
 
     public static synchronized void saveDotEnv(String contents) throws IOException {
@@ -100,6 +132,27 @@ public final class AppConfig {
         } catch (IOException error) {
             System.err.println("Не удалось прочитать .env: " + error.getMessage());
         }
+    }
+
+    private static String dotEnvValue(String expectedKey) {
+        if (!Files.isRegularFile(DOT_ENV_PATH)) return "";
+        try {
+            for (String line : Files.readAllLines(DOT_ENV_PATH, StandardCharsets.UTF_8)) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+                int split = trimmed.indexOf('=');
+                if (split <= 0 || !trimmed.substring(0, split).trim().equals(expectedKey)) continue;
+                String value = trimmed.substring(split + 1).trim();
+                if (value.length() >= 2 && ((value.startsWith("\"") && value.endsWith("\""))
+                        || (value.startsWith("'") && value.endsWith("'")))) {
+                    value = value.substring(1, value.length() - 1);
+                }
+                return value;
+            }
+        } catch (IOException error) {
+            System.err.println("Не удалось прочитать путь хранилища из .env: " + error.getMessage());
+        }
+        return "";
     }
 
     public record PrintFormat(String key, String name, int printerId, String templateId) {

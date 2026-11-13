@@ -208,15 +208,8 @@ class TaskStore:
         )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            for marking in markings:
-                was_active = connection.execute(
-                    "SELECT 1 FROM price_candidates WHERE marking=? AND expires_at>?",
-                    (marking, now),
-                ).fetchone()
-                if was_active is None:
-                    connection.execute(
-                        "DELETE FROM price_snapshots WHERE marking=?", (marking,)
-                    )
+            # Keep the last observed price baseline across candidate expiry/re-discovery
+            # so the next snapshot can still record a change after a monitoring gap.
             expired = [
                 row["marking"]
                 for row in connection.execute(
@@ -224,10 +217,6 @@ class TaskStore:
                 ).fetchall()
             ]
             if expired:
-                connection.executemany(
-                    "DELETE FROM price_snapshots WHERE marking=?",
-                    ((marking,) for marking in expired),
-                )
                 connection.executemany(
                     "DELETE FROM price_candidates WHERE marking=?",
                     ((marking,) for marking in expired),

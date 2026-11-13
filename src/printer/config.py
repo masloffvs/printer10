@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+from dotenv import dotenv_values
 
 
 # SQLite lives beside the project root when running from source, or next to the
@@ -28,7 +29,15 @@ def _user_data_dir():
 
 DATA_DIR = _user_data_dir()
 PRINT_HISTORY_PATH = DATA_DIR / "print_history.sqlite"
-TASKS_DB_PATH = DATA_DIR / "printer12.db"
+_tasks_db_path = os.environ.get("SETRETAILX_TASKS_DB_PATH")
+if not _tasks_db_path:
+    _tasks_db_path = dotenv_values(APP_DIR / ".env").get("SETRETAILX_TASKS_DB_PATH")
+if _tasks_db_path:
+    TASKS_DB_PATH = Path(_tasks_db_path).expanduser()
+    if not TASKS_DB_PATH.is_absolute():
+        TASKS_DB_PATH = APP_DIR / TASKS_DB_PATH
+else:
+    TASKS_DB_PATH = DATA_DIR / "printer12.db"
 
 PRINT_FORMATS = {
     "А": {"name": "Формат А", "printer_id": 9974664, "template_id": "22766"},

@@ -43,7 +43,8 @@ public final class MainWindow extends JFrame {
     private final PrintHistoryPanel history = new PrintHistoryPanel(this::restoreBatch, this::refreshHistory);
     private final SetRetailXConnector network = new SetRetailXConnector(event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
-    private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService);
+    private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService, workspace);
+    private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService);
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
     private List<Product> searchResults = new ArrayList<>();
     private boolean printInProgress;
@@ -68,6 +69,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("exchange", exchange, 650, 400);
         workspace.addWindow("history", history, 760, 420);
         workspace.addWindow("tasks", taskPanel, 900, 520);
+        workspace.addWindow("priceChanges", priceChanges, 900, 520);
         workspace.addWindow("environment", new EnvironmentPanel(() -> {
             network.reloadSettings();
             log("Настройки .env сохранены и применены. При необходимости нажмите «Проверить подключение».");
@@ -83,6 +85,7 @@ public final class MainWindow extends JFrame {
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override public void windowClosing(java.awt.event.WindowEvent event) {
                 taskPanel.close();
+                priceChanges.close();
                 network.close();
             }
         });
@@ -306,8 +309,7 @@ public final class MainWindow extends JFrame {
 
     private void showProductCard(Product product) {
         if (product == null) return;
-        ProductCardDialog dialog = new ProductCardDialog(this, product);
-        dialog.setVisible(true);
+        workspace.addProductCard("Карточка — " + product.name(), new ProductCardDialog(product));
     }
 
     private void assignSelected(List<Integer> rows, AppConfig.PrintFormat format,

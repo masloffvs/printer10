@@ -30,11 +30,13 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
             new WindowSpec("history", "История печати", "История"),
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
+            new WindowSpec("priceChanges", "История изменения цен", "История цен"),
             new WindowSpec("environment", "Настройки .env", ".env")
     };
 
     private final JDesktopPane desktop = new JDesktopPane();
     private final Map<String, JInternalFrame> frames = new LinkedHashMap<>();
+    private int dynamicFrameCount;
     private BiConsumer<String, Boolean> visibilityListener = (key, open) -> { };
 
     MdiWorkspace() {
@@ -57,6 +59,41 @@ final class MdiWorkspace extends JPanel {
         });
         desktop.add(frame);
         frames.put(key, frame);
+    }
+
+    void addProductCard(String title, JPanel content) {
+        JInternalFrame frame = new JInternalFrame(title, true, true, true, true);
+        frame.setDefaultCloseOperation(JInternalFrame.DISPOSE_ON_CLOSE);
+        frame.setContentPane(content);
+        frame.setMinimumSize(new java.awt.Dimension(480, 420));
+        frame.setMaximumSize(new java.awt.Dimension(680, 900));
+        frame.setSize(620, 560);
+        frame.addComponentListener(new ComponentAdapter() {
+            @Override public void componentResized(ComponentEvent event) {
+                if (frame.getWidth() > 680) frame.setSize(680, frame.getHeight());
+            }
+        });
+        int offset = (dynamicFrameCount++ % 12) * 26;
+        frame.setLocation(26 + offset, 24 + offset);
+        desktop.add(frame);
+        frame.setVisible(true);
+        frame.toFront();
+        try { frame.setSelected(true); }
+        catch (PropertyVetoException ignored) { }
+    }
+
+    void addDynamicWindow(String title, JPanel content, int width, int height) {
+        JInternalFrame frame = new JInternalFrame(title, true, true, true, true);
+        frame.setDefaultCloseOperation(JInternalFrame.DISPOSE_ON_CLOSE);
+        frame.setContentPane(content);
+        frame.setSize(width, height);
+        int offset = (dynamicFrameCount++ % 12) * 26;
+        frame.setLocation(26 + offset, 24 + offset);
+        desktop.add(frame);
+        frame.setVisible(true);
+        frame.toFront();
+        try { frame.setSelected(true); }
+        catch (PropertyVetoException ignored) { }
     }
 
     void setWindowVisibilityListener(BiConsumer<String, Boolean> listener) {

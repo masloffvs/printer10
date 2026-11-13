@@ -33,9 +33,9 @@ import java.util.function.Consumer;
 final class ComparisonPanel extends JPanel {
     private static final int BATCH_SIZE = 50;
     private final DefaultTableModel model = readOnlyModel(
-            "Статус", "Артикул", "Штрихкод", "Ярлык 1", "Ярлык 2", "Ярлык 3", "Ярлык 4",
-            "Обычная 1", "Обычная 2", "Обычная 3", "Обычная 4",
-            "99 1", "99 2", "99 3", "99 4", "Сверка 1", "Сверка 2", "Сверка 3", "Сверка 4", "Результат");
+            "Статус", "Артикул", "Штрихкод", "Скан #1", "Скан #2", "Скан #3", "Скан #4",
+            "Обычная #1", "Обычная #2", "Обычная #3", "Обычная #4",
+            "99 #1", "99 #2", "99 #3", "99 #4", "Совпал #1", "Совпал #2", "Совпал #3", "Совпал #4", "Результат");
     private final JTable table = new JTable(model);
     private final JLabel status = new JLabel("Ожидаю сканирование ценников.");
     private final ProductRepository repository;
@@ -50,6 +50,8 @@ final class ComparisonPanel extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         table.setRowHeight(24);
+        table.getTableHeader().setToolTipText("#1–#4 — номера ценовых позиций SetRetailX; значения настраиваются на стороне SetRetailX. "
+                + "Обычная = pricesMap, 99 = prices99Map. «Совпал» означает, что значение скана равно обычной ИЛИ 99 цене с тем же номером.");
         add(new JScrollPane(table), BorderLayout.CENTER);
         JPanel footer = new JPanel(new BorderLayout(8, 0));
         footer.add(status, BorderLayout.CENTER);
@@ -160,8 +162,12 @@ final class ComparisonPanel extends JPanel {
             try {
                 Product product = repository.findByBarcode(scan.probe.barcode());
                 if (product == null) {
-                    results.add(ComparisonResult.error(scan, "Штрихкод не найден в локальной базе"));
-                    continue;
+                    product = activeConnector.searchOnlineProduct(scan.probe.barcode()).join().orElse(null);
+                    if (product == null) {
+                        results.add(ComparisonResult.error(scan,
+                                "Штрихкод не найден в локальной базе и SetRetailX"));
+                        continue;
+                    }
                 }
                 String marking = product.vendorCode().isEmpty()
                         ? product.stCode() : product.vendorCode() + "_" + product.uom();

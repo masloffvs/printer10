@@ -40,7 +40,8 @@ final class EnvironmentPanel extends JPanel {
         add(new JScrollPane(editor), BorderLayout.CENTER);
 
         JPanel footer = new JPanel(new BorderLayout(8, 8));
-        JLabel hint = new JLabel("Сохранённые настройки применяются сразу. Переменные ОС имеют приоритет; пароль хранится в файле открытым текстом.");
+        JLabel hint = new JLabel("Настройки подключения применяются сразу; изменение пути SQLite потребует перезапуска. "
+                + "Переменные ОС имеют приоритет; пароль хранится в файле открытым текстом.");
         footer.add(hint, BorderLayout.NORTH);
         status.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
         footer.add(status, BorderLayout.CENTER);
