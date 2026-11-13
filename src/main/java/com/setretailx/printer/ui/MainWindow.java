@@ -2,6 +2,7 @@ package com.setretailx.printer.ui;
 
 import com.setretailx.printer.config.AppConfig;
 import com.setretailx.printer.model.Product;
+import com.setretailx.printer.model.BarInput;
 import com.setretailx.printer.model.PrintBatch;
 import com.setretailx.printer.model.PrintHistoryEntry;
 import com.setretailx.printer.model.PriceType;
@@ -180,12 +181,13 @@ public final class MainWindow extends JFrame {
             search.setStatus("Введите название, артикул или штрихкод.");
             return;
         }
+        String lookup = BarInput.barcode(query).orElse(query);
         search.setStatus("Ищем в локальной базе…");
         runBackground(() -> {
-            List<Product> local = products.search(query);
+            List<Product> local = products.search(lookup);
             if (!local.isEmpty()) return local;
             SwingUtilities.invokeLater(() -> search.setStatus("Локально не найдено; ищем в SetRetailX…"));
-            return network.searchOnlineProduct(query).join().map(List::of).orElseGet(List::of);
+            return network.searchOnlineProduct(lookup).join().map(List::of).orElseGet(List::of);
         }, results -> {
             searchResults = new ArrayList<>(results);
             search.showResults(results);

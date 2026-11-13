@@ -3,6 +3,7 @@ package com.setretailx.printer.ui;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
+import com.setretailx.printer.model.BarInput;
 
 import javax.swing.BorderFactory;
 import javax.swing.JComboBox;
@@ -47,7 +48,7 @@ final class PriceChangesPanel extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         filters.add(new JLabel("Поиск товара:"));
-        search.setToolTipText("Артикул, название или штрихкод");
+        search.setToolTipText("Артикул, название, штрихкод или полный скан (barcode=… / Честный знак)");
         filters.add(search);
         filters.add(new JLabel("Тип цены:"));
         filters.add(priceType);
@@ -78,13 +79,15 @@ final class PriceChangesPanel extends JPanel {
     private void refresh() {
         try {
             String query = search.getText().trim().toLowerCase(Locale.ROOT);
+            String barcodeQuery = BarInput.barcode(query).orElse("").toLowerCase(Locale.ROOT);
             PriceFilter filter = (PriceFilter) priceType.getSelectedItem();
             int selectedNumber = priceNumber.getSelectedIndex();
             List<ChangeRow> visible = new ArrayList<>();
             List<PriceMonitoringTaskService.PriceChange> changes = service.recentChanges(1000);
             for (var change : changes) {
                 String searchable = (change.marking() + " " + change.name() + " " + change.barcode()).toLowerCase(Locale.ROOT);
-                if (!query.isEmpty() && !searchable.contains(query)) continue;
+                if (!query.isEmpty() && !searchable.contains(query)
+                        && (barcodeQuery.isEmpty() || !change.barcode().toLowerCase(Locale.ROOT).contains(barcodeQuery))) continue;
                 appendChangedPrices(visible, change, readJson(change.oldPricesJson()), readJson(change.newPricesJson()),
                         "Обычная (pricesMap)", "pricesMap", filter, selectedNumber);
                 appendChangedPrices(visible, change, readJson(change.oldPricesJson()), readJson(change.newPricesJson()),

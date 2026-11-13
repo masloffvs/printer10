@@ -32,10 +32,8 @@ public record ScannedProbe(
 
     public static ScannedProbe fromText(String input) {
         String text = input == null ? "" : input.trim();
-        if (text.matches("\\d+")) {
-            return new ScannedProbe(text, "", "", "", "", "", "");
-        }
-        text = text.replaceAll("\\s*[\\r\\n]+\\s*", "&");
+        String extractedBarcode = BarInput.barcode(text).orElse("");
+        text = text.replaceAll("\\s*[\\r\\n?]+\\s*", "&");
         Matcher firstField = FIELD.matcher(text);
         if (firstField.find()) {
             text = text.substring(firstField.start());
@@ -48,13 +46,22 @@ public record ScannedProbe(
         for (String part : text.split("&", -1)) {
             int equals = part.indexOf('=');
             if (equals < 0) continue;
-            String key = decode(part.substring(0, equals)).trim().toLowerCase(Locale.ROOT);
-            if (fields.containsKey(key)) fields.put(key, decode(part.substring(equals + 1)).trim());
+            String keyText = BarInput.keyboardLayoutToLatin(decodeSafely(part.substring(0, equals)))
+                    .trim().toLowerCase(Locale.ROOT);
+            Matcher recognizedKey = Pattern.compile("(?:barcode|price[1-4]|stcode|russian_mark)$").matcher(keyText);
+            if (!recognizedKey.find()) continue;
+            String key = recognizedKey.group();
+            String value = decodeSafely(part.substring(equals + 1)).trim();
+            if (key.startsWith("price")) value = BarInput.keyboardLayoutToLatin(value);
+            if (fields.containsKey(key)) fields.put(key, value);
         }
         if (fields.values().stream().allMatch(String::isEmpty)
                 && !text.isEmpty() && !text.contains("=") && !text.contains("&")) {
-            fields.put("barcode", text);
+            fields.put("barcode", extractedBarcode.isEmpty()
+                    ? (text.startsWith("]C1") ? "" : text) : extractedBarcode);
         }
+        if (fields.get("barcode").isEmpty()) fields.put("barcode", extractedBarcode);
+        else fields.put("barcode", BarInput.barcode(fields.get("barcode")).orElse(""));
         return new ScannedProbe(fields.get("barcode"), fields.get("price1"), fields.get("price2"),
                 fields.get("price3"), fields.get("price4"), fields.get("stcode"), fields.get("russian_mark"));
     }
@@ -88,8 +95,13 @@ public record ScannedProbe(
         return value == null ? "" : value.trim();
     }
 
-    private static String decode(String value) {
+    private static String decodeSafely(String value) {
         // URLDecoder handles the scanner's application/x-www-form-urlencoded payload format.
-        return java.net.URLDecoder.decode(value, java.nio.charset.StandardCharsets.UTF_8);
+        try {
+            return java.net.URLDecoder.decode(value, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException ignored) {
+            // GS1 serial payloads may contain literal percent signs, not URL escapes.
+            return value;
+        }
     }
 }

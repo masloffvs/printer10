@@ -34,6 +34,7 @@ final class SearchPanel extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         JPanel top = new JPanel(new BorderLayout(8, 8));
         JPanel form = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        input.setToolTipText("Можно вставить обычный штрихкод, строку barcode=… или полный скан Честного знака/GS1.");
         form.add(input);
         JButton find = new JButton("Найти");
         find.addActionListener(event -> search.run());
