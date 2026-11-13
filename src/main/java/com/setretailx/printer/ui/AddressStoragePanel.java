@@ -8,8 +8,9 @@ import com.setretailx.printer.repository.AddressStorageRepository.StorageBox;
 import com.setretailx.printer.repository.AddressStorageRepository.StoredProduct;
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.EncodeHintType;
+import com.google.zxing.WriterException;
 import com.google.zxing.client.j2se.MatrixToImageWriter;
-import com.google.zxing.oned.Code128Writer;
+import com.google.zxing.qrcode.QRCodeWriter;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -20,17 +21,14 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
-import javax.swing.JTextField;
 import javax.swing.SwingWorker;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Font;
-import java.awt.FlowLayout;
 import java.awt.Graphics2D;
-import java.awt.GridLayout;
 import java.awt.RenderingHints;
-import java.awt.geom.Rectangle2D;
+import java.awt.BasicStroke;
 import java.awt.print.Printable;
 import java.awt.print.PageFormat;
 import java.awt.print.PrinterJob;
@@ -40,7 +38,7 @@ import java.util.Map;
 import java.util.List;
 import java.util.function.Consumer;
 
-/** MDI screen for virtual storage addresses, boxes, and item lookup. */
+/** MDI screen for selecting boxes, scanning their contents, and printing box labels. */
 @SuppressWarnings("serial")
 final class AddressStoragePanel extends JPanel {
     private final AddressStorageRepository repository;
@@ -48,10 +46,7 @@ final class AddressStoragePanel extends JPanel {
     private final JComboBox<StorageBox> boxes = new JComboBox<>();
     private final DefaultTableModel productsModel = model("Наименование", "Артикул", "Штрихкод", "Кол-во");
     private final JTable productsTable = new JTable(productsModel);
-    private final DefaultTableModel locationsModel = model("Адрес", "Коробка", "Товар", "Артикул", "Штрихкод", "Кол-во");
-    private final JTable locationsTable = new JTable(locationsModel);
-    private final JTextField locationQuery = new JTextField(24);
-    private final JLabel status = new JLabel("Создайте или выберите адрес, затем откройте коробку.");
+    private final JLabel status = new JLabel("Выберите адрес и создайте коробку, чтобы начать сканирование.");
     private boolean updatingSelectors;
 
     AddressStoragePanel(AddressStorageRepository repository) {
@@ -68,28 +63,18 @@ final class AddressStoragePanel extends JPanel {
         boxes.addActionListener(event -> {
             if (!updatingSelectors) refreshProducts();
         });
-        locationQuery.addActionListener(event -> findLocations());
         refreshAddresses(null);
     }
 
     private JComponent buildStorageControls() {
         JPanel panel = new JPanel(new BorderLayout(8, 6));
-        JPanel addressRow = new JPanel(new FlowLayout(FlowLayout.LEADING, 6, 0));
-        addressRow.add(new JLabel("Виртуальный адрес:"));
+        JPanel addressRow = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEADING, 6, 0));
+        addressRow.add(new JLabel("Адрес хранения:"));
         addresses.setPrototypeDisplayValue(new StorageAddress("Склад-01", "Основной склад"));
         addressRow.add(addresses);
-        JButton addAddress = new JButton("Создать адрес");
-        addAddress.addActionListener(event -> createAddress());
-        addressRow.add(addAddress);
-        JButton renameAddress = new JButton("Переименовать");
-        renameAddress.addActionListener(event -> renameAddress());
-        addressRow.add(renameAddress);
-        JButton deleteAddress = new JButton("Удалить адрес");
-        deleteAddress.addActionListener(event -> deleteAddress());
-        addressRow.add(deleteAddress);
         panel.add(addressRow, BorderLayout.NORTH);
 
-        JPanel boxRow = new JPanel(new FlowLayout(FlowLayout.LEADING, 6, 0));
+        JPanel boxRow = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEADING, 6, 0));
         boxRow.add(new JLabel("Коробка:"));
         boxes.setPrototypeDisplayValue(new StorageBox(0, "", "АЕБ123", 0, 0));
         boxRow.add(boxes);
@@ -107,74 +92,12 @@ final class AddressStoragePanel extends JPanel {
     }
 
     private JComponent buildContent() {
-        JPanel content = new JPanel(new GridLayout(1, 2, 10, 0));
+        JPanel content = new JPanel(new BorderLayout(10, 0));
         JPanel boxContents = new JPanel(new BorderLayout(4, 4));
         boxContents.setBorder(BorderFactory.createTitledBorder("Товары в выбранной коробке"));
         boxContents.add(new JScrollPane(productsTable), BorderLayout.CENTER);
-        content.add(boxContents);
-
-        JPanel lookup = new JPanel(new BorderLayout(4, 4));
-        lookup.setBorder(BorderFactory.createTitledBorder("Поиск места по артикулу или штрихкоду"));
-        JPanel searchRow = new JPanel(new FlowLayout(FlowLayout.LEADING, 4, 0));
-        searchRow.add(locationQuery);
-        JButton searchButton = new JButton("Найти");
-        searchButton.addActionListener(event -> findLocations());
-        searchRow.add(searchButton);
-        lookup.add(searchRow, BorderLayout.NORTH);
-        lookup.add(new JScrollPane(locationsTable), BorderLayout.CENTER);
-        content.add(lookup);
+        content.add(boxContents, BorderLayout.CENTER);
         return content;
-    }
-
-    private void createAddress() {
-        JTextField id = new JTextField(18);
-        JTextField name = new JTextField(18);
-        JPanel fields = new JPanel(new GridLayout(0, 1, 4, 4));
-        fields.add(new JLabel("ID хранилища (уникальный):"));
-        fields.add(id);
-        fields.add(new JLabel("Название (необязательно):"));
-        fields.add(name);
-        if (JOptionPane.showConfirmDialog(this, fields, "Создать виртуальный адрес",
-                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) != JOptionPane.OK_OPTION) return;
-        run("Создаём адрес…", () -> {
-            repository.createAddress(id.getText(), name.getText());
-            return id.getText().trim();
-        }, createdId -> refreshAddresses(createdId), this::showError);
-    }
-
-    private void renameAddress() {
-        StorageAddress address = (StorageAddress) addresses.getSelectedItem();
-        if (address == null) {
-            setStatus("Сначала выберите адрес для переименования.");
-            return;
-        }
-        String name = JOptionPane.showInputDialog(this, "Новое название адреса:", address.name());
-        if (name == null) return;
-        if (name.isBlank()) {
-            showError("Введите название адреса.");
-            return;
-        }
-        run("Переименовываем адрес…", () -> {
-            repository.renameAddress(address.addressId(), name);
-            return address.addressId();
-        }, this::refreshAddresses, this::showError);
-    }
-
-    private void deleteAddress() {
-        StorageAddress address = (StorageAddress) addresses.getSelectedItem();
-        if (address == null) {
-            setStatus("Сначала выберите адрес для удаления.");
-            return;
-        }
-        int answer = JOptionPane.showConfirmDialog(this,
-                "Удалить адрес «" + address.addressId() + " — " + address.name()
-                        + "» вместе со всеми коробками и товарами в них? Это действие нельзя отменить.",
-                "Удалить адрес", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
-        if (answer != JOptionPane.YES_OPTION) return;
-        run("Удаляем адрес и его содержимое…", () -> {
-            repository.deleteAddress(address.addressId());
-            return null;
-        }, ignored -> refreshAddresses(null), this::showError);
     }
 
     private void createBox() {
@@ -275,22 +198,12 @@ final class AddressStoragePanel extends JPanel {
         }, this::showError);
     }
 
-    private void findLocations() {
-        String query = locationQuery.getText().trim();
-        if (query.isEmpty()) {
-            setStatus("Введите артикул или штрихкод для поиска.");
-            return;
-        }
-        run("Ищем места хранения…", () -> repository.findLocations(query), rows -> {
-            locationsModel.setRowCount(0);
-            for (LocationResult location : rows) locationsModel.addRow(new Object[]{
-                    location.addressId() + " — " + location.addressName(), location.boxCode(), location.name(),
-                    location.vendorCode(), location.barcode(), location.quantity()});
-            setStatus(rows.isEmpty() ? "Товар не найден в адресном хранении." : "Найдено размещений: " + rows.size());
-        }, this::showError);
-    }
-
     boolean hasOpenBox() { return boxes.getSelectedItem() != null; }
+
+    void refreshAvailableAddresses() {
+        StorageAddress selected = (StorageAddress) addresses.getSelectedItem();
+        refreshAddresses(selected == null ? null : selected.addressId());
+    }
 
     void addScannedProduct(Product product, Consumer<String> completion) {
         StorageBox box = (StorageBox) boxes.getSelectedItem();
@@ -335,29 +248,32 @@ final class AddressStoragePanel extends JPanel {
         }
     }
 
-    /** A full-sheet, landscape box label with a scannable Code 128 barcode in every product row. */
+    /** A compact landscape box label with a scannable QR code in every product row. */
     private static final class BoxLabelPrintable implements Printable {
-        private static final double OUTER_MARGIN = 12;
-        private static final double HEADER_HEIGHT = 82;
-        private static final double TABLE_HEADER_HEIGHT = 27;
-        private static final double ROW_HEIGHT = 58;
-        private static final Font BODY = new Font(Font.SANS_SERIF, Font.PLAIN, 10);
-        private static final Font HEADER = new Font(Font.SANS_SERIF, Font.BOLD, 13);
+        private static final double OUTER_MARGIN = 3;
+        private static final double HEADER_HEIGHT = 68;
+        private static final double TABLE_HEADER_HEIGHT = 25;
+        private static final double ROW_HEIGHT = 54;
+        private static final Font BODY = new Font(Font.SANS_SERIF, Font.PLAIN, 13);
+        private static final Font HEADER = new Font(Font.SANS_SERIF, Font.BOLD, 15);
         private static final Font BOX_CODE = new Font(Font.SANS_SERIF, Font.BOLD, 38);
-        private static final String[] COLUMNS = {"№", "НАИМЕНОВАНИЕ ТОВАРА", "АРТИКУЛ", "ШТРИХКОД", "КОЛ-ВО"};
-        private static final double[] WIDTHS = {0.05, 0.36, 0.16, 0.33, 0.10};
+        private static final Font ARTICLE = new Font(Font.SANS_SERIF, Font.BOLD, 19);
+        private static final String[] COLUMNS = {"№", "НАИМЕНОВАНИЕ ТОВАРА", "АРТИКУЛ", "QR-КОД", "КОЛ-ВО"};
+        private static final double[] WIDTHS = {0.05, 0.35, 0.27, 0.18, 0.15};
+        private static final BasicStroke DASHED_STROKE = new BasicStroke(0.7f, BasicStroke.CAP_BUTT,
+                BasicStroke.JOIN_MITER, 10f, new float[]{2.2f, 2.2f}, 0f);
 
         private final StorageAddress address;
         private final StorageBox box;
         private final List<LocationResult> rows;
-        private final List<BufferedImage> barcodes;
+        private final List<BufferedImage> qrCodes;
 
         private BoxLabelPrintable(StorageAddress address, StorageBox box, List<LocationResult> rows) {
             this.address = address;
             this.box = box;
             this.rows = List.copyOf(rows);
-            this.barcodes = new ArrayList<>(rows.size());
-            for (LocationResult row : rows) barcodes.add(createBarcode(row.barcode()));
+            this.qrCodes = new ArrayList<>(rows.size());
+            for (LocationResult row : rows) qrCodes.add(createQrCode(row.barcode()));
         }
 
         @Override public int print(java.awt.Graphics graphics, PageFormat pageFormat, int pageIndex) {
@@ -385,9 +301,10 @@ final class AddressStoragePanel extends JPanel {
                 } else {
                     for (int index = start; index < end; index++) {
                         drawProductRow(g, width, tableTop + TABLE_HEADER_HEIGHT + (index - start) * rowHeight,
-                                rowHeight, index, rows.get(index), barcodes.get(index));
+                                rowHeight, index, rows.get(index), qrCodes.get(index));
                     }
                 }
+                drawTableGrid(g, width, tableTop, visibleRows, rowHeight);
                 return PAGE_EXISTS;
             } finally {
                 g.dispose();
@@ -406,37 +323,38 @@ final class AddressStoragePanel extends JPanel {
             int infoX = (int) Math.max(width * 0.58, g.getFontMetrics().stringWidth(box.boxCode()) + 24);
             g.drawString(count, infoX, 37);
             if (!page.isEmpty()) g.drawString(page, infoX, 59);
+            g.setStroke(DASHED_STROKE);
             g.drawLine(0, (int) (HEADER_HEIGHT - 3), (int) width, (int) (HEADER_HEIGHT - 3));
         }
 
         private static void drawTableHeader(Graphics2D g, double width, double y) {
             double x = 0;
-            g.setFont(HEADER.deriveFont(10f));
-            g.setColor(new Color(225, 225, 225));
-            g.fill(new Rectangle2D.Double(0, y, width, TABLE_HEADER_HEIGHT));
+            g.setFont(HEADER.deriveFont(12f));
             g.setColor(Color.BLACK);
             for (int col = 0; col < COLUMNS.length; col++) {
                 double cellWidth = width * WIDTHS[col];
                 drawCentered(g, COLUMNS[col], x, y, cellWidth, TABLE_HEADER_HEIGHT);
-                g.drawRect((int) x, (int) y, (int) cellWidth, (int) TABLE_HEADER_HEIGHT);
                 x += cellWidth;
             }
         }
 
         private static void drawProductRow(Graphics2D g, double width, double y, double rowHeight, int index,
-                                           LocationResult item, BufferedImage barcode) {
+                                           LocationResult item, BufferedImage qrCode) {
             double x = 0;
             String[] values = {Integer.toString(index + 1), item.name(), item.vendorCode(), "", Integer.toString(item.quantity())};
-            float fontSize = (float) Math.max(10, Math.min(25, rowHeight * 0.12));
+            float fontSize = (float) Math.max(13, Math.min(27, rowHeight * 0.18));
             g.setFont(BODY.deriveFont(fontSize));
             g.setColor(Color.BLACK);
             for (int col = 0; col < WIDTHS.length; col++) {
                 double cellWidth = width * WIDTHS[col];
-                g.drawRect((int) x, (int) y, (int) cellWidth, (int) rowHeight);
                 if (col == 3) {
-                    drawBarcode(g, item.barcode(), barcode, x, y, cellWidth, rowHeight);
+                    drawQrCode(g, item.barcode(), qrCode, x, y, cellWidth, rowHeight);
                 } else if (col == 1) {
-                    drawWrapped(g, values[col], x + 5, y + 5, cellWidth - 10, rowHeight - 10);
+                    drawWrapped(g, values[col], x + 4, y + 3, cellWidth - 8, rowHeight - 6);
+                } else if (col == 2) {
+                    g.setFont(ARTICLE.deriveFont((float) Math.max(17, Math.min(29, rowHeight * 0.38))));
+                    drawCentered(g, values[col], x + 2, y, cellWidth - 4, rowHeight);
+                    g.setFont(BODY.deriveFont(fontSize));
                 } else {
                     drawCentered(g, values[col], x, y, cellWidth, rowHeight);
                 }
@@ -444,26 +362,41 @@ final class AddressStoragePanel extends JPanel {
             }
         }
 
-        private static void drawBarcode(Graphics2D g, String value, BufferedImage barcode,
-                                        double x, double y, double width, double rowHeight) {
-            if (value == null || value.isBlank() || barcode == null) {
-                drawCentered(g, value == null || value.isBlank() ? "Штрихкод не задан" : value,
+        private static void drawQrCode(Graphics2D g, String value, BufferedImage qrCode,
+                                       double x, double y, double width, double rowHeight) {
+            if (value == null || value.isBlank() || qrCode == null) {
+                drawCentered(g, value == null || value.isBlank() ? "—" : value,
                         x + 3, y, width - 6, rowHeight);
                 return;
             }
-            int imageWidth = (int) Math.max(30, width - 14);
-            int imageHeight = (int) Math.min(Math.max(24, rowHeight * 0.52), imageWidth * (110.0 / 520.0));
-            double barcodeTop = y + Math.max(3, (rowHeight - imageHeight - 18) / 2);
-            g.drawImage(barcode, (int) (x + (width - imageWidth) / 2), (int) barcodeTop, imageWidth, imageHeight, null);
-            float barcodeTextSize = (float) Math.max(9, Math.min(18, rowHeight * 0.08));
-            g.setFont(BODY.deriveFont(barcodeTextSize));
-            drawCentered(g, value, x + 3, barcodeTop + imageHeight, width - 6, rowHeight - (barcodeTop - y) - imageHeight);
+            int imageSize = (int) Math.min(Math.min(width - 8, rowHeight - 6), 50);
+            int imageX = (int) (x + (width - imageSize) / 2);
+            int imageY = (int) (y + (rowHeight - imageSize) / 2);
+            g.drawImage(qrCode, imageX, imageY, imageSize, imageSize, null);
+        }
+
+        private static void drawTableGrid(Graphics2D g, double width, double tableTop, int rows, double rowHeight) {
+            g.setColor(Color.BLACK);
+            g.setStroke(DASHED_STROKE);
+            double tableBottom = tableTop + TABLE_HEADER_HEIGHT + rows * rowHeight;
+            double[] horizontal = new double[rows + 2];
+            horizontal[0] = tableTop;
+            horizontal[1] = tableTop + TABLE_HEADER_HEIGHT;
+            for (int row = 0; row < rows; row++) {
+                horizontal[row + 2] = tableTop + TABLE_HEADER_HEIGHT + (row + 1) * rowHeight;
+            }
+            for (double lineY : horizontal) g.draw(new java.awt.geom.Line2D.Double(0, lineY, width, lineY));
+            double x = 0;
+            g.draw(new java.awt.geom.Line2D.Double(0, tableTop, 0, tableBottom));
+            for (double columnWidth : WIDTHS) {
+                x += width * columnWidth;
+                g.draw(new java.awt.geom.Line2D.Double(x, tableTop, x, tableBottom));
+            }
         }
 
         private static void drawEmptyRow(Graphics2D g, double width, double y, double rowHeight) {
             g.setFont(HEADER);
             g.setColor(Color.BLACK);
-            g.drawRect(0, (int) y, (int) width, (int) rowHeight);
             drawCentered(g, "В ЭТОЙ КОРОБКЕ ПОКА НЕТ ТОВАРОВ", 0, y, width, rowHeight);
         }
 
@@ -503,12 +436,12 @@ final class AddressStoragePanel extends JPanel {
             g.drawString(value, drawX, baseline);
         }
 
-        private static BufferedImage createBarcode(String value) {
+        private static BufferedImage createQrCode(String value) {
             if (value == null || value.isBlank()) return null;
             try {
-                return MatrixToImageWriter.toBufferedImage(new Code128Writer().encode(value.trim(),
-                        BarcodeFormat.CODE_128, 520, 110, Map.of(EncodeHintType.MARGIN, 4)));
-            } catch (IllegalArgumentException ignored) {
+                return MatrixToImageWriter.toBufferedImage(new QRCodeWriter().encode(value.trim(),
+                        BarcodeFormat.QR_CODE, 160, 160, Map.of(EncodeHintType.MARGIN, 2)));
+            } catch (WriterException | IllegalArgumentException ignored) {
                 return null;
             }
         }

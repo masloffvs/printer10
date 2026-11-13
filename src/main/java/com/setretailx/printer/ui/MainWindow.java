@@ -48,6 +48,9 @@ public final class MainWindow extends JFrame {
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
     private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService, workspace);
     private final AddressStoragePanel addressStoragePanel = new AddressStoragePanel(addressStorage);
+    private final AddressManagementPanel addressManagementPanel = new AddressManagementPanel(addressStorage,
+            addressStoragePanel::refreshAvailableAddresses);
+    private final PalletScanningPanel palletScanningPanel = new PalletScanningPanel(addressStorage, this::submitPalletScan);
     private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService, (marking, name, barcode) ->
             workspace.addDynamicWindow("История цен — " + marking,
                     new PriceHistoryPanel(taskService, marking, name, barcode), 760, 480));
@@ -75,7 +78,9 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("exchange", exchange, 650, 400);
         workspace.addWindow("history", history, 760, 420);
         workspace.addWindow("tasks", taskPanel, 900, 520);
-        workspace.addWindow("storage", addressStoragePanel, 1000, 600);
+        workspace.addWindow("storage", addressStoragePanel, 900, 560);
+        workspace.addWindow("storageAddresses", addressManagementPanel, 900, 520);
+        workspace.addWindow("palletScanning", palletScanningPanel, 900, 600);
         workspace.addWindow("priceChanges", priceChanges, 900, 520);
         workspace.addWindow("environment", new EnvironmentPanel(() -> {
             network.reloadSettings();
@@ -86,7 +91,10 @@ public final class MainWindow extends JFrame {
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Очередь печати");
         scanner.registerRecipient("storage", "Адресное хранение (открытая коробка)");
-        workspace.setWindowVisibilityListener(scanner::setRecipientOpen);
+        workspace.setWindowVisibilityListener((key, open) -> {
+            scanner.setRecipientOpen(key, open);
+            if ("palletScanning".equals(key) && open) palletScanningPanel.focusScanner();
+        });
         workspace.showWindow("scanner");
         refreshHistory();
         log("Java UI запущен. Локальная база: " + AppConfig.DB_PATH);
@@ -198,6 +206,75 @@ public final class MainWindow extends JFrame {
                 if (message.startsWith("Добавлен")) log(message);
             });
         }, error -> status.setText("Ошибка поиска товара для хранения: " + error));
+    }
+
+    private void receivePalletScan(ScannedProbe probe) {
+        if (probe.barcode().isEmpty()) {
+            palletScanningPanel.scanFailed("Для сканирования паллет нужен штрихкод товара.");
+            status.setText("Для сканирования паллет нужен штрихкод товара.");
+            return;
+        }
+        status.setText("Ищем товар " + probe.barcode() + " для паллеты…");
+        runBackground(() -> {
+            Product local = products.findByBarcode(probe.barcode());
+            return local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+        }, product -> {
+            if (product == null) {
+                palletScanningPanel.scanFailed("Штрихкод " + probe.barcode() + " не найден; товар не добавлен.");
+                status.setText("Штрихкод " + probe.barcode() + " не найден; товар не добавлен.");
+                return;
+            }
+            palletScanningPanel.addScannedProduct(product, message -> {
+                status.setText(message);
+                if (message.startsWith("Добавлен")) log(message);
+            });
+        }, error -> {
+            palletScanningPanel.scanFailed("Ошибка поиска товара для паллеты: " + error);
+            status.setText("Ошибка поиска товара для паллеты: " + error);
+        });
+    }
+
+    private void submitPalletScan(String raw) {
+        if (isPalletCloseBarcode(raw)) {
+            palletScanningPanel.closeCurrentBox(message -> {
+                status.setText(message);
+                if (message.startsWith("Коробка закрыта")) log(message);
+            });
+            return;
+        }
+        if (!palletScanningPanel.beginProductLookup()) {
+            if (palletScanningPanel.selectedAddress() == null) {
+                status.setText("Выберите паллет и дождитесь завершения текущей операции перед сканированием.");
+            }
+            return;
+        }
+        ScannedProbe probe;
+        try {
+            probe = ScannedProbe.fromText(raw);
+            if (probe.hasPriceData()) probe.pricesAsDecimals();
+        } catch (IllegalArgumentException error) {
+            palletScanningPanel.scanFailed(error.getMessage());
+            status.setText(error.getMessage());
+            log("Ошибка разбора скана паллеты: " + error.getMessage());
+            return;
+        }
+        if (probe.hasPriceData()) {
+            palletScanningPanel.scanFailed("В окне паллетного режима ожидается штрихкод товара или сервисный код закрытия.");
+            status.setText("В окне паллетного режима ожидается штрихкод товара или сервисный код закрытия.");
+            return;
+        }
+        receivePalletScan(probe);
+    }
+
+    private static boolean isPalletCloseBarcode(String raw) {
+        String decoded;
+        try {
+            decoded = java.net.URLDecoder.decode(raw, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException ignored) {
+            decoded = raw;
+        }
+        return decoded.equals("retailx-proto://close-box")
+                || decoded.matches("(?i)(?:.*[?&])?barcode=retailx-proto://close-box(?:&.*)?");
     }
 
     private void receivePriceScan(ScannedProbe probe) {

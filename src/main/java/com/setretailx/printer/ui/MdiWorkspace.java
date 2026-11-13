@@ -8,6 +8,7 @@ import javax.swing.JMenu;
 import javax.swing.JMenuBar;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
 import javax.swing.JToolBar;
 import javax.swing.JToggleButton;
 import javax.swing.event.InternalFrameAdapter;
@@ -34,7 +35,9 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
             new WindowSpec("history", "История печати", "История"),
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
-            new WindowSpec("storage", "Адресное хранение", "Адреса"),
+            new WindowSpec("storage", "Коробки и товары", "Коробки"),
+            new WindowSpec("storageAddresses", "Адреса хранения", "Адреса"),
+            new WindowSpec("palletScanning", "Сканирование паллет", "Паллеты"),
             new WindowSpec("priceChanges", "История изменения цен", "История цен"),
             new WindowSpec("environment", "Обслуживание и администрирование", "Администрирование")
     };
@@ -52,7 +55,13 @@ final class MdiWorkspace extends JPanel {
     MdiWorkspace() {
         super(new BorderLayout());
         createToolBar();
-        add(toolBar, BorderLayout.NORTH);
+        JScrollPane navigation = new JScrollPane(toolBar);
+        navigation.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        navigation.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        navigation.setBorder(javax.swing.BorderFactory.createMatteBorder(0, 0, 0, 1,
+                javax.swing.UIManager.getColor("Component.borderColor")));
+        navigation.setPreferredSize(new java.awt.Dimension(164, 1));
+        add(navigation, BorderLayout.WEST);
         add(desktop, BorderLayout.CENTER);
     }
 
@@ -214,9 +223,10 @@ final class MdiWorkspace extends JPanel {
     }
 
     private void createToolBar() {
-        toolBar.setFloatable(true);
+        toolBar.setOrientation(JToolBar.VERTICAL);
+        toolBar.setFloatable(false);
         toolBar.setRollover(true);
-        toolBar.setToolTipText("Панель окон: перетащите за ручку, чтобы закрепить слева или сверху");
+        toolBar.setToolTipText("Навигация по разделам и открытым окнам");
         for (WindowSpec spec : WINDOWS) {
             JToggleButton button = new JToggleButton(spec.shortTitle);
             button.setToolTipText(spec.title);

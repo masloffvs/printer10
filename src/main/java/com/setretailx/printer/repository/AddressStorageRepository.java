@@ -93,6 +93,19 @@ public final class AddressStorageRepository {
         return result;
     }
 
+    public StorageBox box(long boxId) throws SQLException {
+        try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
+                "SELECT b.box_id, b.address_id, b.box_code, b.created_at, COUNT(p.product_key) "
+                        + "FROM storage_boxes b LEFT JOIN storage_box_products p ON p.box_id=b.box_id "
+                        + "WHERE b.box_id=? GROUP BY b.box_id")) {
+            query.setLong(1, boxId);
+            try (ResultSet row = query.executeQuery()) {
+                return row.next() ? new StorageBox(row.getLong(1), row.getString(2), row.getString(3),
+                        row.getLong(4), row.getInt(5)) : null;
+            }
+        }
+    }
+
     public StorageBox createBox(String addressId) throws SQLException {
         try (Connection connection = connect()) {
             for (int attempt = 0; attempt < 100; attempt++) {
