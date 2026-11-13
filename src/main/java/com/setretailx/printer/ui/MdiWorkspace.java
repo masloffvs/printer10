@@ -9,6 +9,7 @@ import javax.swing.JMenuBar;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JToolBar;
+import javax.swing.JToggleButton;
 import javax.swing.event.InternalFrameAdapter;
 import javax.swing.event.InternalFrameEvent;
 import javax.swing.event.MenuEvent;
@@ -19,6 +20,7 @@ import java.awt.event.ComponentEvent;
 import java.beans.PropertyVetoException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.IdentityHashMap;
 import java.util.function.BiConsumer;
 
 /** Owns the MDI desktop, its window menu, and window arrangement commands. */
@@ -34,18 +36,23 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
             new WindowSpec("storage", "Адресное хранение", "Адреса"),
             new WindowSpec("priceChanges", "История изменения цен", "История цен"),
-            new WindowSpec("environment", "Настройки .env", ".env")
+            new WindowSpec("environment", "Обслуживание и администрирование", "Администрирование")
     };
 
     private final JDesktopPane desktop = new JDesktopPane();
+    private final JToolBar toolBar = new JToolBar("Окна");
     private final Map<String, JInternalFrame> frames = new LinkedHashMap<>();
     private final Map<String, JInternalFrame> keyedDynamicFrames = new LinkedHashMap<>();
+    private final Map<String, JToggleButton> toolbarButtons = new LinkedHashMap<>();
+    private final Map<JInternalFrame, JToggleButton> dynamicToolbarButtons = new IdentityHashMap<>();
     private int dynamicFrameCount;
+    private int dynamicToolbarIndex = WINDOWS.length;
     private BiConsumer<String, Boolean> visibilityListener = (key, open) -> { };
 
     MdiWorkspace() {
         super(new BorderLayout());
-        add(createToolBar(), BorderLayout.NORTH);
+        createToolBar();
+        add(toolBar, BorderLayout.NORTH);
         add(desktop, BorderLayout.CENTER);
     }
 
@@ -58,8 +65,18 @@ final class MdiWorkspace extends JPanel {
         int offset = frames.size() * 28;
         frame.setLocation(18 + offset, 18 + offset);
         frame.addComponentListener(new ComponentAdapter() {
-            @Override public void componentShown(ComponentEvent event) { visibilityListener.accept(key, true); }
-            @Override public void componentHidden(ComponentEvent event) { visibilityListener.accept(key, false); }
+            @Override public void componentShown(ComponentEvent event) {
+                visibilityListener.accept(key, true);
+                if (frame.isSelected()) updateActiveToolbar(frame);
+            }
+            @Override public void componentHidden(ComponentEvent event) {
+                visibilityListener.accept(key, false);
+                updateActiveToolbar(null);
+            }
+        });
+        frame.addInternalFrameListener(new InternalFrameAdapter() {
+            @Override public void internalFrameActivated(InternalFrameEvent event) { updateActiveToolbar(frame); }
+            @Override public void internalFrameDeactivated(InternalFrameEvent event) { updateActiveToolbar(null); }
         });
         desktop.add(frame);
         frames.put(key, frame);
@@ -72,6 +89,7 @@ final class MdiWorkspace extends JPanel {
         frame.setMinimumSize(new java.awt.Dimension(480, 420));
         frame.setMaximumSize(new java.awt.Dimension(680, 900));
         frame.setSize(620, 560);
+        addDynamicToolbarButton(frame, title);
         frame.addComponentListener(new ComponentAdapter() {
             @Override public void componentResized(ComponentEvent event) {
                 if (frame.getWidth() > 680) frame.setSize(680, frame.getHeight());
@@ -91,6 +109,7 @@ final class MdiWorkspace extends JPanel {
         frame.setDefaultCloseOperation(JInternalFrame.DISPOSE_ON_CLOSE);
         frame.setContentPane(content);
         frame.setSize(width, height);
+        addDynamicToolbarButton(frame, title);
         int offset = (dynamicFrameCount++ % 12) * 26;
         frame.setLocation(26 + offset, 24 + offset);
         desktop.add(frame);
@@ -120,8 +139,12 @@ final class MdiWorkspace extends JPanel {
         frame.addInternalFrameListener(new InternalFrameAdapter() {
             @Override public void internalFrameClosed(InternalFrameEvent event) {
                 keyedDynamicFrames.remove(key, frame);
+                removeDynamicToolbarButton(frame);
             }
+            @Override public void internalFrameActivated(InternalFrameEvent event) { updateActiveToolbar(frame); }
+            @Override public void internalFrameDeactivated(InternalFrameEvent event) { updateActiveToolbar(null); }
         });
+        addDynamicToolbarButton(frame, title);
         keyedDynamicFrames.put(key, frame);
         desktop.add(frame);
         frame.setVisible(true);
@@ -146,6 +169,7 @@ final class MdiWorkspace extends JPanel {
             // Another internal-frame listener may veto activation.
         }
         frame.toFront();
+        updateActiveToolbar(frame);
     }
 
     JMenuBar createMenuBar(Runnable exitAction, Runnable aboutAction) {
@@ -189,13 +213,15 @@ final class MdiWorkspace extends JPanel {
         return bar;
     }
 
-    private JToolBar createToolBar() {
-        JToolBar toolBar = new JToolBar("Окна");
-        toolBar.setFloatable(false);
+    private void createToolBar() {
+        toolBar.setFloatable(true);
+        toolBar.setRollover(true);
+        toolBar.setToolTipText("Панель окон: перетащите за ручку, чтобы закрепить слева или сверху");
         for (WindowSpec spec : WINDOWS) {
-            JButton button = new JButton(spec.shortTitle);
+            JToggleButton button = new JToggleButton(spec.shortTitle);
             button.setToolTipText(spec.title);
             button.addActionListener(event -> showWindow(spec.key));
+            toolbarButtons.put(spec.key, button);
             toolBar.add(button);
         }
         toolBar.addSeparator();
@@ -207,7 +233,48 @@ final class MdiWorkspace extends JPanel {
         tile.setToolTipText("Расположить окна плиткой");
         tile.addActionListener(event -> tileWindows());
         toolBar.add(tile);
-        return toolBar;
+    }
+
+    private void addDynamicToolbarButton(JInternalFrame frame, String title) {
+        String buttonTitle = title.length() > 24 ? title.substring(0, 21) + "…" : title;
+        JToggleButton button = new JToggleButton(buttonTitle);
+        button.setToolTipText(title);
+        button.addActionListener(event -> {
+            frame.setVisible(true);
+            restore(frame);
+            frame.toFront();
+            try { frame.setSelected(true); }
+            catch (PropertyVetoException ignored) { }
+            updateActiveToolbar(frame);
+        });
+        dynamicToolbarButtons.put(frame, button);
+        toolBar.add(button, dynamicToolbarIndex++);
+        frame.addInternalFrameListener(new InternalFrameAdapter() {
+            @Override public void internalFrameActivated(InternalFrameEvent event) { updateActiveToolbar(frame); }
+            @Override public void internalFrameDeactivated(InternalFrameEvent event) { updateActiveToolbar(null); }
+            @Override public void internalFrameClosed(InternalFrameEvent event) { removeDynamicToolbarButton(frame); }
+        });
+        frame.addComponentListener(new ComponentAdapter() {
+            @Override public void componentHidden(ComponentEvent event) { updateActiveToolbar(null); }
+        });
+    }
+
+    private void removeDynamicToolbarButton(JInternalFrame frame) {
+        JToggleButton button = dynamicToolbarButtons.remove(frame);
+        if (button == null) return;
+        toolBar.remove(button);
+        dynamicToolbarIndex--;
+        toolBar.revalidate();
+        toolBar.repaint();
+        updateActiveToolbar(null);
+    }
+
+    private void updateActiveToolbar(JInternalFrame active) {
+        if (active == null) active = desktop.getSelectedFrame();
+        if (active != null && !active.isVisible()) active = null;
+        JInternalFrame selected = active;
+        toolbarButtons.forEach((key, button) -> button.setSelected(selected != null && frames.get(key) == selected));
+        dynamicToolbarButtons.forEach((frame, button) -> button.setSelected(selected != null && frame == selected));
     }
 
     private void refreshOpenWindows(JMenu menu) {

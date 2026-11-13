@@ -79,8 +79,8 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("priceChanges", priceChanges, 900, 520);
         workspace.addWindow("environment", new EnvironmentPanel(() -> {
             network.reloadSettings();
-            log("Настройки .env сохранены и применены. При необходимости нажмите «Проверить подключение».");
-            status.setText("Настройки SetRetailX обновлены.");
+            log("Параметры обслуживания и администрирования сохранены и применены. При необходимости нажмите «Проверить подключение».");
+            status.setText("Параметры администрирования обновлены.");
         }), 760, 520);
         scanner.registerRecipient("comparison", "Сверка ценников");
         scanner.registerRecipient("search", "Поиск товаров");
