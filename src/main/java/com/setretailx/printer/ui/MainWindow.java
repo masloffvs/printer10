@@ -50,6 +50,7 @@ public final class MainWindow extends JFrame {
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
     private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService, workspace);
     private final AddressStoragePanel addressStoragePanel = new AddressStoragePanel(addressStorage);
+    private final SalesPointsPanel salesPointsPanel = new SalesPointsPanel(salesPoints);
     private final AddressManagementPanel addressManagementPanel = new AddressManagementPanel(addressStorage,
             addressStoragePanel::refreshAvailableAddresses);
     private final PalletScanningPanel palletScanningPanel = new PalletScanningPanel(addressStorage, this::submitPalletScan);
