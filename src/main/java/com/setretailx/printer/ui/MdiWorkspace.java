@@ -90,7 +90,15 @@ final class MdiWorkspace extends JPanel {
             }
         });
         frame.addInternalFrameListener(new InternalFrameAdapter() {
-            @Override public void internalFrameActivated(InternalFrameEvent event) { updateActiveToolbar(frame); }
+            @Override public void internalFrameActivated(InternalFrameEvent event) {
+                updateActiveToolbar(frame);
+                if ("scanner".equals(key)) javax.swing.SwingUtilities.invokeLater(() -> {
+                    if (frame.isVisible() && frame.isSelected()) {
+                        Component content = frame.getContentPane();
+                        if (content instanceof ScannerPanel scanner) scanner.focusInput();
+                    }
+                });
+            }
             @Override public void internalFrameDeactivated(InternalFrameEvent event) { updateActiveToolbar(null); }
         });
         desktop.add(frame);

@@ -130,11 +130,14 @@ public final class MainWindow extends JFrame {
         String raw = scanner.inputText().trim();
         if (raw.isEmpty()) return;
         scanner.clearInput();
-        ScannedProbe probe;
+        ScannedProbe probe = null;
         try {
             probe = ScannedProbe.fromText(raw);
+            scanner.showParsedScan(probe);
             if (probe.hasPriceData()) probe.pricesAsDecimals();
         } catch (IllegalArgumentException error) {
+            if (probe == null) scanner.showScanError(raw, error.getMessage());
+            else scanner.showParsedScan(probe);
             status.setText(error.getMessage());
             log("Ошибка разбора скана: " + error.getMessage());
             return;
