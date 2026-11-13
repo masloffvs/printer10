@@ -33,13 +33,14 @@ final class PriceChangesPanel extends JPanel {
     private final PriceMonitoringTaskService service;
     private final HistoryOpener openHistory;
     private final DefaultTableModel model = new DefaultTableModel(
-            new Object[]{"Когда", "Артикул", "Товар", "Штрихкод", "Тип цены", "Было", "Стало"}, 0) {
+            new Object[]{"Когда", "Артикул", "Товар", "Штрихкод", "Ценовая позиция", "Было", "Стало"}, 0) {
         @Override public boolean isCellEditable(int row, int column) { return false; }
     };
     private final JTable table = new JTable(model);
     private final JTextField search = new JTextField(18);
     private final JComboBox<PriceFilter> priceType = new JComboBox<>(PriceFilter.values());
-    private final JComboBox<String> priceNumber = new JComboBox<>(new String[]{"Все номера", "#1", "#2", "#3", "#4"});
+    private final JComboBox<String> priceNumber = new JComboBox<>(new String[]{
+            "Все позиции", "#1 · обычная", "#2 · до скидки", "#3 · неизвестно", "#4 · со скидкой"});
     private final JLabel count = new JLabel(" ");
     private final Timer refreshTimer;
 
@@ -52,7 +53,7 @@ final class PriceChangesPanel extends JPanel {
         filters.add(new JLabel("Поиск товара:"));
         search.setToolTipText("Артикул, название, штрихкод или полный скан (barcode=… / Честный знак)");
         filters.add(search);
-        filters.add(new JLabel("Тип цены:"));
+        filters.add(new JLabel("Отображение цены:"));
         filters.add(priceType);
         filters.add(new JLabel("Номер:"));
         filters.add(priceNumber);
@@ -84,6 +85,7 @@ final class PriceChangesPanel extends JPanel {
         });
         priceType.addActionListener(event -> refresh());
         priceNumber.addActionListener(event -> refresh());
+        priceType.addActionListener(event -> priceNumber.setEnabled(priceType.getSelectedItem() != PriceFilter.FINAL));
         refresh();
         refreshTimer = new Timer(10000, event -> refresh());
         refreshTimer.start();
@@ -102,9 +104,9 @@ final class PriceChangesPanel extends JPanel {
                 if (!query.isEmpty() && !searchable.contains(query)
                         && (barcodeQuery.isEmpty() || !change.barcode().toLowerCase(Locale.ROOT).contains(barcodeQuery))) continue;
                 appendChangedPrices(visible, change, readJson(change.oldPricesJson()), readJson(change.newPricesJson()),
-                        "Обычная (pricesMap)", "pricesMap", filter, selectedNumber);
+                        "Обычные · pricesMap", "pricesMap", filter, selectedNumber);
                 appendChangedPrices(visible, change, readJson(change.oldPricesJson()), readJson(change.newPricesJson()),
-                        "99 (prices99Map)", "prices99Map", filter, selectedNumber);
+                        "99 · prices99Map", "prices99Map", filter, selectedNumber);
             }
             visible.sort((left, right) -> Double.compare(right.detectedAt(), left.detectedAt()));
             model.setRowCount(0);
@@ -138,18 +140,61 @@ final class PriceChangesPanel extends JPanel {
     private static void appendChangedPrices(List<ChangeRow> output, PriceMonitoringTaskService.PriceChange change,
                                              JsonNode oldPrices, JsonNode newPrices, String label, String mapName,
                                              PriceFilter filter, int selectedNumber) {
-        if (filter != PriceFilter.ALL && !filter.mapName.equals(mapName)) return;
+        boolean includeRaw = filter == PriceFilter.ALL || filter == PriceFilter.NORMAL && "pricesMap".equals(mapName)
+                || filter == PriceFilter.PROMO && "prices99Map".equals(mapName);
+        boolean includeFinal = filter == PriceFilter.ALL || filter == PriceFilter.FINAL;
         JsonNode oldMap = oldPrices.path(mapName), newMap = newPrices.path(mapName);
-        java.util.TreeSet<String> numbers = new java.util.TreeSet<>();
-        if (oldMap.isObject()) oldMap.fieldNames().forEachRemaining(numbers::add);
-        if (newMap.isObject()) newMap.fieldNames().forEachRemaining(numbers::add);
-        for (String number : numbers) {
-            if (selectedNumber > 0 && !Integer.toString(selectedNumber).equals(number)) continue;
-            JsonNode oldNode = oldMap.get(number), newNode = newMap.get(number);
-            String oldValue = oldNode == null ? "—" : oldNode.asText();
-            String newValue = newNode == null ? "—" : newNode.asText();
+        if (includeRaw) {
+            java.util.TreeSet<String> numbers = new java.util.TreeSet<>();
+            if (oldMap.isObject()) oldMap.fieldNames().forEachRemaining(numbers::add);
+            if (newMap.isObject()) newMap.fieldNames().forEachRemaining(numbers::add);
+            for (String number : numbers) {
+                if (selectedNumber > 0 && !Integer.toString(selectedNumber).equals(number)) continue;
+                JsonNode oldNode = oldMap.get(number), newNode = newMap.get(number);
+                String oldValue = displayPrice(oldNode);
+                String newValue = displayPrice(newNode);
+                if (!oldValue.equals(newValue)) output.add(new ChangeRow(change.detectedAt(), change.marking(), change.name(),
+                        change.barcode(), label + " · " + positionLabel(number), oldValue, newValue));
+            }
+        }
+        if (includeFinal && (selectedNumber == 0 || filter == PriceFilter.FINAL)) {
+            String oldValue = effectiveFinal(oldMap);
+            String newValue = effectiveFinal(newMap);
             if (!oldValue.equals(newValue)) output.add(new ChangeRow(change.detectedAt(), change.marking(), change.name(),
-                    change.barcode(), label + " · #" + number, oldValue, newValue));
+                    change.barcode(), "Итоговая (price4, иначе price2) · " + label, oldValue, newValue));
+        }
+    }
+
+    private static String positionLabel(String number) {
+        return switch (number) {
+            case "1" -> "#1 · обычная (price1)";
+            case "2" -> "#2 · до скидки (price2)";
+            case "3" -> "#3 · неизвестно (price3)";
+            case "4" -> "#4 · со скидкой (price4)";
+            default -> "#" + number;
+        };
+    }
+
+    private static String effectiveFinal(JsonNode map) {
+        JsonNode node = map.path("4");
+        String source = "price4";
+        if ("—".equals(displayPrice(node))) {
+            node = map.path("2");
+            source = "price2";
+        }
+        if (node.isMissingNode() || node.isNull()) return "—";
+        String price = displayPrice(node);
+        return price;
+    }
+
+    private static String displayPrice(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) return "—";
+        String value = node.isObject() ? node.path("value").asText("") : node.asText("");
+        if (value.isBlank()) return "—";
+        try {
+            return new java.math.BigDecimal(value).stripTrailingZeros().toPlainString().replace('.', ',');
+        } catch (NumberFormatException ignored) {
+            return value;
         }
     }
 
@@ -165,10 +210,10 @@ final class PriceChangesPanel extends JPanel {
     void close() { refreshTimer.stop(); }
 
     private enum PriceFilter {
-        ALL("Все", null), NORMAL("Обычная", "pricesMap"), PROMO("99", "prices99Map");
+        ALL("Все изменения"), NORMAL("Обычные · pricesMap"),
+        PROMO("99 · prices99Map"), FINAL("Итоговая цена");
         private final String label;
-        private final String mapName;
-        PriceFilter(String label, String mapName) { this.label = label; this.mapName = mapName; }
+        PriceFilter(String label) { this.label = label; }
         @Override public String toString() { return label; }
     }
     @FunctionalInterface interface HistoryOpener {

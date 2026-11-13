@@ -18,7 +18,8 @@ import java.util.concurrent.ThreadLocalRandom;
 
 /** SQLite-backed virtual addresses, boxes, and product placements. */
 public final class AddressStorageRepository {
-    private static final char[] BOX_LETTERS = "абвгдежзийклмнопрстуфхцчшщъыьэюяё".toCharArray();
+    private static final char[] BOX_VOWELS = "АЕЁИОУЫЭЮЯ".toCharArray();
+    private static final char[] BOX_CONSONANTS = "БВГДЖЗЙКЛМНПРСТФХЦЧШЩ".toCharArray();
     private final java.nio.file.Path databasePath;
 
     public AddressStorageRepository() {
@@ -53,6 +54,27 @@ public final class AddressStorageRepository {
             insert.setString(2, title);
             insert.setLong(3, System.currentTimeMillis());
             insert.executeUpdate();
+        }
+    }
+
+    public void renameAddress(String addressId, String name) throws SQLException {
+        String id = require(addressId, "Адрес не выбран.");
+        String title = require(name, "Введите название адреса.");
+        try (Connection connection = connect(); PreparedStatement update = connection.prepareStatement(
+                "UPDATE storage_addresses SET name=? WHERE address_id=?")) {
+            update.setString(1, title);
+            update.setString(2, id);
+            if (update.executeUpdate() == 0) throw new SQLException("Адрес больше не существует: " + id);
+        }
+    }
+
+    /** Deletes an address and, through the configured foreign keys, all its boxes and contents. */
+    public void deleteAddress(String addressId) throws SQLException {
+        String id = require(addressId, "Адрес не выбран.");
+        try (Connection connection = connect(); PreparedStatement delete = connection.prepareStatement(
+                "DELETE FROM storage_addresses WHERE address_id=?")) {
+            delete.setString(1, id);
+            if (delete.executeUpdate() == 0) throw new SQLException("Адрес больше не существует: " + id);
         }
     }
 
@@ -95,6 +117,15 @@ public final class AddressStorageRepository {
             }
         }
         throw new SQLException("Не удалось подобрать уникальный код коробки. Повторите попытку.");
+    }
+
+    /** Deletes a box and all products stored in it. */
+    public void deleteBox(long boxId) throws SQLException {
+        try (Connection connection = connect(); PreparedStatement delete = connection.prepareStatement(
+                "DELETE FROM storage_boxes WHERE box_id=?")) {
+            delete.setLong(1, boxId);
+            if (delete.executeUpdate() == 0) throw new SQLException("Коробка больше не существует.");
+        }
     }
 
     public void addProduct(long boxId, Product product) throws SQLException {
@@ -205,7 +236,9 @@ public final class AddressStorageRepository {
     private static String newBoxCode() {
         ThreadLocalRandom random = ThreadLocalRandom.current();
         StringBuilder code = new StringBuilder(6);
-        for (int i = 0; i < 3; i++) code.append(BOX_LETTERS[random.nextInt(BOX_LETTERS.length)]);
+        code.append(BOX_VOWELS[random.nextInt(BOX_VOWELS.length)]);
+        code.append(BOX_VOWELS[random.nextInt(BOX_VOWELS.length)]);
+        code.append(BOX_CONSONANTS[random.nextInt(BOX_CONSONANTS.length)]);
         for (int i = 0; i < 3; i++) code.append(random.nextInt(1, 10));
         return code.toString();
     }

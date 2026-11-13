@@ -26,7 +26,7 @@ final class PriceHistoryPanel extends JPanel {
     private final PriceMonitoringTaskService service;
     private final String marking;
     private final DefaultTableModel model = new DefaultTableModel(
-            new Object[]{"Когда", "Тип цены", "Номер", "Цена"}, 0) {
+            new Object[]{"Когда", "Источник", "Позиция", "Цена"}, 0) {
         @Override public boolean isCellEditable(int row, int column) { return false; }
     };
     private final JLabel status = new JLabel("Загружаем историю цен…");
@@ -74,12 +74,44 @@ final class PriceHistoryPanel extends JPanel {
         catch (Exception ignored) { return; }
         String time = Instant.ofEpochMilli((long) (snapshot.capturedAt() * 1000))
                 .atZone(ZoneId.systemDefault()).format(TIME);
-        appendMap(rows, time, prices.path("pricesMap"), "Обычная (pricesMap)");
-        appendMap(rows, time, prices.path("prices99Map"), "99 (prices99Map)");
+        appendMap(rows, time, prices.path("pricesMap"), "pricesMap · обычные");
+        appendMap(rows, time, prices.path("prices99Map"), "prices99Map · 99");
     }
 
     private static void appendMap(List<Object[]> rows, String time, JsonNode map, String type) {
         if (!map.isObject()) return;
-        map.fields().forEachRemaining(entry -> rows.add(new Object[]{time, type, "#" + entry.getKey(), entry.getValue().asText()}));
+        map.fields().forEachRemaining(entry -> rows.add(new Object[]{time, type,
+                positionLabel(entry.getKey()), displayPrice(entry.getValue())}));
+        JsonNode finalNode = map.path("4");
+        String finalPosition = "price4 · цена после скидки";
+        if ("—".equals(displayPrice(finalNode))) {
+            finalNode = map.path("2");
+            finalPosition = "price2 · до скидки (итог без price4)";
+        }
+        if (!"—".equals(displayPrice(finalNode))) {
+            rows.add(new Object[]{time, type, "Итоговая · " + finalPosition, displayPrice(finalNode)});
+        }
+    }
+
+    private static String positionLabel(String number) {
+        return switch (number) {
+            case "1" -> "#1 · обычная (price1)";
+            case "2" -> "#2 · до скидки (price2)";
+            case "3" -> "#3 · неизвестно (price3)";
+            case "4" -> "#4 · со скидкой (price4)";
+            default -> "#" + number;
+        };
+    }
+
+    private static String displayPrice(JsonNode node) {
+        JsonNode valueNode = node != null && node.isObject() ? node.path("value") : node;
+        if (valueNode == null || valueNode.isMissingNode() || valueNode.isNull()) return "—";
+        String value = valueNode.asText("");
+        if (value.isBlank()) return "—";
+        try {
+            return new java.math.BigDecimal(value).stripTrailingZeros().toPlainString().replace('.', ',');
+        } catch (NumberFormatException ignored) {
+            return value;
+        }
     }
 }
