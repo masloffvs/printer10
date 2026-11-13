@@ -4,6 +4,7 @@ import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JDesktopPane;
 import javax.swing.JInternalFrame;
 import javax.swing.JButton;
+import javax.swing.Icon;
 import javax.swing.JMenu;
 import javax.swing.JMenuBar;
 import javax.swing.JMenuItem;
@@ -16,6 +17,11 @@ import javax.swing.event.InternalFrameEvent;
 import javax.swing.event.MenuEvent;
 import javax.swing.event.MenuListener;
 import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.beans.PropertyVetoException;
@@ -35,7 +41,7 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
             new WindowSpec("history", "История печати", "История"),
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
-            new WindowSpec("storage", "Коробки и товары", "Коробки"),
+            new WindowSpec("storage", "Сканирование единичных коробок", "Единичные коробки"),
             new WindowSpec("storageAddresses", "Адреса хранения", "Адреса"),
             new WindowSpec("palletScanning", "Сканирование паллет", "Паллеты"),
             new WindowSpec("priceChanges", "История изменения цен", "История цен"),
@@ -49,7 +55,7 @@ final class MdiWorkspace extends JPanel {
     private final Map<String, JToggleButton> toolbarButtons = new LinkedHashMap<>();
     private final Map<JInternalFrame, JToggleButton> dynamicToolbarButtons = new IdentityHashMap<>();
     private int dynamicFrameCount;
-    private int dynamicToolbarIndex = WINDOWS.length;
+    private int dynamicToolbarIndex;
     private BiConsumer<String, Boolean> visibilityListener = (key, open) -> { };
 
     MdiWorkspace() {
@@ -60,7 +66,7 @@ final class MdiWorkspace extends JPanel {
         navigation.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
         navigation.setBorder(javax.swing.BorderFactory.createMatteBorder(0, 0, 0, 1,
                 javax.swing.UIManager.getColor("Component.borderColor")));
-        navigation.setPreferredSize(new java.awt.Dimension(164, 1));
+        navigation.setPreferredSize(new java.awt.Dimension(210, 1));
         add(navigation, BorderLayout.WEST);
         add(desktop, BorderLayout.CENTER);
     }
@@ -227,13 +233,11 @@ final class MdiWorkspace extends JPanel {
         toolBar.setFloatable(false);
         toolBar.setRollover(true);
         toolBar.setToolTipText("Навигация по разделам и открытым окнам");
-        for (WindowSpec spec : WINDOWS) {
-            JToggleButton button = new JToggleButton(spec.shortTitle);
-            button.setToolTipText(spec.title);
-            button.addActionListener(event -> showWindow(spec.key));
-            toolbarButtons.put(spec.key, button);
-            toolBar.add(button);
-        }
+        addNavigationGroup("ТОВАРЫ", "scanner", "comparison", "search", "queue");
+        addNavigationGroup("СКЛАД", "storage", "storageAddresses", "palletScanning");
+        addNavigationGroup("ИСТОРИЯ И ЗАДАЧИ", "history", "priceChanges", "tasks");
+        addNavigationGroup("ОБМЕН И СЕРВИС", "exchange", "environment");
+        dynamicToolbarIndex = toolBar.getComponentCount();
         toolBar.addSeparator();
         JButton cascade = new JButton("Каскад");
         cascade.setToolTipText("Расположить окна каскадом");
@@ -243,6 +247,28 @@ final class MdiWorkspace extends JPanel {
         tile.setToolTipText("Расположить окна плиткой");
         tile.addActionListener(event -> tileWindows());
         toolBar.add(tile);
+    }
+
+    private void addNavigationGroup(String title, String... keys) {
+        JPanel group = new JPanel();
+        group.setLayout(new javax.swing.BoxLayout(group, javax.swing.BoxLayout.Y_AXIS));
+        group.setBorder(javax.swing.BorderFactory.createTitledBorder(title));
+        group.setAlignmentX(Component.LEFT_ALIGNMENT);
+        for (String key : keys) {
+            WindowSpec spec = specFor(key);
+            JToggleButton button = new JToggleButton(spec.shortTitle, new NavigationIcon(key));
+            button.setToolTipText(spec.title);
+            button.setHorizontalAlignment(JToggleButton.LEFT);
+            button.setIconTextGap(8);
+            button.setMargin(new java.awt.Insets(5, 7, 5, 5));
+            button.setAlignmentX(Component.LEFT_ALIGNMENT);
+            button.setMaximumSize(new java.awt.Dimension(220, 48));
+            button.addActionListener(event -> showWindow(spec.key));
+            toolbarButtons.put(spec.key, button);
+            group.add(button);
+        }
+        group.setMaximumSize(new java.awt.Dimension(204, group.getPreferredSize().height));
+        toolBar.add(group);
     }
 
     private void addDynamicToolbarButton(JInternalFrame frame, String title) {
@@ -363,6 +389,94 @@ final class MdiWorkspace extends JPanel {
             this.key = key;
             this.title = title;
             this.shortTitle = shortTitle;
+        }
+    }
+
+    /** Small, font-independent pictograms for the left navigation. */
+    @SuppressWarnings("serial")
+    private static final class NavigationIcon implements Icon {
+        private final String key;
+
+        private NavigationIcon(String key) { this.key = key; }
+
+        @Override public int getIconWidth() { return 20; }
+        @Override public int getIconHeight() { return 20; }
+
+        @Override public void paintIcon(Component component, Graphics graphics, int x, int y) {
+            Graphics2D g = (Graphics2D) graphics.create();
+            try {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g.setColor(iconColor());
+                switch (key) {
+                    case "scanner" -> {
+                        g.drawRoundRect(x + 3, y + 4, 14, 11, 2, 2);
+                        g.drawLine(x + 5, y + 8, x + 15, y + 8);
+                        g.drawLine(x + 6, y + 12, x + 14, y + 12);
+                    }
+                    case "comparison", "priceChanges" -> {
+                        g.drawLine(x + 3, y + 15, x + 3, y + 5);
+                        g.drawLine(x + 3, y + 15, x + 17, y + 15);
+                        g.drawLine(x + 5, y + 12, x + 9, y + 9);
+                        g.drawLine(x + 9, y + 9, x + 12, y + 11);
+                        g.drawLine(x + 12, y + 11, x + 17, y + 5);
+                    }
+                    case "search" -> {
+                        g.drawOval(x + 3, y + 3, 10, 10);
+                        g.drawLine(x + 12, y + 12, x + 18, y + 18);
+                    }
+                    case "queue", "tasks" -> {
+                        g.drawLine(x + 4, y + 5, x + 17, y + 5);
+                        g.drawLine(x + 4, y + 10, x + 17, y + 10);
+                        g.drawLine(x + 4, y + 15, x + 17, y + 15);
+                        g.fillOval(x + 1, y + 4, 2, 2);
+                        g.fillOval(x + 1, y + 9, 2, 2);
+                        g.fillOval(x + 1, y + 14, 2, 2);
+                    }
+                    case "storage", "palletScanning" -> {
+                        g.drawRect(x + 3, y + 6, 14, 11);
+                        g.drawLine(x + 3, y + 9, x + 10, y + 13);
+                        g.drawLine(x + 17, y + 9, x + 10, y + 13);
+                        g.drawLine(x + 10, y + 13, x + 10, y + 17);
+                        if ("palletScanning".equals(key)) g.drawLine(x + 5, y + 3, x + 15, y + 3);
+                    }
+                    case "storageAddresses" -> {
+                        g.drawOval(x + 5, y + 2, 10, 10);
+                        g.drawLine(x + 5, y + 9, x + 10, y + 18);
+                        g.drawLine(x + 15, y + 9, x + 10, y + 18);
+                        g.fillOval(x + 8, y + 5, 4, 4);
+                    }
+                    case "history" -> {
+                        g.drawOval(x + 3, y + 3, 14, 14);
+                        g.drawLine(x + 10, y + 5, x + 10, y + 10);
+                        g.drawLine(x + 10, y + 10, x + 14, y + 12);
+                    }
+                    case "exchange" -> {
+                        g.drawLine(x + 3, y + 6, x + 16, y + 6);
+                        g.drawLine(x + 13, y + 3, x + 16, y + 6);
+                        g.drawLine(x + 16, y + 6, x + 13, y + 9);
+                        g.drawLine(x + 17, y + 14, x + 4, y + 14);
+                        g.drawLine(x + 7, y + 11, x + 4, y + 14);
+                        g.drawLine(x + 4, y + 14, x + 7, y + 17);
+                    }
+                    default -> {
+                        g.drawOval(x + 4, y + 4, 12, 12);
+                        g.fillOval(x + 8, y + 8, 4, 4);
+                    }
+                }
+            } finally {
+                g.dispose();
+            }
+        }
+
+        private Color iconColor() {
+            return switch (key) {
+                case "scanner" -> new Color(42, 123, 190);
+                case "comparison", "priceChanges" -> new Color(135, 81, 170);
+                case "search" -> new Color(56, 133, 97);
+                case "queue", "history", "tasks" -> new Color(190, 125, 45);
+                case "storage", "storageAddresses", "palletScanning" -> new Color(46, 139, 132);
+                default -> new Color(105, 113, 125);
+            };
         }
     }
 }

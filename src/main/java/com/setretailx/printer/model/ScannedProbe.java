@@ -32,8 +32,15 @@ public record ScannedProbe(
 
     public static ScannedProbe fromText(String input) {
         String text = input == null ? "" : input.trim();
+        // Some scanner profiles emit the leading separator as its escaped
+        // octal form (for example: \000026barcode=...). It is framing, not a
+        // field name; remove it before trying plain-barcode fallbacks.
+        text = text.replaceFirst("^\\\\(?:0{0,5}26)+", "");
         String extractedBarcode = BarInput.barcode(text).orElse("");
         text = text.replaceAll("\\s*[\\r\\n?]+\\s*", "&");
+        // Scanner interfaces may pass framing control bytes along with the
+        // payload. Keep printable field data and discard those bytes.
+        text = text.replaceAll("[\\u0000-\\u001F\\u007F]", "");
         Matcher firstField = FIELD.matcher(text);
         if (firstField.find()) {
             text = text.substring(firstField.start());

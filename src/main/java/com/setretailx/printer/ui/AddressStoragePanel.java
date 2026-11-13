@@ -194,7 +194,7 @@ final class AddressStoragePanel extends JPanel {
                     product.barcode(), product.quantity()});
             updateSelectedBoxCount(box, rows.size());
             setStatus("Коробка " + box.boxCode() + " открыта · товаров: " + rows.size()
-                    + " · сканируйте товары в универсальном сканере.");
+                    + " · сканируйте товары в едином сканере.");
         }, this::showError);
     }
 

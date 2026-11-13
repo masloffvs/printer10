@@ -90,7 +90,7 @@ public final class MainWindow extends JFrame {
         scanner.registerRecipient("comparison", "Сверка ценников");
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Очередь печати");
-        scanner.registerRecipient("storage", "Адресное хранение (открытая коробка)");
+        scanner.registerRecipient("storage", "Сканирование единичных коробок");
         workspace.setWindowVisibilityListener((key, open) -> {
             scanner.setRecipientOpen(key, open);
             if ("palletScanning".equals(key) && open) palletScanningPanel.focusScanner();

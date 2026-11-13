@@ -35,8 +35,15 @@ final class ScannerPanel extends JPanel {
     void setRecipientOpen(String key, boolean open) {
         JCheckBox checkBox = recipientChecks.get(key);
         if (checkBox == null) return;
+        if (open) {
+            // Opening a recipient makes it the default target. Other open
+            // recipients remain available for deliberate multi-routing.
+            recipientChecks.forEach((otherKey, otherCheckBox) -> {
+                if (!otherKey.equals(key)) otherCheckBox.setSelected(false);
+            });
+        }
         checkBox.setEnabled(open);
-        if (!open) checkBox.setSelected(false);
+        checkBox.setSelected(open);
     }
 
     boolean sendsTo(String key) {
