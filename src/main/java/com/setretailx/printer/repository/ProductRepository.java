@@ -36,7 +36,7 @@ public final class ProductRepository {
                     .map(column -> "CAST(\"" + column + "\" AS TEXT) LIKE ? ESCAPE '\\' COLLATE NOCASE")
                     .toList());
             String orderColumn = columns.contains("name") ? "name" : "product_id";
-            String sql = selectColumns(columns) + " FROM products WHERE " + conditions
+            String sql = selectColumns(connection, columns) + " FROM products WHERE " + conditions
                     + " ORDER BY \"" + orderColumn + "\" LIMIT 100";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 for (int i = 0; i < searchable.size(); i++) statement.setString(i + 1, pattern);
@@ -55,7 +55,7 @@ public final class ProductRepository {
             if (!columns.contains("product_id") || !columns.contains("barcode")) {
                 throw new SQLException("В таблице products отсутствуют поля barcode или product_id.");
             }
-            String sql = selectColumns(columns) + " FROM products WHERE CAST(barcode AS TEXT) = ? LIMIT 1";
+            String sql = selectColumns(connection, columns) + " FROM products WHERE CAST(barcode AS TEXT) = ? LIMIT 1";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, barcode);
                 try (ResultSet rows = statement.executeQuery()) {
@@ -73,7 +73,7 @@ public final class ProductRepository {
         return columns;
     }
 
-    private String selectColumns(Set<String> columns) {
+    private String selectColumns(Connection connection, Set<String> columns) throws SQLException {
         StringBuilder select = new StringBuilder("SELECT ");
         List<String> standard = List.of("product_id", "name", "vendor_code", "barcode", "uom", "price", "total_qty");
         Set<String> selected = new LinkedHashSet<>();
@@ -86,7 +86,27 @@ public final class ProductRepository {
         for (String column : columns) {
             if (selected.add(column)) select.append(", ").append(quote(column));
         }
+        if (hasTable(connection, "product_categories_path")) {
+            select.append(", (SELECT group_concat(name, ' › ') FROM (SELECT name FROM product_categories_path pcp "
+                    + "WHERE pcp.product_id = products.product_id ORDER BY position)) AS \"category_path\"");
+        }
+        if (hasTable(connection, "product_attributes") && hasTable(connection, "product_attribute_values")) {
+            select.append(", (SELECT group_concat(COALESCE(a.name, a.code, '') || char(31) || "
+                    + "COALESCE(v.name, v.value, ''), char(30)) FROM product_attributes a "
+                    + "LEFT JOIN product_attribute_values v ON v.attribute_id = a.id "
+                    + "WHERE a.product_id = products.product_id) AS \"catalog_attributes\"");
+        }
         return select.toString();
+    }
+
+    private boolean hasTable(Connection connection, String name) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")) {
+            statement.setString(1, name);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next();
+            }
+        }
     }
 
     private static String quote(String identifier) {
@@ -106,7 +126,15 @@ public final class ProductRepository {
         for (int i = 1; i <= metadata.getColumnCount(); i++) {
             String name = metadata.getColumnLabel(i);
             String value = row.getString(i);
-            if (value != null && !value.isBlank()) details.put(name, value);
+            if (value == null || value.isBlank()) continue;
+            if (name.equalsIgnoreCase("catalog_attributes")) {
+                for (String attribute : value.split("\\u001e")) {
+                    String[] parts = attribute.split("\\u001f", 2);
+                    if (parts.length == 2 && !parts[1].isBlank()) details.put(parts[0], parts[1]);
+                }
+            } else {
+                details.put(name, value);
+            }
         }
         return new Product(row.getString("product_id"), row.getString("name"),
                 row.getString("vendor_code"), row.getString("barcode"), row.getString("uom"),

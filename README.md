@@ -15,7 +15,7 @@ mvn clean package
 java -jar target/printer-1.0.0-SNAPSHOT.jar
 ```
 
-On first launch the dark FlatLaf theme is installed before Swing components are created. SetRetailX credentials can be supplied through environment variables or a root `.env` file (same variable names as `.env.example`).
+On first launch the dark FlatLaf theme is installed before Swing components are created. SetRetailX credentials can be supplied through environment variables or a root `.env` file (same variable names as `.env.example`). `SETRETAILX_CONNECTION_RETRIES` configures how many times requests are retried after a detected closed-connection failure (default `5`; use `0` to disable retries).
 
 ## Windows builds
 

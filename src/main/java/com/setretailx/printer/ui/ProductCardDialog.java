@@ -6,20 +6,28 @@ import com.setretailx.printer.service.ProductImageService;
 import javax.imageio.ImageIO;
 import javax.swing.BorderFactory;
 import javax.swing.ImageIcon;
+import javax.swing.JButton;
 import javax.swing.JDialog;
+import javax.swing.JEditorPane;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
-import javax.swing.JTable;
 import javax.swing.SwingConstants;
 import javax.swing.SwingWorker;
-import javax.swing.table.DefaultTableModel;
+import javax.swing.text.html.HTMLEditorKit;
 import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Graphics2D;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
 import java.awt.Image;
+import java.awt.Insets;
 import java.awt.RenderingHints;
+import java.awt.Toolkit;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
@@ -27,7 +35,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** Readable product details dialog with asynchronously loaded catalog photography. */
+/**
+ * Readable product details dialog with asynchronously loaded catalog photography.
+ * Layout: header with title and category, photo on the left, structured details
+ * (key fields + characteristics) on the right, description below.
+ */
 @SuppressWarnings("serial")
 final class ProductCardDialog extends JDialog {
     private static final Map<String, String> LABELS = Map.ofEntries(
@@ -37,71 +49,165 @@ final class ProductCardDialog extends JDialog {
             Map.entry("size", "Размер"), Map.entry("sizename", "Размер"),
             Map.entry("material", "Материал"), Map.entry("composition", "Состав"),
             Map.entry("country", "Страна производства"), Map.entry("countryoforigin", "Страна производства"),
-            Map.entry("season", "Сезон"), Map.entry("weight", "Вес"), Map.entry("volume", "Объём"),
+            Map.entry("season", "Сезон"), Map.entry("weight", "Вес, кг"), Map.entry("volume", "Объём"),
+            Map.entry("weightgross", "Вес брутто, кг"), Map.entry("length", "Длина, мм"),
+            Map.entry("height", "Высота, мм"), Map.entry("width", "Ширина, мм"),
+            Map.entry("isadult", "Товар для взрослых"), Map.entry("categorypath", "Категория"),
             Map.entry("cost", "Себестоимость"), Map.entry("warranty", "Гарантия"),
             Map.entry("series", "Серия"), Map.entry("collection", "Коллекция"));
     private static final List<String> HIDDEN_FIELDS = List.of(
             "productid", "name", "vendorcode", "barcode", "uom", "price", "totalqty", "totalquantity",
-            "stcode", "source", "description",
+            "stcode", "source", "description", "categorypath",
             "mainimage", "mainimageurl", "image", "imageurl", "photourl", "photo", "pictures", "images");
 
+    private static final Color LABEL_COLOR = new Color(110, 114, 122);
+    private static final Color CATEGORY_COLOR = new Color(36, 99, 173);
+
     private final JLabel image = new JLabel("Загружаем фото…", SwingConstants.CENTER);
+    private final JButton openPhotoButton = new JButton("Открыть в новом окне");
+    private BufferedImage originalImage;
 
     ProductCardDialog(java.awt.Window owner, Product product) {
         super(owner, "Карточка товара — " + product.name(), ModalityType.APPLICATION_MODAL);
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setMinimumSize(new Dimension(680, 500));
+        setMinimumSize(new Dimension(720, 540));
 
-        JPanel content = new JPanel(new BorderLayout(16, 14));
+        JPanel content = new JPanel(new BorderLayout(16, 10));
         content.setBorder(BorderFactory.createEmptyBorder(18, 18, 18, 18));
+
+        JPanel header = new JPanel(new BorderLayout(0, 4));
         JLabel title = new JLabel(product.name());
         title.setFont(title.getFont().deriveFont(Font.BOLD, 21f));
-        content.add(title, BorderLayout.NORTH);
+        header.add(title, BorderLayout.NORTH);
+        header.add(categoryLabel(product), BorderLayout.CENTER);
+        content.add(header, BorderLayout.NORTH);
 
         JPanel body = new JPanel(new BorderLayout(18, 0));
-        image.setPreferredSize(new Dimension(280, 330));
-        image.setMinimumSize(new Dimension(240, 280));
-        image.setBorder(BorderFactory.createEtchedBorder());
-        image.setVerticalAlignment(SwingConstants.CENTER);
-        body.add(image, BorderLayout.WEST);
+        body.add(createPhotoPanel(), BorderLayout.WEST);
         body.add(createDetails(product), BorderLayout.CENTER);
         content.add(body, BorderLayout.CENTER);
+
         setContentPane(content);
         pack();
-        setSize(Math.max(720, getWidth()), Math.max(540, getHeight()));
+        setSize(Math.max(760, getWidth()), Math.max(560, getHeight()));
         setLocationRelativeTo(owner);
         loadImage(product);
     }
 
-    private JScrollPane createDetails(Product product) {
-        List<Object[]> rows = new ArrayList<>();
-        rows.add(new Object[]{"Цена", product.price() == null ? "—" : product.price().format()});
-        rows.add(new Object[]{"Остаток", blankAsDash(product.totalQuantity())});
-        rows.add(new Object[]{"Артикул", blankAsDash(product.vendorCode())});
-        rows.add(new Object[]{"Штрихкод", blankAsDash(product.barcode())});
-        rows.add(new Object[]{"Код SetRetailX", blankAsDash(product.stCode())});
-        rows.add(new Object[]{"Ед. измерения", blankAsDash(product.uom())});
+    /** Category is kept in the local catalog (product_categories_path) and must not sit in the attributes table. */
+    private Component categoryLabel(Product product) {
+        String category = findDetail(product.details(), "categorypath");
+        JLabel label = new JLabel();
+        if (category.isBlank()) {
+            label.setText("Категория не указана");
+            label.setForeground(LABEL_COLOR);
+        } else {
+            label.setText("Категория: " + category);
+            label.setForeground(CATEGORY_COLOR);
+        }
+        label.setFont(label.getFont().deriveFont(Font.PLAIN, 13f));
+        return label;
+    }
 
-        String description = findDetail(product.details(), "description");
-        if (!description.isBlank()) rows.add(new Object[]{"Описание", description});
+    private JPanel createPhotoPanel() {
+        image.setPreferredSize(new Dimension(280, 330));
+        image.setMinimumSize(new Dimension(240, 280));
+        image.setBorder(BorderFactory.createEtchedBorder());
+        image.setVerticalAlignment(SwingConstants.CENTER);
+        image.setHorizontalAlignment(SwingConstants.CENTER);
+
+        openPhotoButton.setEnabled(false);
+        openPhotoButton.addActionListener(ignored -> openPhotoInNewWindow());
+
+        JPanel panel = new JPanel(new BorderLayout(0, 8));
+        panel.add(image, BorderLayout.CENTER);
+        panel.add(openPhotoButton, BorderLayout.SOUTH);
+        return panel;
+    }
+
+    private void openPhotoInNewWindow() {
+        if (originalImage == null) return;
+        showEnlargedImage();
+    }
+
+    private JPanel createDetails(Product product) {
+        JPanel details = new JPanel(new BorderLayout(0, 10));
+        JLabel price = new JLabel("Цена: " + (product.price() == null ? "—" : product.price().format()));
+        price.setFont(price.getFont().deriveFont(Font.BOLD, 19f));
+        details.add(price, BorderLayout.NORTH);
+
+        JPanel columns = new JPanel(new BorderLayout(0, 10));
+
+        // 1. Key fields, always at hand.
+        JPanel keyFields = new JPanel(new GridBagLayout());
+        keyFields.setBorder(BorderFactory.createTitledBorder("Основное"));
+        addField(keyFields, 0, "Остаток", blankAsDash(product.totalQuantity()));
+        addField(keyFields, 1, "Артикул", blankAsDash(product.vendorCode()));
+        addField(keyFields, 2, "Штрихкод", blankAsDash(product.barcode()));
+        addField(keyFields, 3, "Код SetRetailX", blankAsDash(product.stCode()));
+        addField(keyFields, 4, "Ед. измерения", blankAsDash(product.uom()));
+        columns.add(keyFields, BorderLayout.NORTH);
+
+        // 2. Remaining catalog characteristics.
+        JPanel characteristics = new JPanel(new GridBagLayout());
+        characteristics.setBorder(BorderFactory.createTitledBorder("Характеристики"));
+        int row = 0;
         for (Map.Entry<String, String> detail : product.details().entrySet()) {
             String normalized = normalizeKey(detail.getKey());
-            if (HIDDEN_FIELDS.contains(normalized) || detail.getValue().isBlank()) continue;
-            String label = LABELS.getOrDefault(normalized, humanize(detail.getKey()));
-            rows.add(new Object[]{label, detail.getValue()});
+            if (HIDDEN_FIELDS.contains(normalized) || normalized.equals("catalogattributes") || detail.getValue().isBlank()) continue;
+            String value = detail.getValue();
+            if (normalized.equals("isadult")) value = value.equals("1") || value.equalsIgnoreCase("true") ? "Да" : "Нет";
+            addField(characteristics, row++, LABELS.getOrDefault(normalized, humanize(detail.getKey())), value);
         }
+        if (row == 0) {
+            JLabel empty = new JLabel("Для этого товара нет дополнительных характеристик");
+            empty.setForeground(LABEL_COLOR);
+            empty.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+            characteristics.add(empty, gridBagConstraints(0));
+        }
+        JScrollPane characteristicsScroll = new JScrollPane(characteristics);
+        characteristicsScroll.setBorder(null);
+        characteristicsScroll.getVerticalScrollBar().setUnitIncrement(16);
+        columns.add(characteristicsScroll, BorderLayout.CENTER);
 
-        DefaultTableModel model = new DefaultTableModel(new Object[]{"Поле", "Значение"}, 0) {
-            @Override public boolean isCellEditable(int row, int column) { return false; }
-        };
-        rows.forEach(model::addRow);
-        JTable table = new JTable(model);
-        table.setRowHeight(26);
-        table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
-        table.getColumnModel().getColumn(0).setPreferredWidth(130);
-        table.getColumnModel().getColumn(1).setPreferredWidth(300);
-        table.setFillsViewportHeight(true);
-        return new JScrollPane(table);
+        // 3. Description as a separate section.
+        String description = findDetail(product.details(), "description");
+        if (!description.isBlank()) {
+            JEditorPane descriptionPane = new JEditorPane();
+            descriptionPane.setEditorKit(new HTMLEditorKit());
+            descriptionPane.setEditable(false);
+            descriptionPane.setText(asHtml(description));
+            descriptionPane.setCaretPosition(0);
+            JScrollPane descriptionScroll = new JScrollPane(descriptionPane);
+            descriptionScroll.setBorder(BorderFactory.createTitledBorder("Описание"));
+            descriptionScroll.setPreferredSize(new Dimension(390, 160));
+            columns.add(descriptionScroll, BorderLayout.SOUTH);
+        }
+        details.add(columns, BorderLayout.CENTER);
+        return details;
+    }
+
+    private void addField(JPanel panel, int row, String label, String value) {
+        JLabel caption = new JLabel(label);
+        caption.setForeground(LABEL_COLOR);
+        caption.setFont(caption.getFont().deriveFont(Font.PLAIN, 12.5f));
+        JLabel content = new JLabel(value);
+        content.setFont(content.getFont().deriveFont(Font.PLAIN, 13.5f));
+        panel.add(caption, gridBagConstraints(row));
+        GridBagConstraints valueConstraints = gridBagConstraints(row);
+        valueConstraints.gridx = 1;
+        valueConstraints.weightx = 1.0;
+        panel.add(content, valueConstraints);
+    }
+
+    private GridBagConstraints gridBagConstraints(int row) {
+        GridBagConstraints constraints = new GridBagConstraints();
+        constraints.gridy = row;
+        constraints.gridx = 0;
+        constraints.anchor = GridBagConstraints.NORTHWEST;
+        constraints.fill = GridBagConstraints.HORIZONTAL;
+        constraints.insets = new Insets(3, 8, 3, 12);
+        return constraints;
     }
 
     private void loadImage(Product product) {
@@ -115,6 +221,7 @@ final class ProductCardDialog extends JDialog {
                 byte[] bytes = ProductImageService.download(url);
                 BufferedImage source = ImageIO.read(new ByteArrayInputStream(bytes));
                 if (source == null) throw new java.io.IOException("Не удалось прочитать файл изображения.");
+                originalImage = source;
                 int width = 280;
                 int height = 330;
                 double scale = Math.min((double) width / source.getWidth(), (double) height / source.getHeight());
@@ -136,6 +243,14 @@ final class ProductCardDialog extends JDialog {
                 try {
                     image.setText("");
                     image.setIcon(new ImageIcon(get()));
+                    image.setToolTipText("Нажмите или используйте кнопку, чтобы открыть фото в новом окне");
+                    image.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+                    image.addMouseListener(new java.awt.event.MouseAdapter() {
+                        @Override public void mouseClicked(java.awt.event.MouseEvent event) {
+                            if (event.getClickCount() == 1 && originalImage != null) showEnlargedImage();
+                        }
+                    });
+                    openPhotoButton.setEnabled(true);
                 } catch (Exception error) {
                     Throwable cause = error.getCause() == null ? error : error.getCause();
                     image.setIcon(null);
@@ -143,6 +258,34 @@ final class ProductCardDialog extends JDialog {
                 }
             }
         }.execute();
+    }
+
+    private void showEnlargedImage() {
+        if (originalImage == null) return;
+        Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
+        int maxWidth = Math.max(320, (int) (screen.width * 0.88));
+        int maxHeight = Math.max(240, (int) (screen.height * 0.82));
+        double scale = Math.min(1.0, Math.min((double) maxWidth / originalImage.getWidth(), (double) maxHeight / originalImage.getHeight()));
+        int width = Math.max(1, (int) Math.round(originalImage.getWidth() * scale));
+        int height = Math.max(1, (int) Math.round(originalImage.getHeight() * scale));
+        Image scaled = originalImage.getScaledInstance(width, height, Image.SCALE_SMOOTH);
+        JLabel enlarged = new JLabel(new ImageIcon(scaled));
+        JDialog dialog = new JDialog(this, "Фотография товара", ModalityType.MODELESS);
+        dialog.setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+        dialog.add(new JScrollPane(enlarged));
+        dialog.pack();
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
+    }
+
+    private static String asHtml(String description) {
+        String content = description.trim();
+        if (!content.matches("(?is).*<[a-z][^>]*>.*")) {
+            content = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    .replace("\r\n", "\n").replace("\n", "<br>");
+            return "<html><body style='font-family:sans-serif;font-size:10pt'>" + content + "</body></html>";
+        }
+        return "<html><body style='font-family:sans-serif;font-size:10pt'>" + content + "</body></html>";
     }
 
     private static String findDetail(Map<String, String> details, String key) {

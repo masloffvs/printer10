@@ -1,6 +1,6 @@
 package com.setretailx.printer.ui;
 
-import com.setretailx.printer.service.SetRetailXClient;
+import com.setretailx.printer.service.ExchangeEvent;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -40,7 +40,7 @@ final class ExchangePanel extends JPanel {
         log.setCaretPosition(log.getDocument().getLength());
     }
 
-    void append(SetRetailXClient.ExchangeEvent event) {
+    void append(ExchangeEvent event) {
         String time = event.timestamp().atZone(ZoneId.systemDefault())
                 .format(DateTimeFormatter.ofPattern("HH:mm:ss"));
         log.append("[" + time + "] " + event.title() + "\n" + event.details() + "\n\n");

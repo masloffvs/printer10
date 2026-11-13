@@ -2,15 +2,19 @@ package com.setretailx.printer.ui;
 
 import com.setretailx.printer.config.AppConfig;
 import com.setretailx.printer.model.Product;
+import com.setretailx.printer.model.PrintBatch;
+import com.setretailx.printer.model.PrintHistoryEntry;
+import com.setretailx.printer.model.PriceType;
 import com.setretailx.printer.model.ScannedProbe;
 import com.setretailx.printer.repository.ProductRepository;
-import com.setretailx.printer.service.SetRetailXClient;
+import com.setretailx.printer.repository.PrintHistoryRepository;
+import com.setretailx.printer.service.SetRetailXConnector;
+import com.setretailx.printer.service.ExchangeEvent;
 
 import javax.swing.BorderFactory;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
 import javax.swing.SwingWorker;
-import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,6 +25,7 @@ import javax.swing.SwingUtilities;
 @SuppressWarnings("serial")
 public final class MainWindow extends JFrame {
     private final ProductRepository products = new ProductRepository();
+    private final PrintHistoryRepository printHistory = new PrintHistoryRepository();
     private final MdiWorkspace workspace = new MdiWorkspace();
     private final List<QueueEntry> entries = new ArrayList<>();
     private final ScannerPanel scanner = new ScannerPanel(this::submitScan);
@@ -28,9 +33,10 @@ public final class MainWindow extends JFrame {
     private final SearchPanel search = new SearchPanel(this::search, this::updateSearchSelection,
             this::addSelectedSearchResults, this::showProductCard);
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
-            this::clearQueue);
+            this::clearQueue, this::moveSelected);
     private final ExchangePanel exchange = new ExchangePanel(this::checkNetworkConnection);
-    private final SetRetailXClient network = new SetRetailXClient(event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
+    private final PrintHistoryPanel history = new PrintHistoryPanel(this::restoreBatch, this::refreshHistory);
+    private final SetRetailXConnector network = new SetRetailXConnector(event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
     private List<Product> searchResults = new ArrayList<>();
 
@@ -50,15 +56,15 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("search", search, 760, 480);
         workspace.addWindow("queue", queue, 760, 440);
         workspace.addWindow("exchange", exchange, 650, 400);
-        workspace.addWindow("history", new MigrationNoticePanel(
-                "Локальная история партий будет перенесена вместе с печатью."), 620, 360);
+        workspace.addWindow("history", history, 760, 420);
         workspace.addWindow("tasks", new MigrationNoticePanel(
-                "Планировщик фоновых задач будет перенесён после сетевого клиента."), 680, 400);
+                "Планировщик фоновых задач будет перенесён отдельным этапом."), 680, 400);
         scanner.registerRecipient("comparison", "Сверка ценников");
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Очередь печати");
         workspace.setWindowVisibilityListener(scanner::setRecipientOpen);
         workspace.showWindow("scanner");
+        refreshHistory();
         log("Java UI запущен. Локальная база: " + AppConfig.DB_PATH);
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override public void windowClosing(java.awt.event.WindowEvent event) { network.close(); }
@@ -177,22 +183,29 @@ public final class MainWindow extends JFrame {
         dialog.setVisible(true);
     }
 
-    private void assignSelected() {
-        AppConfig.PrintFormat format = queue.selectedFormat();
-        int amount = queue.selectedAmount();
-        for (int row : queue.selectedRows()) {
+    private void assignSelected(List<Integer> rows, AppConfig.PrintFormat format,
+                                PriceType priceType, Integer amount) {
+        for (int row : rows) {
             if (row >= 0 && row < entries.size()) {
                 entries.get(row).format = format;
+                entries.get(row).priceType = priceType;
                 entries.get(row).amount = amount;
             }
         }
         refreshQueue();
     }
 
-    private void removeSelected() {
-        int[] rows = queue.selectedRows();
-        for (int i = rows.length - 1; i >= 0; i--) {
-            if (rows[i] >= 0 && rows[i] < entries.size()) entries.remove(rows[i]);
+    private void moveSelected(List<Integer> rows, AppConfig.PrintFormat format) {
+        for (int row : rows) {
+            if (row >= 0 && row < entries.size()) entries.get(row).format = format;
+        }
+        refreshQueue();
+    }
+
+    private void removeSelected(List<Integer> rows) {
+        for (int i = rows.size() - 1; i >= 0; i--) {
+            int row = rows.get(i);
+            if (row >= 0 && row < entries.size()) entries.remove(row);
         }
         refreshQueue();
     }
@@ -204,17 +217,45 @@ public final class MainWindow extends JFrame {
         refreshQueue();
     }
 
-    private void refreshQueue() {
-        DefaultTableModel model = queue.model();
-        model.setRowCount(0);
-        int assigned = 0;
-        for (int i = 0; i < entries.size(); i++) {
-            QueueEntry entry = entries.get(i);
-            if (entry.format != null) assigned++;
-            model.addRow(new Object[]{i + 1, entry.product.name(), entry.product.barcode(), entry.product.stCode(),
-                    entry.format == null ? "Не назначен" : entry.format.name(),
-                    entry.amount == null ? "—" : entry.amount, entry.quantity});
+    private void refreshHistory() {
+        history.setMessage("Загружаем историю…");
+        runBackground(printHistory::batches, history::showBatches,
+                error -> history.setMessage("Не удалось загрузить историю: " + error));
+    }
+
+    private void restoreBatch(PrintBatch batch) {
+        List<PrintHistoryEntry> toRestore = batch.entries();
+        if ("Частично отправлено".equals(batch.status())) {
+            java.util.Set<Integer> successful = new java.util.HashSet<>(batch.successfulIndexes());
+            List<PrintHistoryEntry> pending = new ArrayList<>();
+            for (int i = 0; i < batch.entries().size(); i++) {
+                if (!successful.contains(i)) pending.add(batch.entries().get(i));
+            }
+            toRestore = pending;
         }
+        for (PrintHistoryEntry archived : toRestore) {
+            QueueEntry entry = new QueueEntry(archived.product());
+            String key = archived.formatKey();
+            entry.format = AppConfig.formatByKey(key);
+            entry.amount = archived.amount();
+            entry.quantity = archived.quantity();
+            entry.priceType = archived.priceType();
+            entries.add(entry);
+        }
+        refreshQueue();
+        workspace.showWindow("queue");
+        status.setText("Восстановлено товаров из истории: " + toRestore.size());
+    }
+
+    private void refreshQueue() {
+        List<QueuePanel.QueueItem> items = new ArrayList<>();
+        int assigned = 0;
+        for (QueueEntry entry : entries) {
+            if (entry.format != null) assigned++;
+            items.add(new QueuePanel.QueueItem(entry.product.name(), entry.product.barcode(),
+                    entry.product.stCode(), entry.format, entry.priceType, entry.amount, entry.quantity));
+        }
+        queue.showEntries(items);
         queue.setSummary("В очереди: " + entries.size() + " · назначено: " + assigned
                 + " · без формата: " + (entries.size() - assigned));
     }
@@ -253,7 +294,12 @@ public final class MainWindow extends JFrame {
         private AppConfig.PrintFormat format;
         private Integer amount;
         private int quantity = 1;
+        private PriceType priceType = PriceType.PROMO;
 
         private QueueEntry(Product product) { this.product = product; }
+
+        private PrintHistoryEntry snapshot() {
+            return PrintHistoryEntry.fromQueue(product, format, amount, quantity, priceType);
+        }
     }
 }

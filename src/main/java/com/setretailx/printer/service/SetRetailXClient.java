@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
+import java.io.EOFException;
+import java.net.SocketException;
+import java.nio.channels.ClosedChannelException;
 import java.net.CookieManager;
 import java.net.CookiePolicy;
 import java.net.URI;
@@ -21,10 +24,11 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-/** Asynchronous authenticated JSON-RPC client for SetRetailX. */
-public final class SetRetailXClient implements AutoCloseable {
+/** Internal asynchronous HTTP/JSON-RPC transport used only by SetRetailXConnector. */
+final class SetRetailXClient implements AutoCloseable {
     private static final String REQUEST_CLASS = "ru.crystals.commons.jsonrpc.domain.JsonRpcRequest";
     private static final String LOGIN_ENDPOINT = "java:app/SET-Users/SessionManagerBean!"
             + "ru.crystals.setretailx.users.ejb.interfaces.ISessionManagerLocal";
@@ -34,6 +38,7 @@ public final class SetRetailXClient implements AutoCloseable {
     private final String configurationError;
     private final String username;
     private final String password;
+    private final int connectionRetries;
     private final ExecutorService executor = Executors.newFixedThreadPool(3, runnable -> {
         Thread thread = new Thread(runnable, "setretailx-network");
         thread.setDaemon(true);
@@ -52,9 +57,21 @@ public final class SetRetailXClient implements AutoCloseable {
     private volatile CompletableFuture<Void> loginInFlight;
     private volatile boolean closed;
 
-    public SetRetailXClient(Consumer<ExchangeEvent> eventHandler) {
+    SetRetailXClient(Consumer<ExchangeEvent> eventHandler) {
         this(setting("SETRETAILX_RPC_URL").trim(), setting("SETRETAILX_USERNAME"),
-                setting("SETRETAILX_PASSWORD"), eventHandler);
+                setting("SETRETAILX_PASSWORD"), configuredRetries(), eventHandler);
+    }
+
+    private static int configuredRetries() {
+        String configured = setting("SETRETAILX_CONNECTION_RETRIES").trim();
+        if (configured.isEmpty()) return 5;
+        try {
+            int retries = Integer.parseInt(configured);
+            if (retries < 0) throw new NumberFormatException("negative retry count");
+            return retries;
+        } catch (NumberFormatException error) {
+            return 5;
+        }
     }
 
     private static String setting(String name) {
@@ -63,6 +80,11 @@ public final class SetRetailXClient implements AutoCloseable {
     }
 
     SetRetailXClient(String rpcUrl, String username, String password, Consumer<ExchangeEvent> eventHandler) {
+        this(rpcUrl, username, password, 5, eventHandler);
+    }
+
+    SetRetailXClient(String rpcUrl, String username, String password, int connectionRetries,
+                     Consumer<ExchangeEvent> eventHandler) {
         URI parsedUri = null;
         String parsedBaseUrl = "";
         String configError = "";
@@ -88,6 +110,7 @@ public final class SetRetailXClient implements AutoCloseable {
         this.configurationError = configError;
         this.username = username == null ? "" : username;
         this.password = password == null ? "" : password;
+        this.connectionRetries = Math.max(0, connectionRetries);
         this.eventHandler = eventHandler == null ? ignored -> { } : eventHandler;
     }
 
@@ -179,30 +202,27 @@ public final class SetRetailXClient implements AutoCloseable {
         return call(payload);
     }
 
-    /** An authenticated lightweight call useful for checking that the session remains valid. */
-    public CompletableFuture<JsonNode> checkConnection() {
-        ObjectNode payload = request("getObjectsIds", "java:app/SET-PrintPriceTags/GroupingTreeServiceBean!"
-                + "ru.crystals.setretailx.grouping.api.GroupingTreeService");
-        ArrayNode params = payload.putArray("params");
-        ObjectNode printMode = params.addObject();
-        printMode.put("shelf", 12);
-        printMode.put("@class", "ru.crystals.setretailx.grouping.vo.PrintModeVO");
-        ObjectNode filter = params.addObject();
-        filter.put("@class", "ru.crystals.setretailx.grouping.vo.GroupingObjectsFilterVO");
-        filter.putArray("filters").addObject()
-                .put("type", "NearlyPriceChanging").put("@class", "ru.crystals.operday.vo.SearchArgumentVO");
-        filter.putArray("tree").addObject().put("@class", "ru.crystals.setretailx.grouping.vo.GroupingNodeVO");
-        return call(payload).thenApply(response -> {
-            if (!response.path("result").isArray()) {
-                emit("Некорректный ответ SetRetailX: getObjectsIds",
-                        "Авторизация прошла, но формат ответа проверки соединения неожиданный.", "error");
-                throw new CompletionException(new IOException("SetRetailX вернул некорректный ответ проверки соединения."));
-            }
-            return response;
-        });
+    private CompletableFuture<JsonNode> send(HttpRequest request, String method) {
+        return send(request, method, 0);
     }
 
-    private CompletableFuture<JsonNode> send(HttpRequest request, String method) {
+    private CompletableFuture<JsonNode> send(HttpRequest request, String method, int retryNumber) {
+        return sendOnce(request, method).handle((response, error) -> {
+            if (error == null) return CompletableFuture.completedFuture(response);
+            Throwable cause = unwrap(error);
+            if (retryNumber >= connectionRetries || !isClosedConnection(cause) || closed) {
+                return CompletableFuture.<JsonNode>failedFuture(cause);
+            }
+            int nextRetry = retryNumber + 1;
+            emit("Повтор запроса SetRetailX: " + method,
+                    "Соединение было закрыто. Повтор " + nextRetry + " из " + connectionRetries + ".", "warning");
+            return CompletableFuture.runAsync(() -> { },
+                    CompletableFuture.delayedExecutor(200L * nextRetry, TimeUnit.MILLISECONDS, executor))
+                    .thenCompose(ignored -> send(request, method, nextRetry));
+        }).thenCompose(future -> future);
+    }
+
+    private CompletableFuture<JsonNode> sendOnce(HttpRequest request, String method) {
         Instant started = Instant.now();
         return http.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                 .thenApply(response -> {
@@ -210,6 +230,10 @@ public final class SetRetailXClient implements AutoCloseable {
                     if (response.statusCode() < 200 || response.statusCode() >= 300) {
                         emit("Ответ SetRetailX: HTTP " + response.statusCode(),
                                 "Метод: " + method + "\nВремя ответа: " + elapsed(started) + " с\n" + safeBody(body, method), "error");
+                        if (looksLikeClosedConnection(body)) {
+                            throw new CompletionException(new ClosedConnectionException(
+                                    "SetRetailX закрыл соединение во время запроса."));
+                        }
                         throw new CompletionException(new IOException("SetRetailX вернул HTTP " + response.statusCode() + "."));
                     }
                     try {
@@ -217,6 +241,9 @@ public final class SetRetailXClient implements AutoCloseable {
                         if (parsed == null || !parsed.isObject()) throw new IOException("Ожидался JSON-объект.");
                         if (!parsed.path("error").isMissingNode() && !parsed.path("error").isNull()) {
                             emit("Ошибка SetRetailX: " + method, safeBody(parsed.path("error").toString(), method), "error");
+                            if (looksLikeClosedConnection(parsed.path("error").toString())) {
+                                throw new ClosedConnectionException("SetRetailX закрыл соединение во время запроса.");
+                            }
                             throw new IOException("SetRetailX " + method + ": " + safeBody(parsed.path("error").toString(), method));
                         }
                         emit("Ответ SetRetailX: HTTP " + response.statusCode(),
@@ -233,6 +260,38 @@ public final class SetRetailXClient implements AutoCloseable {
                         emit("Ошибка запроса: " + method, redactSecrets(safeMessage(unwrap(error))), "error");
                     }
                 });
+    }
+
+    private static boolean isClosedConnection(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ClosedConnectionException) return true;
+            if (cause instanceof ClosedChannelException || cause instanceof EOFException) return true;
+            if (cause instanceof SocketException) {
+                String message = safeMessage(cause).toLowerCase(java.util.Locale.ROOT);
+                if (message.contains("reset") || message.contains("closed") || message.contains("broken pipe")
+                        || message.contains("aborted") || message.contains("end of stream")) return true;
+            }
+            if (cause instanceof IOException) {
+                String message = safeMessage(cause).toLowerCase(java.util.Locale.ROOT);
+                if (looksLikeClosedConnection(message)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean looksLikeClosedConnection(String text) {
+        if (text == null) return false;
+        String message = text.toLowerCase(java.util.Locale.ROOT);
+        return message.contains("connection reset") || message.contains("connection closed")
+                || message.contains("connection is closed") || message.contains("closed connection")
+                || message.contains("connection was closed") || message.contains("closed channel")
+                || message.contains("channel is closed") || message.contains("broken pipe")
+                || message.contains("unexpected end of file") || message.contains("header parser received no bytes")
+                || message.contains("end of stream") || message.contains("socket is closed");
+    }
+
+    private static final class ClosedConnectionException extends IOException {
+        private ClosedConnectionException(String message) { super(message); }
     }
 
     private HttpRequest.Builder requestBuilder(ObjectNode payload, Duration timeout) {
@@ -368,5 +427,4 @@ public final class SetRetailXClient implements AutoCloseable {
         executor.shutdownNow();
     }
 
-    public record ExchangeEvent(Instant timestamp, String title, String details, String tone) { }
 }
