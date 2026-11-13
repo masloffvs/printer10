@@ -146,6 +146,21 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return result;
     }
 
+    /** Returns every price observation retained for one product, newest first. */
+    public List<PriceSnapshot> priceHistory(String marking) throws SQLException {
+        List<PriceSnapshot> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT name, barcode, captured_at, prices_json FROM price_snapshot_history "
+                        + "WHERE marking=? ORDER BY captured_at DESC, id DESC")) {
+            statement.setString(1, marking);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new PriceSnapshot(rows.getString("name"), rows.getString("barcode"),
+                        rows.getDouble("captured_at"), rows.getString("prices_json")));
+            }
+        }
+        return result;
+    }
+
     public List<TaskRun> taskRuns(String taskId, int limit) throws SQLException {
         List<TaskRun> result = new ArrayList<>();
         try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
@@ -267,6 +282,12 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                 String prices = canonicalPricesJson(product);
                 String name = firstNonEmpty(product.fullName(), product.name());
                 String barcode = firstNonEmpty(product.barCode(), product.barcode());
+                try (PreparedStatement history = connection.prepareStatement(
+                        "INSERT INTO price_snapshot_history (marking, name, barcode, prices_json, captured_at) "
+                                + "VALUES (?, ?, ?, ?, ?)")) {
+                    history.setString(1, marking); history.setString(2, name); history.setString(3, barcode);
+                    history.setString(4, prices); history.setDouble(5, now); history.executeUpdate();
+                }
                 String previous = null;
                 try (PreparedStatement query = connection.prepareStatement(
                         "SELECT prices_json FROM price_snapshots WHERE marking=?")) {
@@ -399,6 +420,16 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                     + "first_seen_at REAL NOT NULL, expires_at REAL NOT NULL, source TEXT NOT NULL DEFAULT 'NearlyPriceChanging')");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS price_snapshots (marking TEXT PRIMARY KEY, "
                     + "name TEXT NOT NULL DEFAULT '', barcode TEXT NOT NULL DEFAULT '', prices_json TEXT NOT NULL, captured_at REAL NOT NULL)");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS price_snapshot_history (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    + "marking TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', barcode TEXT NOT NULL DEFAULT '', "
+                    + "prices_json TEXT NOT NULL, captured_at REAL NOT NULL)");
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_price_snapshot_history_marking_time "
+                    + "ON price_snapshot_history(marking, captured_at DESC)");
+            // Preserve the latest observation already available when upgrading an existing database.
+            statement.executeUpdate("INSERT INTO price_snapshot_history (marking, name, barcode, prices_json, captured_at) "
+                    + "SELECT s.marking, s.name, s.barcode, s.prices_json, s.captured_at FROM price_snapshots s "
+                    + "WHERE NOT EXISTS (SELECT 1 FROM price_snapshot_history h "
+                    + "WHERE h.marking=s.marking AND h.captured_at=s.captured_at AND h.prices_json=s.prices_json)");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS price_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                     + "marking TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', barcode TEXT NOT NULL DEFAULT '', detected_at REAL NOT NULL, "
                     + "old_prices_json TEXT NOT NULL, new_prices_json TEXT NOT NULL)");
@@ -481,6 +512,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                            String lastStatus, String lastResult) { }
     public record PriceChange(String marking, String name, String barcode, double detectedAt,
                               String oldPricesJson, String newPricesJson) { }
+    public record PriceSnapshot(String name, String barcode, double capturedAt, String pricesJson) { }
     public record TaskRun(long id, String taskId, double startedAt, Double finishedAt,
                           String status, String result) { }
     private record SnapshotCounts(int snapshots, int changes, int unmatched) { }

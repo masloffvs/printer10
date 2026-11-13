@@ -9,6 +9,7 @@ import com.setretailx.printer.model.PriceType;
 import com.setretailx.printer.model.ScannedProbe;
 import com.setretailx.printer.repository.ProductRepository;
 import com.setretailx.printer.repository.PrintHistoryRepository;
+import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.service.SetRetailXConnector;
 import com.setretailx.printer.service.ExchangeEvent;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
@@ -32,6 +33,7 @@ import javax.swing.SwingUtilities;
 public final class MainWindow extends JFrame {
     private final ProductRepository products = new ProductRepository();
     private final PrintHistoryRepository printHistory = new PrintHistoryRepository();
+    private final AddressStorageRepository addressStorage = new AddressStorageRepository();
     private final MdiWorkspace workspace = new MdiWorkspace();
     private final List<QueueEntry> entries = new ArrayList<>();
     private final ScannerPanel scanner = new ScannerPanel(this::submitScan);
@@ -45,7 +47,10 @@ public final class MainWindow extends JFrame {
     private final SetRetailXConnector network = new SetRetailXConnector(event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
     private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService, workspace);
-    private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService);
+    private final AddressStoragePanel addressStoragePanel = new AddressStoragePanel(addressStorage);
+    private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService, (marking, name, barcode) ->
+            workspace.addDynamicWindow("История цен — " + marking,
+                    new PriceHistoryPanel(taskService, marking, name, barcode), 760, 480));
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
     private List<Product> searchResults = new ArrayList<>();
     private boolean printInProgress;
@@ -70,6 +75,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("exchange", exchange, 650, 400);
         workspace.addWindow("history", history, 760, 420);
         workspace.addWindow("tasks", taskPanel, 900, 520);
+        workspace.addWindow("storage", addressStoragePanel, 1000, 600);
         workspace.addWindow("priceChanges", priceChanges, 900, 520);
         workspace.addWindow("environment", new EnvironmentPanel(() -> {
             network.reloadSettings();
@@ -79,6 +85,7 @@ public final class MainWindow extends JFrame {
         scanner.registerRecipient("comparison", "Сверка ценников");
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Очередь печати");
+        scanner.registerRecipient("storage", "Адресное хранение (открытая коробка)");
         workspace.setWindowVisibilityListener(scanner::setRecipientOpen);
         workspace.showWindow("scanner");
         refreshHistory();
@@ -130,6 +137,10 @@ public final class MainWindow extends JFrame {
             receivers++;
             receiveProductScan(probe);
         }
+        if (scanner.sendsTo("storage") && !probe.hasPriceData()) {
+            receivers++;
+            receiveStorageScan(probe);
+        }
         if (scanner.sendsTo("comparison") && probe.hasPriceData()) {
             receivers++;
             receivePriceScan(probe);
@@ -162,6 +173,31 @@ public final class MainWindow extends JFrame {
             refreshQueue();
             status.setText("Добавлен товар (" + product.source() + "): " + product.name());
         }, error -> status.setText("Ошибка поиска товара: " + error));
+    }
+
+    private void receiveStorageScan(ScannedProbe probe) {
+        if (probe.barcode().isEmpty()) {
+            status.setText("Для адресного хранения нужен скан товара со штрихкодом.");
+            return;
+        }
+        if (!addressStoragePanel.hasOpenBox()) {
+            status.setText("Откройте коробку в окне адресного хранения перед сканированием.");
+            return;
+        }
+        status.setText("Ищем товар " + probe.barcode() + " для адресного хранения…");
+        runBackground(() -> {
+            Product local = products.findByBarcode(probe.barcode());
+            return local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+        }, product -> {
+            if (product == null) {
+                status.setText("Штрихкод " + probe.barcode() + " не найден; товар не добавлен.");
+                return;
+            }
+            addressStoragePanel.addScannedProduct(product, message -> {
+                status.setText(message);
+                if (message.startsWith("Добавлен")) log(message);
+            });
+        }, error -> status.setText("Ошибка поиска товара для хранения: " + error));
     }
 
     private void receivePriceScan(ScannedProbe probe) {
@@ -226,12 +262,17 @@ public final class MainWindow extends JFrame {
         }
 
         printInProgress = true;
-        new SwingWorker<PrintOutcome, Void>() {
+        PrintProgressDialog progressDialog = new PrintProgressDialog(this, groups.size());
+        new SwingWorker<PrintOutcome, PrintProgressUpdate>() {
             @Override protected PrintOutcome doInBackground() throws Exception {
                 long batchId = printHistory.addBatch(candidates);
                 List<Integer> successfulCandidateIndexes = new ArrayList<>();
                 List<String> failures = new ArrayList<>();
+                int groupIndex = 0;
                 for (Map.Entry<PrintGroupKey, List<Integer>> group : groups.entrySet()) {
+                    groupIndex++;
+                    publish(new PrintProgressUpdate("Отправляем задание " + groupIndex + " из " + groups.size()
+                            + " · " + group.getKey().format().name() + "…", groupIndex - 1));
                     PrintGroupKey key = group.getKey();
                     List<PrintGroupItemDto> items = group.getValue().stream()
                             .map(index -> PrintGroupItemDto.from(snapshotsByQueueIndex.get(index).product(),
@@ -253,6 +294,7 @@ public final class MainWindow extends JFrame {
                                 && cause.getCause() != null) cause = cause.getCause();
                         failures.add(cause.getMessage() == null ? cause.toString() : cause.getMessage());
                     }
+                    publish(new PrintProgressUpdate("Обработано заданий: " + groupIndex + " из " + groups.size(), groupIndex));
                 }
                 String batchStatus = successfulCandidateIndexes.isEmpty()
                         ? (failures.isEmpty() ? "Не отправлено" : "Ошибка отправки")
@@ -268,7 +310,13 @@ public final class MainWindow extends JFrame {
                 return new PrintOutcome(batchId, successfulCandidateIndexes, failures);
             }
 
+            @Override protected void process(List<PrintProgressUpdate> updates) {
+                PrintProgressUpdate update = updates.get(updates.size() - 1);
+                progressDialog.showProgress(update.message(), update.completedGroups(), groups.size());
+            }
+
             @Override protected void done() {
+                progressDialog.dispose();
                 try {
                     PrintOutcome outcome = get();
                     java.util.Set<Integer> successfulCandidateIndexes =
@@ -291,7 +339,8 @@ public final class MainWindow extends JFrame {
                 }
             }
         }.execute();
-        status.setText("Подготавливаем задания печати…");
+        status.setText("Идёт отправка ценников на печать. Пожалуйста, подождите…");
+        progressDialog.setVisible(true);
     }
 
     private void updateSearchSelection() {
@@ -435,5 +484,6 @@ public final class MainWindow extends JFrame {
     }
 
     private record PrintGroupKey(AppConfig.PrintFormat format, int amount) { }
+    private record PrintProgressUpdate(String message, int completedGroups) { }
     private record PrintOutcome(long batchId, List<Integer> successfulCandidateIndexes, List<String> failures) { }
 }

@@ -31,6 +31,7 @@ final class PriceChangesPanel extends JPanel {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final DateTimeFormatter CHANGE_TIME = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
     private final PriceMonitoringTaskService service;
+    private final HistoryOpener openHistory;
     private final DefaultTableModel model = new DefaultTableModel(
             new Object[]{"Когда", "Артикул", "Товар", "Штрихкод", "Тип цены", "Было", "Стало"}, 0) {
         @Override public boolean isCellEditable(int row, int column) { return false; }
@@ -42,9 +43,10 @@ final class PriceChangesPanel extends JPanel {
     private final JLabel count = new JLabel(" ");
     private final Timer refreshTimer;
 
-    PriceChangesPanel(PriceMonitoringTaskService service) {
+    PriceChangesPanel(PriceMonitoringTaskService service, HistoryOpener openHistory) {
         super(new BorderLayout(8, 8));
         this.service = service;
+        this.openHistory = openHistory;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         filters.add(new JLabel("Поиск товара:"));
@@ -57,6 +59,17 @@ final class PriceChangesPanel extends JPanel {
         add(filters, BorderLayout.NORTH);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         table.setFillsViewportHeight(true);
+        table.setToolTipText("Нажмите на цену «Было» или «Стало», чтобы открыть полную историю цен артикула");
+        table.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+        table.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent event) {
+                int row = table.rowAtPoint(event.getPoint());
+                int column = table.columnAtPoint(event.getPoint());
+                if (row < 0 || (column != 5 && column != 6)) return;
+                ChangeRow change = (ChangeRow) model.getValueAt(row, 0);
+                if (change != null) openHistory.open(change.marking(), change.name(), change.barcode());
+            }
+        });
         add(new JScrollPane(table), BorderLayout.CENTER);
         JPanel footer = new JPanel(new BorderLayout(4, 4));
         footer.add(count, BorderLayout.NORTH);
@@ -95,11 +108,31 @@ final class PriceChangesPanel extends JPanel {
             }
             visible.sort((left, right) -> Double.compare(right.detectedAt(), left.detectedAt()));
             model.setRowCount(0);
-            for (ChangeRow entry : visible) model.addRow(new Object[]{formatEpoch(entry.detectedAt()), entry.marking(),
+            for (ChangeRow entry : visible) model.addRow(new Object[]{entry, entry.marking(),
                     entry.name(), entry.barcode(), entry.priceType(), entry.oldValue(), entry.newValue()});
             count.setText("Показано изменений цен: " + visible.size()
                     + (changes.size() >= 1000 ? " · просмотрены последние 1000 событий" : ""));
         } catch (SQLException error) { count.setText("Не удалось загрузить историю: " + error.getMessage()); }
+    }
+
+    private static final class ChangeRow {
+        private final double detectedAt;
+        private final String marking, name, barcode, priceType, oldValue, newValue;
+
+        private ChangeRow(double detectedAt, String marking, String name, String barcode,
+                          String priceType, String oldValue, String newValue) {
+            this.detectedAt = detectedAt; this.marking = marking; this.name = name; this.barcode = barcode;
+            this.priceType = priceType; this.oldValue = oldValue; this.newValue = newValue;
+        }
+
+        String marking() { return marking; }
+        String name() { return name; }
+        String barcode() { return barcode; }
+        String priceType() { return priceType; }
+        String oldValue() { return oldValue; }
+        String newValue() { return newValue; }
+        double detectedAt() { return detectedAt; }
+        @Override public String toString() { return formatEpoch(detectedAt); }
     }
 
     private static void appendChangedPrices(List<ChangeRow> output, PriceMonitoringTaskService.PriceChange change,
@@ -138,6 +171,7 @@ final class PriceChangesPanel extends JPanel {
         PriceFilter(String label, String mapName) { this.label = label; this.mapName = mapName; }
         @Override public String toString() { return label; }
     }
-    private record ChangeRow(double detectedAt, String marking, String name, String barcode,
-                             String priceType, String oldValue, String newValue) { }
+    @FunctionalInterface interface HistoryOpener {
+        void open(String marking, String name, String barcode);
+    }
 }

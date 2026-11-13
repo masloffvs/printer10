@@ -9,6 +9,8 @@ import javax.swing.JMenuBar;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JToolBar;
+import javax.swing.event.InternalFrameAdapter;
+import javax.swing.event.InternalFrameEvent;
 import javax.swing.event.MenuEvent;
 import javax.swing.event.MenuListener;
 import java.awt.BorderLayout;
@@ -30,12 +32,14 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
             new WindowSpec("history", "История печати", "История"),
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
+            new WindowSpec("storage", "Адресное хранение", "Адреса"),
             new WindowSpec("priceChanges", "История изменения цен", "История цен"),
             new WindowSpec("environment", "Настройки .env", ".env")
     };
 
     private final JDesktopPane desktop = new JDesktopPane();
     private final Map<String, JInternalFrame> frames = new LinkedHashMap<>();
+    private final Map<String, JInternalFrame> keyedDynamicFrames = new LinkedHashMap<>();
     private int dynamicFrameCount;
     private BiConsumer<String, Boolean> visibilityListener = (key, open) -> { };
 
@@ -89,6 +93,36 @@ final class MdiWorkspace extends JPanel {
         frame.setSize(width, height);
         int offset = (dynamicFrameCount++ % 12) * 26;
         frame.setLocation(26 + offset, 24 + offset);
+        desktop.add(frame);
+        frame.setVisible(true);
+        frame.toFront();
+        try { frame.setSelected(true); }
+        catch (PropertyVetoException ignored) { }
+    }
+
+    void showDynamicWindow(String key, String title, JPanel content, int width, int height) {
+        JInternalFrame existing = keyedDynamicFrames.get(key);
+        if (existing != null && !existing.isClosed()) {
+            existing.setVisible(true);
+            restore(existing);
+            existing.toFront();
+            try { existing.setSelected(true); }
+            catch (PropertyVetoException ignored) { }
+            return;
+        }
+
+        JInternalFrame frame = new JInternalFrame(title, true, true, true, true);
+        frame.setDefaultCloseOperation(JInternalFrame.DISPOSE_ON_CLOSE);
+        frame.setContentPane(content);
+        frame.setSize(width, height);
+        int offset = (dynamicFrameCount++ % 12) * 26;
+        frame.setLocation(26 + offset, 24 + offset);
+        frame.addInternalFrameListener(new InternalFrameAdapter() {
+            @Override public void internalFrameClosed(InternalFrameEvent event) {
+                keyedDynamicFrames.remove(key, frame);
+            }
+        });
+        keyedDynamicFrames.put(key, frame);
         desktop.add(frame);
         frame.setVisible(true);
         frame.toFront();
