@@ -243,6 +243,7 @@ final class MdiWorkspace extends JPanel {
         toolBar.setFloatable(false);
         toolBar.setRollover(true);
         toolBar.setToolTipText("Навигация по разделам и открытым окнам");
+        toolBar.setBorder(javax.swing.BorderFactory.createEmptyBorder(8, 6, 8, 6));
         addNavigationGroup("ТОВАРЫ", "scanner", "comparison", "search", "queue");
         addNavigationGroup("СКЛАД", "storage", "storageAddresses", "palletScanning");
         addNavigationGroup("ТОРГОВЫЕ ТОЧКИ", "salesPointMap", "salesPointEditor");
@@ -251,10 +252,12 @@ final class MdiWorkspace extends JPanel {
         dynamicToolbarIndex = toolBar.getComponentCount();
         toolBar.addSeparator();
         JButton cascade = new JButton("Каскад");
+        styleNavigationButton(cascade);
         cascade.setToolTipText("Расположить окна каскадом");
         cascade.addActionListener(event -> cascadeWindows());
         toolBar.add(cascade);
         JButton tile = new JButton("Плитка");
+        styleNavigationButton(tile);
         tile.setToolTipText("Расположить окна плиткой");
         tile.addActionListener(event -> tileWindows());
         toolBar.add(tile);
@@ -263,17 +266,25 @@ final class MdiWorkspace extends JPanel {
     private void addNavigationGroup(String title, String... keys) {
         JPanel group = new JPanel();
         group.setLayout(new javax.swing.BoxLayout(group, javax.swing.BoxLayout.Y_AXIS));
-        group.setBorder(javax.swing.BorderFactory.createTitledBorder(title));
+        group.setOpaque(false);
+        group.setBorder(javax.swing.BorderFactory.createEmptyBorder(7, 4, 5, 4));
         group.setAlignmentX(Component.LEFT_ALIGNMENT);
+        JLabel heading = new JLabel(title);
+        heading.setAlignmentX(Component.LEFT_ALIGNMENT);
+        heading.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 8, 5, 0));
+        heading.setFont(heading.getFont().deriveFont(java.awt.Font.BOLD, 10f));
+        heading.setForeground(javax.swing.UIManager.getColor("Label.disabledForeground"));
+        group.add(heading);
         for (String key : keys) {
             WindowSpec spec = specFor(key);
             JToggleButton button = new JToggleButton(spec.shortTitle, new NavigationIcon(key));
+            styleNavigationButton(button);
             button.setToolTipText(spec.title);
             button.setHorizontalAlignment(JToggleButton.LEFT);
             button.setIconTextGap(8);
-            button.setMargin(new java.awt.Insets(5, 7, 5, 5));
+            button.setMargin(new java.awt.Insets(6, 9, 6, 8));
             button.setAlignmentX(Component.LEFT_ALIGNMENT);
-            button.setMaximumSize(new java.awt.Dimension(220, 48));
+            button.setMaximumSize(new java.awt.Dimension(220, 40));
             button.addActionListener(event -> showWindow(spec.key));
             toolbarButtons.put(spec.key, button);
             group.add(button);
@@ -282,9 +293,31 @@ final class MdiWorkspace extends JPanel {
         toolBar.add(group);
     }
 
+    private static void styleNavigationButton(AbstractButton button) {
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setContentAreaFilled(false);
+        button.setOpaque(false);
+        button.setBorder(javax.swing.BorderFactory.createEmptyBorder(6, 9, 6, 8));
+        button.setRolloverEnabled(true);
+        button.addChangeListener(event -> {
+            boolean selected = button.getModel().isSelected();
+            boolean hovered = button.getModel().isRollover();
+            button.setOpaque(selected || hovered);
+            if (selected) {
+                Color selection = javax.swing.UIManager.getColor("List.selectionBackground");
+                button.setBackground(selection != null ? selection : new Color(225, 235, 246));
+            } else if (hovered) {
+                Color hover = javax.swing.UIManager.getColor("Button.hoverBackground");
+                button.setBackground(hover != null ? hover : new Color(235, 239, 244));
+            }
+        });
+    }
+
     private void addDynamicToolbarButton(JInternalFrame frame, String title) {
         String buttonTitle = title.length() > 24 ? title.substring(0, 21) + "…" : title;
         JToggleButton button = new JToggleButton(buttonTitle);
+        styleNavigationButton(button);
         button.setToolTipText(title);
         button.addActionListener(event -> {
             frame.setVisible(true);
