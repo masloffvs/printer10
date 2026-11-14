@@ -20,8 +20,12 @@ import java.util.Set;
 /** Exact barcode lookup and local catalog search against all_products.sqlite. */
 public final class ProductRepository {
     public List<Product> search(String query) throws SQLException {
-        String text = query == null ? "" : query.trim();
-        if (text.isEmpty()) return List.of();
+        return search(new SearchCriteria(query, "", "", "", null, null));
+    }
+
+    public List<Product> search(SearchCriteria criteria) throws SQLException {
+        SearchCriteria filters = criteria == null ? SearchCriteria.empty() : criteria;
+        String text = filters.query().trim();
         String pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
         try (Connection connection = connect()) {
             Set<String> columns = columns(connection);
@@ -32,20 +36,94 @@ public final class ProductRepository {
             if (!columns.contains("product_id") || searchable.isEmpty()) {
                 throw new SQLException("В таблице products отсутствуют поля для поиска товаров.");
             }
-            String conditions = String.join(" OR ", searchable.stream()
-                    .map(column -> "CAST(\"" + column + "\" AS TEXT) LIKE ? ESCAPE '\\' COLLATE NOCASE")
-                    .toList());
+            List<String> conditions = new ArrayList<>();
+            List<Object> parameters = new ArrayList<>();
+            if (!text.isEmpty()) {
+                conditions.add("(" + String.join(" OR ", searchable.stream()
+                        .map(column -> "CAST(\"" + column + "\" AS TEXT) LIKE ? ESCAPE '\\' COLLATE NOCASE")
+                        .toList()) + ")");
+                for (int i = 0; i < searchable.size(); i++) parameters.add(pattern);
+            }
+            if (!filters.category().isBlank() && hasTable(connection, "product_categories_path")) {
+                conditions.add("(SELECT group_concat(name, ' › ') FROM (SELECT name FROM product_categories_path pcp "
+                        + "WHERE pcp.product_id = products.product_id ORDER BY position)) = ?");
+                parameters.add(filters.category());
+            }
+            if (filters.minimumPrice() != null && columns.contains("price")) {
+                conditions.add("CAST(price AS INTEGER) >= ?");
+                parameters.add(filters.minimumPrice());
+            }
+            if (filters.maximumPrice() != null && columns.contains("price")) {
+                conditions.add("CAST(price AS INTEGER) <= ?");
+                parameters.add(filters.maximumPrice());
+            }
+            if (!filters.attributeName().isBlank()
+                    && hasTable(connection, "product_attributes")
+                    && hasTable(connection, "product_attribute_values")) {
+                conditions.add("EXISTS (SELECT 1 FROM product_attributes a "
+                        + "LEFT JOIN product_attribute_values v ON v.attribute_id = a.id "
+                        + "WHERE a.product_id = products.product_id "
+                        + "AND COALESCE(a.name, a.code, '') = ?"
+                        + (filters.attributeValue().isBlank() ? ")" : " AND COALESCE(v.name, v.value, '') = ?)"));
+                parameters.add(filters.attributeName());
+                if (!filters.attributeValue().isBlank()) parameters.add(filters.attributeValue());
+            }
             String orderColumn = columns.contains("name") ? "name" : "product_id";
-            String sql = selectColumns(connection, columns) + " FROM products WHERE " + conditions
-                    + " ORDER BY \"" + orderColumn + "\" LIMIT 100";
+            String sql = selectColumns(connection, columns) + " FROM products"
+                    + (conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions))
+                    + " ORDER BY \"" + orderColumn + "\" LIMIT 500";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                for (int i = 0; i < searchable.size(); i++) statement.setString(i + 1, pattern);
-            try (ResultSet rows = statement.executeQuery()) {
-                List<Product> products = new ArrayList<>();
-                while (rows.next()) products.add(product(rows));
-                return products;
+                for (int i = 0; i < parameters.size(); i++) statement.setObject(i + 1, parameters.get(i));
+                try (ResultSet rows = statement.executeQuery()) {
+                    List<Product> products = new ArrayList<>();
+                    while (rows.next()) products.add(product(rows));
+                    return products;
+                }
             }
+        }
+    }
+
+    public SearchOptions searchOptions() throws SQLException {
+        try (Connection connection = connect()) {
+            List<String> categories = new ArrayList<>();
+            if (hasTable(connection, "product_categories_path")) {
+                try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
+                        "SELECT DISTINCT category_path FROM (SELECT product_id, "
+                                + "group_concat(name, ' › ') AS category_path FROM "
+                                + "(SELECT product_id, name, position FROM product_categories_path "
+                                + "ORDER BY position) GROUP BY product_id) "
+                                + "WHERE category_path IS NOT NULL AND category_path <> '' ORDER BY category_path")) {
+                    while (rows.next()) categories.add(rows.getString(1));
+                }
             }
+
+            Map<String, List<String>> attributes = new LinkedHashMap<>();
+            if (hasTable(connection, "product_attributes") && hasTable(connection, "product_attribute_values")) {
+                try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
+                        "SELECT DISTINCT COALESCE(a.name, a.code, '') AS attribute_name, "
+                                + "COALESCE(v.name, v.value, '') AS attribute_value "
+                                + "FROM product_attributes a JOIN product_attribute_values v "
+                                + "ON v.attribute_id = a.id WHERE attribute_name <> '' "
+                                + "AND attribute_value <> '' ORDER BY attribute_name, attribute_value")) {
+                    while (rows.next()) attributes.computeIfAbsent(rows.getString("attribute_name"), ignored -> new ArrayList<>())
+                            .add(rows.getString("attribute_value"));
+                }
+            }
+
+            long minimum = 0;
+            long maximum = 100_000_000L;
+            Set<String> columns = columns(connection);
+            if (columns.contains("price")) {
+                try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
+                        "SELECT MIN(CAST(price AS INTEGER)), MAX(CAST(price AS INTEGER)) FROM products "
+                                + "WHERE price IS NOT NULL AND CAST(price AS INTEGER) >= 0")) {
+                    if (rows.next() && rows.getObject(1) != null) {
+                        minimum = Math.max(0, rows.getLong(1));
+                        maximum = Math.max(minimum, rows.getLong(2));
+                    }
+                }
+            }
+            return new SearchOptions(categories, attributes, minimum, maximum);
         }
     }
 
@@ -139,5 +217,31 @@ public final class ProductRepository {
         return new Product(row.getString("product_id"), row.getString("name"),
                 row.getString("vendor_code"), row.getString("barcode"), row.getString("uom"),
                 "offline", Price.fromDatabase(row.getString("price")), row.getString("total_qty"), details);
+    }
+
+    public record SearchCriteria(String query, String category, String attributeName, String attributeValue,
+                                 Long minimumPrice, Long maximumPrice) {
+        public SearchCriteria {
+            query = query == null ? "" : query.trim();
+            category = category == null ? "" : category;
+            attributeName = attributeName == null ? "" : attributeName;
+            attributeValue = attributeValue == null ? "" : attributeValue;
+        }
+
+        public static SearchCriteria empty() { return new SearchCriteria("", "", "", "", null, null); }
+        public boolean hasFilters() {
+            return !category.isBlank() || !attributeName.isBlank()
+                    || minimumPrice != null || maximumPrice != null;
+        }
+    }
+
+    public record SearchOptions(List<String> categories, Map<String, List<String>> attributes,
+                                long minimumPrice, long maximumPrice) {
+        public SearchOptions {
+            categories = List.copyOf(categories);
+            Map<String, List<String>> copy = new LinkedHashMap<>();
+            attributes.forEach((name, values) -> copy.put(name, List.copyOf(values)));
+            attributes = java.util.Collections.unmodifiableMap(copy);
+        }
     }
 }

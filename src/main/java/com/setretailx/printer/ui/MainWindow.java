@@ -103,6 +103,8 @@ public final class MainWindow extends JFrame {
         scanner.registerRecipient("queue", "Очередь печати");
         scanner.registerRecipient("storage", "Сканирование единичных коробок");
         scanner.registerRecipient("salesPointEditor", "Редактор торговой точки · ценники");
+        runBackground(products::searchOptions, search::setSearchOptions,
+                error -> search.setStatus("Не удалось загрузить фильтры каталога: " + error));
         workspace.setWindowVisibilityListener((key, open) -> {
             scanner.setRecipientOpen(key, open);
             if ("palletScanning".equals(key) && open) palletScanningPanel.focusScanner();
@@ -332,22 +334,30 @@ public final class MainWindow extends JFrame {
 
     private void search() {
         String query = search.query();
-        if (query.isEmpty()) {
-            search.setStatus("Введите название, артикул или штрихкод.");
+        String lookup = query.isEmpty() ? "" : BarInput.barcode(query).orElse(query);
+        ProductRepository.SearchCriteria criteria = new ProductRepository.SearchCriteria(lookup,
+                search.categoryFilter(), search.attributeNameFilter(), search.attributeValueFilter(),
+                search.minimumPriceFilter(), search.maximumPriceFilter());
+        if (query.isEmpty() && !criteria.hasFilters()) {
+            search.setStatus("Введите запрос или выберите категорию, цену либо характеристику.");
             return;
         }
-        String lookup = BarInput.barcode(query).orElse(query);
         search.setStatus("Ищем в локальной базе…");
+        search.setSearchEnabled(false);
         runBackground(() -> {
-            List<Product> local = products.search(lookup);
-            if (!local.isEmpty()) return local;
+            List<Product> local = products.search(criteria);
+            if (!local.isEmpty() || criteria.hasFilters() || lookup.isEmpty()) return local;
             SwingUtilities.invokeLater(() -> search.setStatus("Локально не найдено; ищем в SetRetailX…"));
             return network.searchOnlineProduct(lookup).join().map(List::of).orElseGet(List::of);
         }, results -> {
+            search.setSearchEnabled(true);
             searchResults = new ArrayList<>(results);
             search.showResults(results);
             search.setStatus("Найдено товаров: " + results.size());
-        }, error -> search.setStatus("Ошибка поиска: " + error));
+        }, error -> {
+            search.setSearchEnabled(true);
+            search.setStatus("Ошибка поиска: " + error);
+        });
     }
 
     private void printAssigned() {
