@@ -5,18 +5,22 @@ import com.setretailx.printer.model.PriceType;
 
 import javax.swing.BorderFactory;
 import javax.swing.JComboBox;
+import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JMenu;
 import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
+import javax.swing.JTextField;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
 import javax.swing.JTable;
 import javax.swing.SpinnerNumberModel;
 import javax.swing.TransferHandler;
+import javax.swing.RowFilter;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableRowSorter;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
@@ -29,11 +33,13 @@ import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 
 /** Hierarchical queue table grouped by format and price type. */
 @SuppressWarnings("serial")
 final class QueuePanel extends JPanel {
-    private final DefaultMutableTreeNode root = new DefaultMutableTreeNode("Очередь печати");
+    private final DefaultMutableTreeNode root = new DefaultMutableTreeNode("Печать ценников");
     private final DefaultTreeModel treeModel = new DefaultTreeModel(root);
     private final JTree tree = new JTree(treeModel);
     private final DefaultTableModel tableModel = new DefaultTableModel(
@@ -42,6 +48,13 @@ final class QueuePanel extends JPanel {
     };
     private final JTable table = new JTable(tableModel);
     private final JLabel summary = new JLabel("В очереди: 0");
+    private final JLabel visibleCount = new JLabel("Показано: 0");
+    private final JTextField filterField = new JTextField(24);
+    private final JButton assignButton = new JButton("Настроить выбранные…");
+    private final JButton removeButton = new JButton("Удалить выбранные");
+    private final JButton printButton = new JButton("Печатать назначенные");
+    private final JButton clearButton = new JButton("Очистить очередь");
+    private final TableRowSorter<DefaultTableModel> sorter = new TableRowSorter<>(tableModel);
     private final QuadConsumer<List<Integer>, AppConfig.PrintFormat, PriceType, Integer> assignSelected;
     private final Consumer<List<Integer>> removeSelected;
     private final Runnable clearQueue;
@@ -69,11 +82,19 @@ final class QueuePanel extends JPanel {
         tree.setTransferHandler(new QueueTransferHandler());
         table.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setFillsViewportHeight(true);
+        table.setRowSorter(sorter);
+        table.setAutoCreateRowSorter(false);
         table.getSelectionModel().addListSelectionListener(event -> {
-            if (!event.getValueIsAdjusting() && !synchronizing) selectTreeRows(table.getSelectedRows());
+            if (!event.getValueIsAdjusting() && !synchronizing) {
+                selectTreeRows(selectedTableEntryIndexes());
+                updateActionState();
+            }
         });
         tree.addTreeSelectionListener(event -> {
-            if (!synchronizing) selectTableRows(selectedEntryIndexes());
+            if (!synchronizing) {
+                selectTableRows(selectedEntryIndexes());
+                updateActionState();
+            }
         });
         MouseAdapter popup = new MouseAdapter() {
             private void show(MouseEvent event) {
@@ -92,20 +113,56 @@ final class QueuePanel extends JPanel {
         };
         table.addMouseListener(popup);
         tree.addMouseListener(popup);
+
+        JPanel heading = new JPanel(new BorderLayout(8, 4));
+        JLabel title = new JLabel("Печать ценников");
+        title.setFont(title.getFont().deriveFont(java.awt.Font.BOLD, 16f));
+        JPanel headingTop = new JPanel(new BorderLayout(8, 0));
+        headingTop.add(title, BorderLayout.WEST);
+        JPanel counts = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 10, 0));
+        counts.add(visibleCount);
+        counts.add(summary);
+        headingTop.add(counts, BorderLayout.EAST);
+        heading.add(headingTop, BorderLayout.NORTH);
+        JPanel filter = new JPanel(new BorderLayout(6, 0));
+        filter.add(new JLabel("Найти в списке:"), BorderLayout.WEST);
+        filterField.setToolTipText("Фильтр по названию, штрихкоду и коду ST");
+        filterField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent event) { applyFilter(); }
+            @Override public void removeUpdate(DocumentEvent event) { applyFilter(); }
+            @Override public void changedUpdate(DocumentEvent event) { applyFilter(); }
+        });
+        filter.add(filterField, BorderLayout.CENTER);
+        JButton resetFilter = new JButton("Сбросить");
+        resetFilter.addActionListener(event -> filterField.setText(""));
+        filter.add(resetFilter, BorderLayout.EAST);
+        heading.add(filter, BorderLayout.SOUTH);
+        add(heading, BorderLayout.NORTH);
+
         JScrollPane treeScroll = new JScrollPane(tree);
         treeScroll.setPreferredSize(new java.awt.Dimension(210, 300));
         javax.swing.JSplitPane split = new javax.swing.JSplitPane(javax.swing.JSplitPane.HORIZONTAL_SPLIT,
                 treeScroll, new JScrollPane(table));
         split.setResizeWeight(0.23);
         add(split, BorderLayout.CENTER);
-        JPanel footer = new JPanel(new BorderLayout());
-        footer.add(summary, BorderLayout.EAST);
+        JPanel footer = new JPanel(new BorderLayout(8, 0));
+        JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 0));
+        assignButton.addActionListener(event -> showAssignmentDialog(selectedEntryIndexes()));
+        removeButton.addActionListener(event -> removeSelected.accept(selectedEntryIndexes()));
+        printButton.addActionListener(event -> printAssigned.run());
+        clearButton.addActionListener(event -> clearQueue.run());
+        actions.add(assignButton);
+        actions.add(removeButton);
+        actions.add(printButton);
+        actions.add(clearButton);
+        footer.add(actions, BorderLayout.CENTER);
         add(footer, BorderLayout.SOUTH);
+        updateActionState();
     }
 
     void showEntries(List<QueueItem> values) {
         entries = List.copyOf(values);
-        int[] selected = table.getSelectedRows();
+        List<Integer> selected = selectedTableEntryIndexes();
         synchronizing = true;
         try {
             tableModel.setRowCount(0);
@@ -131,20 +188,43 @@ final class QueuePanel extends JPanel {
             }
             treeModel.reload();
             for (int row = 0; row < tree.getRowCount(); row++) tree.expandRow(row);
-            for (int row : selected) if (row >= 0 && row < table.getRowCount()) table.addRowSelectionInterval(row, row);
-            selectTreeRows(table.getSelectedRows());
+            for (int index : selected) {
+                int row = sorter.convertRowIndexToView(index);
+                if (row >= 0) table.addRowSelectionInterval(row, row);
+            }
+            selectTreeRows(selectedTableEntryIndexes());
         } finally { synchronizing = false; }
+        updateVisibleCount();
+        updateActionState();
     }
 
     void setSummary(String text) { summary.setText(text); }
 
-    private void selectTreeRows(int[] rows) {
+    private void applyFilter() {
+        String query = filterField.getText().trim();
+        sorter.setRowFilter(query.isEmpty() ? null : RowFilter.regexFilter("(?i)" + java.util.regex.Pattern.quote(query)));
+        updateVisibleCount();
+    }
+
+    private void updateVisibleCount() {
+        visibleCount.setText("Показано: " + table.getRowCount() + " из " + entries.size());
+    }
+
+    private void updateActionState() {
+        boolean hasSelection = !selectedEntryIndexes().isEmpty();
+        assignButton.setEnabled(hasSelection);
+        removeButton.setEnabled(hasSelection);
+        printButton.setEnabled(entries.stream().anyMatch(entry -> entry.format() != null));
+        clearButton.setEnabled(!entries.isEmpty());
+    }
+
+    private void selectTreeRows(List<Integer> rows) {
         synchronizing = true;
         try {
             tree.clearSelection();
-            for (int row : rows) {
-                if (row < 0 || row >= entries.size()) continue;
-                TreePath path = findItemPath(root, row);
+            for (int modelRow : rows) {
+                if (modelRow < 0 || modelRow >= entries.size()) continue;
+                TreePath path = findItemPath(root, modelRow);
                 if (path != null) tree.addSelectionPath(path);
             }
         } finally { synchronizing = false; }
@@ -154,7 +234,10 @@ final class QueuePanel extends JPanel {
         synchronizing = true;
         try {
             table.clearSelection();
-            for (int row : rows) if (row >= 0 && row < table.getRowCount()) table.addRowSelectionInterval(row, row);
+            for (int modelRow : rows) {
+                int viewRow = sorter.convertRowIndexToView(modelRow);
+                if (viewRow >= 0) table.addRowSelectionInterval(viewRow, viewRow);
+            }
         } finally { synchronizing = false; }
     }
 
@@ -171,6 +254,7 @@ final class QueuePanel extends JPanel {
         List<Integer> selected = selectedEntryIndexes();
         JPopupMenu menu = new JPopupMenu();
         JMenuItem assign = new JMenuItem("Назначить формат, тип цены и тираж…");
+        assign.setEnabled(!selected.isEmpty());
         assign.addActionListener(event -> showAssignmentDialog(selected));
         menu.add(assign);
         JMenu move = new JMenu("Перенести в формат");
@@ -181,12 +265,15 @@ final class QueuePanel extends JPanel {
         }
         menu.add(move);
         JMenuItem remove = new JMenuItem("Удалить выбранное");
+        remove.setEnabled(!selected.isEmpty());
         remove.addActionListener(event -> removeSelected.accept(selected));
         menu.add(remove);
         JMenuItem clear = new JMenuItem("Очистить очередь…");
+        clear.setEnabled(!entries.isEmpty());
         clear.addActionListener(event -> clearQueue.run());
         menu.add(clear);
         JMenuItem print = new JMenuItem("Печать назначенных");
+        print.setEnabled(entries.stream().anyMatch(entry -> entry.format() != null));
         print.addActionListener(event -> printAssigned.run());
         menu.add(print);
         return menu;
@@ -212,8 +299,17 @@ final class QueuePanel extends JPanel {
         for (TreePath path : tree.getSelectionPaths() == null ? new TreePath[0] : tree.getSelectionPaths()) {
             collectIndexes((DefaultMutableTreeNode) path.getLastPathComponent(), indexes);
         }
-        if (indexes.isEmpty()) for (int row : table.getSelectedRows()) if (row >= 0 && row < entries.size()) indexes.add(row);
+        if (indexes.isEmpty()) indexes.addAll(selectedTableEntryIndexes());
         return indexes.stream().distinct().sorted().toList();
+    }
+
+    private List<Integer> selectedTableEntryIndexes() {
+        List<Integer> indexes = new ArrayList<>();
+        for (int row : table.getSelectedRows()) {
+            int modelRow = sorter.convertRowIndexToModel(row);
+            if (modelRow >= 0 && modelRow < entries.size()) indexes.add(modelRow);
+        }
+        return indexes;
     }
 
     private static void collectIndexes(DefaultMutableTreeNode node, List<Integer> indexes) {

@@ -103,7 +103,7 @@ public final class MainWindow extends JFrame {
         }), 760, 520);
         scanner.registerRecipient("comparison", "Сверка ценников");
         scanner.registerRecipient("search", "Поиск товаров");
-        scanner.registerRecipient("queue", "Очередь печати");
+        scanner.registerRecipient("queue", "Печать ценников");
         scanner.registerRecipient("storage", "Сканирование единичных коробок");
         scanner.registerRecipient("salesPointEditor", "Редактор торговой точки · ценники");
         runBackground(products::searchOptions, search::setSearchOptions,
@@ -613,7 +613,7 @@ public final class MainWindow extends JFrame {
     }
 
     private void clearQueue() {
-        if (entries.isEmpty() || JOptionPane.showConfirmDialog(this, "Очистить очередь печати?", "Очередь",
+        if (entries.isEmpty() || JOptionPane.showConfirmDialog(this, "Очистить очередь печати?", "Печать ценников",
                 JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
         entries.clear();
         refreshQueue();
@@ -658,8 +658,8 @@ public final class MainWindow extends JFrame {
                     entry.product.stCode(), entry.format, entry.priceType, entry.amount, entry.quantity));
         }
         queue.showEntries(items);
-        queue.setSummary("В очереди: " + entries.size() + " · назначено: " + assigned
-                + " · без формата: " + (entries.size() - assigned));
+        queue.setSummary("Всего: " + entries.size() + " · назначено: " + assigned
+                + " · не настроено: " + (entries.size() - assigned));
     }
 
     private void showAbout() {

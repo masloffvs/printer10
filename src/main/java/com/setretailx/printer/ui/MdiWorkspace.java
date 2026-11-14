@@ -39,7 +39,7 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("scanner", "Единый сканер", "Сканер"),
             new WindowSpec("comparison", "Сверка ценников", "Сверка"),
             new WindowSpec("search", "Поиск товаров", "Поиск"),
-            new WindowSpec("queue", "Очередь печати", "Очередь"),
+            new WindowSpec("queue", "Печать ценников", "Печать ценников"),
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
             new WindowSpec("history", "История печати", "История"),
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
