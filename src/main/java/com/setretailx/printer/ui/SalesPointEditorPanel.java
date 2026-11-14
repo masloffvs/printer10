@@ -24,6 +24,9 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Consumer;
 
 /** Editor for the current label prices of one selected sales point. */
 @SuppressWarnings("serial")
@@ -33,13 +36,15 @@ final class SalesPointEditorPanel extends JPanel {
     private final SalesPointRepository repository;
     private final JComboBox<SalesPoint> pointSelector = new JComboBox<>();
     private final DefaultTableModel model = new DefaultTableModel(
-            new Object[]{"Артикул", "Товар", "Цена на ценнике", "Обновлено"}, 0) {
+            new Object[]{"Артикул", "Товар", "Обычная цена", "Скидочная цена", "Обновлено"}, 0) {
         @Override public boolean isCellEditable(int row, int column) { return false; }
     };
     private final JTable table = new JTable(model);
     private final JLabel heading = new JLabel("Выберите торговую точку для редактирования.");
     private long selectedPointId = -1;
     private boolean updatingSelector;
+    private Consumer<List<ShelfItem>> historyCheckHandler = ignored -> { };
+    private Consumer<List<ShelfItem>> forcedCheckHandler = ignored -> { };
 
     SalesPointEditorPanel(SalesPointRepository repository) {
         super(new BorderLayout(8, 8));
@@ -71,21 +76,36 @@ final class SalesPointEditorPanel extends JPanel {
         remove.addActionListener(event -> removeItem());
         JButton refreshItems = new JButton("Обновить ценники");
         refreshItems.addActionListener(event -> refreshItems());
+        JButton checkHistory = new JButton("Проверить историю цен");
+        checkHistory.addActionListener(event -> historyCheckHandler.accept(selectedItems()));
+        JButton forceCheck = new JButton("Принудительно сверить");
+        forceCheck.addActionListener(event -> forcedCheckHandler.accept(selectedItems()));
         actions.add(add);
         actions.add(remove);
         actions.add(refreshItems);
+        actions.add(checkHistory);
+        actions.add(forceCheck);
 
         JPanel top = new JPanel(new BorderLayout(4, 4));
         top.add(selector, BorderLayout.NORTH);
         top.add(heading, BorderLayout.SOUTH);
         add(top, BorderLayout.NORTH);
         table.setFillsViewportHeight(true);
+        table.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         add(new JScrollPane(table), BorderLayout.CENTER);
         add(actions, BorderLayout.SOUTH);
         refreshPoints();
     }
 
     long selectedPointId() { return selectedPointId; }
+
+    void setHistoryCheckHandler(Consumer<List<ShelfItem>> handler) {
+        historyCheckHandler = handler == null ? ignored -> { } : handler;
+    }
+
+    void setForcedCheckHandler(Consumer<List<ShelfItem>> handler) {
+        forcedCheckHandler = handler == null ? ignored -> { } : handler;
+    }
 
     void selectPoint(SalesPoint point) {
         selectedPointId = point == null ? -1 : point.id();
@@ -122,22 +142,25 @@ final class SalesPointEditorPanel extends JPanel {
             heading.setText("Выбор точки изменился во время поиска. Повторите скан ценника.");
             return;
         }
-        String article = product.vendorCode().isBlank() ? product.stCode() : product.vendorCode();
+        String article = product.marking();
         if (article.isBlank()) {
             heading.setText("В найденном товаре нет артикула.");
             return;
         }
         try {
             var scanned = probe.pricesAsDecimals();
-            BigDecimal price = scanned.get(4);
-            if (price == null) price = scanned.get(2);
-            if (price == null) {
-                heading.setText("На ценнике нет price4 или price2 — нечего записать.");
+            BigDecimal regular = scanned.get(1);
+            if (regular == null) regular = scanned.get(2);
+            BigDecimal discount = scanned.get(4);
+            if (regular == null && discount == null) {
+                heading.setText("На ценнике нет обычной (price1/price2) или скидочной (price4) цены.");
                 return;
             }
-            repository.putItem(selectedPointId, article, product.name(), price.toPlainString());
+            repository.putItem(selectedPointId, article, product.name(),
+                    regular == null ? null : regular.toPlainString(), discount == null ? null : discount.toPlainString());
             refreshItems();
-            heading.setText("Ценник «" + article + "» обновлён для точки.");
+            heading.setText("Ценник «" + article + "» обновлён: обычная " + display(regular)
+                    + ", скидочная " + display(discount) + ".");
         } catch (Exception error) {
             showError(error);
         }
@@ -151,19 +174,24 @@ final class SalesPointEditorPanel extends JPanel {
         JTextField article = new JTextField(18);
         JTextField name = new JTextField(18);
         JTextField price = new JTextField(12);
+        JTextField discountPrice = new JTextField(12);
         JPanel form = new JPanel(new java.awt.GridLayout(0, 1, 4, 4));
         form.add(new JLabel("Артикул:"));
         form.add(article);
         form.add(new JLabel("Название (необязательно):"));
         form.add(name);
-        form.add(new JLabel("Цена ценника:"));
+        form.add(new JLabel("Обычная цена:"));
         form.add(price);
+        form.add(new JLabel("Скидочная цена (необязательно):"));
+        form.add(discountPrice);
         if (JOptionPane.showConfirmDialog(this, form, "Ценник торговой точки",
                 JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) != JOptionPane.OK_OPTION) return;
         try {
-            BigDecimal parsed = new BigDecimal(price.getText().trim().replace(',', '.'));
-            if (parsed.signum() < 0) throw new NumberFormatException();
-            repository.putItem(selectedPointId, article.getText(), name.getText(), parsed.toPlainString());
+            BigDecimal parsed = parseOptionalPrice(price.getText());
+            BigDecimal parsedDiscount = parseOptionalPrice(discountPrice.getText());
+            repository.putItem(selectedPointId, article.getText(), name.getText(),
+                    parsed == null ? "" : parsed.toPlainString(),
+                    parsedDiscount == null ? "" : parsedDiscount.toPlainString());
             refreshItems();
         } catch (NumberFormatException error) {
             JOptionPane.showMessageDialog(this, "Введите корректную цену.");
@@ -188,12 +216,32 @@ final class SalesPointEditorPanel extends JPanel {
         if (selectedPointId < 0) return;
         try {
             for (ShelfItem item : repository.items(selectedPointId)) {
-                model.addRow(new Object[]{item.article(), item.name(), item.price(),
+                model.addRow(new Object[]{item.article(), item.name(), displayPrice(item.price()),
+                        displayPrice(item.discountPrice()),
                         DATE.format(Instant.ofEpochMilli(item.updatedAt()))});
             }
         } catch (Exception error) {
             showError(error);
         }
+    }
+
+    private List<ShelfItem> selectedItems() {
+        int[] selectedRows = table.getSelectedRows();
+        if (selectedRows.length == 0) {
+            heading.setText("Выберите один или несколько ценников в таблице.");
+            return List.of();
+        }
+        List<ShelfItem> selected = new ArrayList<>();
+        try {
+            List<ShelfItem> items = repository.items(selectedPointId);
+            for (int row : selectedRows) {
+                String article = String.valueOf(model.getValueAt(table.convertRowIndexToModel(row), 0));
+                items.stream().filter(item -> item.article().equals(article)).findFirst().ifPresent(selected::add);
+            }
+        } catch (Exception error) {
+            showError(error);
+        }
+        return List.copyOf(selected);
     }
 
     private SalesPoint findPoint(long id) {
@@ -206,5 +254,18 @@ final class SalesPointEditorPanel extends JPanel {
 
     private void showError(Exception error) {
         heading.setText("Ошибка: " + (error.getMessage() == null ? error : error.getMessage()));
+    }
+
+    private static BigDecimal parseOptionalPrice(String text) {
+        if (text == null || text.isBlank()) return null;
+        BigDecimal parsed = new BigDecimal(text.trim().replace(',', '.'));
+        if (parsed.signum() < 0) throw new NumberFormatException();
+        return parsed;
+    }
+
+    private static String display(BigDecimal price) { return price == null ? "—" : price.toPlainString(); }
+
+    private static String displayPrice(String price) {
+        return price == null || price.isBlank() ? "—" : price;
     }
 }

@@ -143,6 +143,33 @@ public final class ProductRepository {
         }
     }
 
+    /** Finds a local product by the canonical article used by price labels. */
+    public Product findByMarking(String marking) throws SQLException {
+        if (marking == null || marking.isBlank()) return null;
+        try (Connection connection = connect()) {
+            Set<String> columns = columns(connection);
+            if (!columns.contains("product_id")) {
+                throw new SQLException("В таблице products отсутствует поле product_id.");
+            }
+            List<String> alternatives = new ArrayList<>();
+            if (columns.contains("vendor_code")) {
+                String uom = columns.contains("uom") ? "COALESCE(NULLIF(TRIM(uom), ''), 'ST')" : "'ST'";
+                alternatives.add("(TRIM(COALESCE(vendor_code, '')) || '_' || " + uom + ") = ?");
+                alternatives.add("(TRIM(COALESCE(vendor_code, '')) = '' AND CAST(product_id AS TEXT) = ?)");
+            } else {
+                alternatives.add("CAST(product_id AS TEXT) = ?");
+            }
+            String sql = selectColumns(connection, columns) + " FROM products WHERE ("
+                    + String.join(" OR ", alternatives) + ") LIMIT 1";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                for (int index = 1; index <= alternatives.size(); index++) statement.setString(index, marking.trim());
+                try (ResultSet rows = statement.executeQuery()) {
+                    return rows.next() ? product(rows) : null;
+                }
+            }
+        }
+    }
+
     private Set<String> columns(Connection connection) throws SQLException {
         Set<String> columns = new LinkedHashSet<>();
         try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery("PRAGMA table_info(products)")) {

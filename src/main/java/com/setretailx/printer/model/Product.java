@@ -34,6 +34,12 @@ public record Product(
         rawJson = value(rawJson);
     }
 
+    /** Article representation used by SetRetailX price and catalog screens. */
+    public String marking() {
+        if (!vendorCode.isBlank()) return vendorCode.trim() + "_" + uom.trim();
+        return stCode;
+    }
+
     private static String value(String text) {
         return text == null ? "" : text;
     }

@@ -141,7 +141,7 @@ final class ProductCardDialog extends JPanel {
         JPanel keyFields = new JPanel(new GridBagLayout());
         keyFields.setBorder(BorderFactory.createTitledBorder("Основное"));
         addField(keyFields, 0, "Остаток", blankAsDash(product.totalQuantity()));
-        addField(keyFields, 1, "Артикул", blankAsDash(product.vendorCode()));
+        addField(keyFields, 1, "Артикул", blankAsDash(product.marking()));
         addField(keyFields, 2, "Штрихкод", blankAsDash(product.barcode()));
         addField(keyFields, 3, "Код SetRetailX", blankAsDash(product.stCode()));
         addField(keyFields, 4, "Ед. измерения", blankAsDash(product.uom()));

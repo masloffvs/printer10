@@ -133,7 +133,7 @@ final class ComparisonPanel extends JPanel {
                         if (result.error != null) setRowError(result.scan, result.error);
                         else {
                             updateRow(result.scan, row(result.scan, "Готово", result.normal, result.promo,
-                                    result.matches, result.product.vendorCode()));
+                                    result.matches, result.product.marking()));
                             if (result.mismatched()) {
                                 mismatchHandler.accept(result.product);
                                 queued++;
@@ -172,8 +172,7 @@ final class ComparisonPanel extends JPanel {
                         continue;
                     }
                 }
-                String marking = product.vendorCode().isEmpty()
-                        ? product.stCode() : product.vendorCode() + "_" + product.uom();
+                String marking = product.marking();
                 if (marking.isBlank()) {
                     results.add(ComparisonResult.error(scan, "Не удалось определить артикул SetRetailX"));
                     continue;
@@ -201,8 +200,7 @@ final class ComparisonPanel extends JPanel {
             }
             for (Map.Entry<ScanRecord, Product> entry : local.entrySet()) {
                 Product product = entry.getValue();
-                String marking = product.vendorCode().isEmpty()
-                        ? product.stCode() : product.vendorCode() + "_" + product.uom();
+                String marking = product.marking();
                 ProductDto remote = byBarcode.get(product.barcode());
                 if (remote == null) remote = byMarking.get(marking);
                 if (remote == null) {

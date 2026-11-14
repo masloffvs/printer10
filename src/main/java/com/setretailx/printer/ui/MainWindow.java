@@ -11,6 +11,7 @@ import com.setretailx.printer.repository.ProductRepository;
 import com.setretailx.printer.repository.PrintHistoryRepository;
 import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.repository.SalesPointRepository;
+import com.setretailx.printer.repository.SalesPointRepository.ShelfItem;
 import com.setretailx.printer.service.SetRetailXConnector;
 import com.setretailx.printer.service.ExchangeEvent;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
@@ -76,6 +77,8 @@ public final class MainWindow extends JFrame {
         setJMenuBar(workspace.createMenuBar(this::dispose, this::showAbout));
         comparison.setConnector(network);
         comparison.setMismatchHandler(this::enqueueMismatchedProduct);
+        salesPointEditorPanel.setHistoryCheckHandler(this::checkSalesPointPriceHistory);
+        salesPointEditorPanel.setForcedCheckHandler(this::forceSalesPointPriceCheck);
         add(workspace, BorderLayout.CENTER);
         status.setBorder(BorderFactory.createEmptyBorder(6, 10, 6, 10));
         add(status, BorderLayout.SOUTH);
@@ -322,8 +325,11 @@ public final class MainWindow extends JFrame {
                 return;
             }
             salesPointEditorPanel.acceptPriceScan(targetPointId, product, probe);
-            workspace.showWindow("salesPointEditor");
-        }, error -> status.setText("Не удалось найти товар для точки продаж: " + error));
+            scanner.focusInput();
+        }, error -> {
+            status.setText("Не удалось найти товар для точки продаж: " + error);
+            scanner.focusInput();
+        });
     }
 
     private void enqueueMismatchedProduct(Product product) {
@@ -331,6 +337,93 @@ public final class MainWindow extends JFrame {
         refreshQueue();
         log("Несовпавший ценник добавлен в очередь без назначения формата и тиража: " + product.name());
     }
+
+    private void checkSalesPointPriceHistory(List<ShelfItem> shelfItems) {
+        if (shelfItems == null || shelfItems.isEmpty()) return;
+        status.setText("Проверяем историю изменения ценников…");
+        runBackground(() -> {
+            List<ChangedShelfProduct> changed = new ArrayList<>();
+            for (ShelfItem item : shelfItems) {
+                List<PriceMonitoringTaskService.PriceChange> changes = taskService.priceChangesSince(
+                        item.article(), item.updatedAt() / 1000.0);
+                if (changes.isEmpty()) continue;
+                Product product = products.findByMarking(item.article());
+                if (product == null && !changes.get(0).barcode().isBlank()) {
+                    product = network.searchOnlineProduct(changes.get(0).barcode()).join().orElse(null);
+                }
+                changed.add(new ChangedShelfProduct(item, changes.size(), product));
+            }
+            return changed;
+        }, changed -> {
+            if (changed.isEmpty()) {
+                status.setText("Проверено ценников: " + shelfItems.size() + ". Изменений в истории нет — всё хорошо.");
+                JOptionPane.showMessageDialog(this,
+                        "Проверено ценников: " + shelfItems.size() + ".\nИзменений цен после последнего обновления не найдено — всё хорошо.",
+                        "История цен торговой точки", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            long queueable = changed.stream().filter(item -> item.product() != null).count();
+            StringBuilder message = new StringBuilder("Найдены изменения цен после обновления ценника:\n\n");
+            for (ChangedShelfProduct entry : changed) {
+                message.append("• ").append(entry.shelfItem().article()).append(" — ")
+                        .append(entry.shelfItem().name().isBlank() ? "без названия" : entry.shelfItem().name())
+                        .append(" (событий: ").append(entry.changeCount()).append(")")
+                        .append(entry.product() == null ? " · товар не найден для очереди" : "")
+                        .append('\n');
+            }
+            message.append("\nДобавить найденные товары в очередь печати? (доступно: ")
+                    .append(queueable).append(')');
+            int answer = JOptionPane.showConfirmDialog(this, message.toString(), "Изменения цен",
+                    JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+            if (answer == JOptionPane.YES_OPTION) {
+                int queued = 0;
+                for (ChangedShelfProduct entry : changed) {
+                    if (entry.product() == null) continue;
+                    entries.add(new QueueEntry(entry.product()));
+                    queued++;
+                }
+                refreshQueue();
+                status.setText("Добавлено в очередь: " + queued + " ценников с изменившимися ценами.");
+                log("По истории изменений цен в очередь добавлено ценников: " + queued);
+            } else {
+                status.setText("Найдено изменившихся ценников: " + changed.size() + ". В очередь не добавляли.");
+            }
+        }, error -> status.setText("Не удалось проверить историю цен: " + error));
+    }
+
+    private void forceSalesPointPriceCheck(List<ShelfItem> shelfItems) {
+        if (shelfItems == null || shelfItems.isEmpty()) return;
+        status.setText("Готовим принудительную сверку цен…");
+        runBackground(() -> {
+            List<ForcedShelfScan> scans = new ArrayList<>();
+            for (ShelfItem item : shelfItems) {
+                Product product = products.findByMarking(item.article());
+                if (product == null) throw new IllegalStateException(
+                        "Товар не найден в локальной базе по артикулу " + item.article());
+                scans.add(new ForcedShelfScan(item, product));
+            }
+            return scans;
+        }, scans -> {
+            int submitted = 0;
+            for (ForcedShelfScan scan : scans) {
+                ShelfItem item = scan.shelfItem();
+                if ((item.price() == null || item.price().isBlank())
+                        && (item.discountPrice() == null || item.discountPrice().isBlank())) continue;
+                comparison.receiveScan(new ScannedProbe(scan.product().barcode(), item.price(), "", "",
+                        item.discountPrice(), "", ""));
+                submitted++;
+            }
+            if (submitted == 0) {
+                status.setText("У выбранных ценников не заполнены обычная и скидочная цены.");
+                return;
+            }
+            workspace.showWindow("comparison");
+            status.setText("Отправлено на принудительную сверку: " + submitted + " ценников.");
+        }, error -> status.setText("Не удалось выполнить принудительную сверку: " + error));
+    }
+
+    private record ChangedShelfProduct(ShelfItem shelfItem, int changeCount, Product product) { }
+    private record ForcedShelfScan(ShelfItem shelfItem, Product product) { }
 
     private void search() {
         String query = search.query();

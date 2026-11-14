@@ -146,6 +146,25 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return result;
     }
 
+    /** Returns recorded changes for one marking after the shelf label was last updated. */
+    public List<PriceChange> priceChangesSince(String marking, double afterSeconds) throws SQLException {
+        List<PriceChange> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT marking, name, barcode, detected_at, old_prices_json, new_prices_json "
+                        + "FROM price_changes WHERE marking=? AND detected_at>? ORDER BY detected_at DESC")) {
+            statement.setString(1, marking);
+            statement.setDouble(2, afterSeconds);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    result.add(new PriceChange(rows.getString("marking"), rows.getString("name"),
+                            rows.getString("barcode"), rows.getDouble("detected_at"),
+                            rows.getString("old_prices_json"), rows.getString("new_prices_json")));
+                }
+            }
+        }
+        return result;
+    }
+
     /** Returns every price observation retained for one product, newest first. */
     public List<PriceSnapshot> priceHistory(String marking) throws SQLException {
         List<PriceSnapshot> result = new ArrayList<>();

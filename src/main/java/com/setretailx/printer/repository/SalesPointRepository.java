@@ -78,11 +78,11 @@ public final class SalesPointRepository {
     public List<ShelfItem> items(long pointId) throws SQLException {
         List<ShelfItem> result = new ArrayList<>();
         try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
-                "SELECT article, name, price, updated_at FROM sales_point_items WHERE point_id=? ORDER BY article COLLATE NOCASE")) {
+                "SELECT article, name, price, discount_price, updated_at FROM sales_point_items WHERE point_id=? ORDER BY article COLLATE NOCASE")) {
             query.setLong(1, pointId);
             try (ResultSet rows = query.executeQuery()) {
                 while (rows.next()) result.add(new ShelfItem(rows.getString(1), rows.getString(2),
-                        rows.getString(3), rows.getLong(4)));
+                        rows.getString(3), rows.getString(4), rows.getLong(5)));
             }
         }
         return result;
@@ -90,12 +90,30 @@ public final class SalesPointRepository {
 
     /** Insert or replace the current shelf label; this intentionally does not keep price history. */
     public void putItem(long pointId, String article, String name, String price) throws SQLException {
+        putItem(pointId, article, name, price, "");
+    }
+
+    /** Insert or replace both the regular and discounted shelf prices. */
+    public void putItem(long pointId, String article, String name, String price, String discountPrice) throws SQLException {
+        String regular = price == null ? null : price.trim();
+        String discounted = discountPrice == null ? null : discountPrice.trim();
+        if ((regular == null || regular.isBlank()) && (discounted == null || discounted.isBlank())) {
+            throw new SQLException("Введите обычную или скидочную цену.");
+        }
         try (Connection connection = connect(); PreparedStatement upsert = connection.prepareStatement(
-                "INSERT INTO sales_point_items(point_id, article, name, price, updated_at) VALUES(?, ?, ?, ?, ?) "
-                        + "ON CONFLICT(point_id, article) DO UPDATE SET name=excluded.name, price=excluded.price, updated_at=excluded.updated_at")) {
+                "INSERT INTO sales_point_items(point_id, article, name, price, discount_price, updated_at) "
+                        + "VALUES(?, ?, ?, COALESCE(?, ''), COALESCE(?, ''), ?) "
+                        + "ON CONFLICT(point_id, article) DO UPDATE SET name=excluded.name, "
+                        + "price=CASE WHEN ?=1 THEN excluded.price ELSE sales_point_items.price END, "
+                        + "discount_price=CASE WHEN ?=1 THEN excluded.discount_price ELSE sales_point_items.discount_price END, "
+                        + "updated_at=excluded.updated_at")) {
             upsert.setLong(1, pointId); upsert.setString(2, required(article, "Введите артикул."));
-            upsert.setString(3, name == null ? "" : name.trim()); upsert.setString(4, required(price, "Введите цену ценника."));
-            upsert.setLong(5, System.currentTimeMillis()); upsert.executeUpdate();
+            upsert.setString(3, name == null ? "" : name.trim()); upsert.setString(4, regular);
+            upsert.setString(5, discounted);
+            upsert.setLong(6, System.currentTimeMillis());
+            upsert.setInt(7, regular == null ? 0 : 1);
+            upsert.setInt(8, discounted == null ? 0 : 1);
+            upsert.executeUpdate();
         }
     }
 
@@ -113,7 +131,13 @@ public final class SalesPointRepository {
                     + "name TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL)");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_point_items (point_id INTEGER NOT NULL "
                     + "REFERENCES sales_points(point_id) ON DELETE CASCADE, article TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', "
-                    + "price TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(point_id, article))");
+                    + "price TEXT NOT NULL DEFAULT '', discount_price TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, PRIMARY KEY(point_id, article))");
+            boolean hasDiscountPrice = false;
+            try (ResultSet columns = statement.executeQuery("PRAGMA table_info(sales_point_items)")) {
+                while (columns.next()) if ("discount_price".equalsIgnoreCase(columns.getString("name"))) hasDiscountPrice = true;
+            }
+            if (!hasDiscountPrice) statement.executeUpdate(
+                    "ALTER TABLE sales_point_items ADD COLUMN discount_price TEXT NOT NULL DEFAULT ''");
         }
     }
 
@@ -132,5 +156,5 @@ public final class SalesPointRepository {
     }
 
     public record SalesPoint(long id, String name, int x, int y, int width, int height) { }
-    public record ShelfItem(String article, String name, String price, long updatedAt) { }
+    public record ShelfItem(String article, String name, String price, String discountPrice, long updatedAt) { }
 }

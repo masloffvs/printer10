@@ -154,7 +154,7 @@ public final class AddressStorageRepository {
             insert.setString(2, key);
             insert.setString(3, product.stCode());
             insert.setString(4, product.name());
-            insert.setString(5, product.vendorCode());
+            insert.setString(5, product.marking());
             insert.setString(6, product.barcode());
             insert.setLong(7, System.currentTimeMillis());
             insert.executeUpdate();
@@ -240,7 +240,7 @@ public final class AddressStorageRepository {
     }
 
     private static String productKey(Product product) {
-        if (!product.vendorCode().isBlank()) return "article:" + product.vendorCode().trim().toLowerCase(Locale.ROOT);
+        if (!product.marking().isBlank()) return "article:" + product.marking().trim().toLowerCase(Locale.ROOT);
         if (!product.barcode().isBlank()) return "barcode:" + product.barcode().trim();
         if (!product.stCode().isBlank()) return "id:" + product.stCode().trim();
         return "";

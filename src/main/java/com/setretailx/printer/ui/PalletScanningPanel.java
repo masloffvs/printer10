@@ -193,7 +193,7 @@ final class PalletScanningPanel extends JPanel {
                 currentBoxId = result.boxId();
                 currentProductKey = productKey;
                 sessionBoxes.put(result.boxId(), new SessionBox(result.boxId(), result.boxCode(),
-                        new StoredProduct(product.stCode(), product.name(), product.vendorCode(), product.barcode(), 1)));
+                        new StoredProduct(product.stCode(), product.name(), product.marking(), product.barcode(), 1)));
             } else {
                 SessionBox previous = sessionBoxes.get(result.boxId());
                 if (previous != null) {
@@ -365,7 +365,7 @@ final class PalletScanningPanel extends JPanel {
     }
 
     private static String productKey(Product product) {
-        if (!product.vendorCode().isBlank()) return "article:" + product.vendorCode().trim().toLowerCase(java.util.Locale.ROOT);
+        if (!product.marking().isBlank()) return "article:" + product.marking().trim().toLowerCase(java.util.Locale.ROOT);
         if (!product.barcode().isBlank()) return "barcode:" + product.barcode().trim();
         if (!product.stCode().isBlank()) return "id:" + product.stCode().trim();
         return "";

@@ -299,7 +299,7 @@ final class SearchPanel extends JPanel {
         results = List.copyOf(products);
         model.setRowCount(0);
         for (Product product : results) {
-            model.addRow(new Object[]{product.name(), product.vendorCode(), product.barcode(),
+            model.addRow(new Object[]{product.name(), product.marking(), product.barcode(),
                     product.price() == null ? "—" : product.price().format(),
                     product.totalQuantity().isEmpty() ? "—" : product.totalQuantity()});
         }
