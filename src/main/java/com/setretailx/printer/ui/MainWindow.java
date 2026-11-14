@@ -50,7 +50,13 @@ public final class MainWindow extends JFrame {
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
     private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService, workspace);
     private final AddressStoragePanel addressStoragePanel = new AddressStoragePanel(addressStorage);
-    private final SalesPointsPanel salesPointsPanel = new SalesPointsPanel(salesPoints);
+    private final SalesPointEditorPanel salesPointEditorPanel = new SalesPointEditorPanel(salesPoints);
+    private final SalesPointMapPanel salesPointMapPanel = new SalesPointMapPanel(salesPoints,
+            point -> {
+                salesPointEditorPanel.refreshPoints();
+                salesPointEditorPanel.selectPoint(point);
+                workspace.showWindow("salesPointEditor");
+            }, salesPointEditorPanel::refreshPoints);
     private final AddressManagementPanel addressManagementPanel = new AddressManagementPanel(addressStorage,
             addressStoragePanel::refreshAvailableAddresses);
     private final PalletScanningPanel palletScanningPanel = new PalletScanningPanel(addressStorage, this::submitPalletScan);
@@ -83,7 +89,8 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("tasks", taskPanel, 900, 520);
         workspace.addWindow("storage", addressStoragePanel, 900, 560);
         workspace.addWindow("storageAddresses", addressManagementPanel, 900, 520);
-        workspace.addWindow("salesPoints", salesPointsPanel, 1000, 680);
+        workspace.addWindow("salesPointMap", salesPointMapPanel, 1000, 680);
+        workspace.addWindow("salesPointEditor", salesPointEditorPanel, 760, 520);
         workspace.addWindow("palletScanning", palletScanningPanel, 900, 600);
         workspace.addWindow("priceChanges", priceChanges, 900, 520);
         workspace.addWindow("environment", new EnvironmentPanel(() -> {
@@ -95,7 +102,7 @@ public final class MainWindow extends JFrame {
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Очередь печати");
         scanner.registerRecipient("storage", "Сканирование единичных коробок");
-        scanner.registerRecipient("salesPoints", "Точки продаж · ценники");
+        scanner.registerRecipient("salesPointEditor", "Редактор торговой точки · ценники");
         workspace.setWindowVisibilityListener((key, open) -> {
             scanner.setRecipientOpen(key, open);
             if ("palletScanning".equals(key) && open) palletScanningPanel.focusScanner();
@@ -161,7 +168,7 @@ public final class MainWindow extends JFrame {
             receivers++;
             receivePriceScan(probe);
         }
-        if (scanner.sendsTo("salesPoints") && probe.hasPriceData()) {
+        if (scanner.sendsTo("salesPointEditor") && probe.hasPriceData()) {
             receivers++;
             receiveSalesPointPriceScan(probe);
         }
@@ -295,9 +302,9 @@ public final class MainWindow extends JFrame {
     }
 
     private void receiveSalesPointPriceScan(ScannedProbe probe) {
-        long targetPointId = salesPointsPanel.selectedPointId();
+        long targetPointId = salesPointEditorPanel.selectedPointId();
         if (targetPointId < 0) {
-            status.setText("Выберите точку продаж на карте перед сканированием ценника.");
+            status.setText("Откройте редактор и выберите торговую точку перед сканированием ценника.");
             return;
         }
         if (probe.barcode().isBlank()) {
@@ -312,8 +319,8 @@ public final class MainWindow extends JFrame {
                 status.setText("Товар " + probe.barcode() + " не найден; ценник точки не обновлён.");
                 return;
             }
-            salesPointsPanel.acceptPriceScan(targetPointId, product, probe);
-            workspace.showWindow("salesPoints");
+            salesPointEditorPanel.acceptPriceScan(targetPointId, product, probe);
+            workspace.showWindow("salesPointEditor");
         }, error -> status.setText("Не удалось найти товар для точки продаж: " + error));
     }
 
