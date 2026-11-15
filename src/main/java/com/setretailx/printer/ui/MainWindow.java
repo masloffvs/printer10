@@ -195,15 +195,26 @@ public final class MainWindow extends JFrame {
         status.setText("Ищем " + probe.barcode() + " в локальной базе…");
         runBackground(() -> {
             Product local = products.findByBarcode(probe.barcode());
-            return local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
-        }, product -> {
-            if (product == null) {
+            Product product = local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+            if (product == null) return null;
+            return new ScannedPrintProduct(product, printHistory.latestSuccessfulEntry(product).orElse(null));
+        }, scanned -> {
+            if (scanned == null) {
                 status.setText("Штрихкод " + probe.barcode() + " не найден.");
                 return;
             }
-            entries.add(new QueueEntry(product));
+            QueueEntry entry = new QueueEntry(scanned.product());
+            if (scanned.previousPrint() != null) {
+                PrintHistoryEntry previous = scanned.previousPrint();
+                entry.format = AppConfig.formatByKey(previous.formatKey());
+                entry.amount = previous.amount();
+                entry.quantity = previous.quantity();
+                entry.priceType = previous.priceType();
+            }
+            entries.add(entry);
             refreshQueue();
-            status.setText("Добавлен товар (" + product.source() + "): " + product.name());
+            status.setText("Добавлен товар (" + scanned.product().source() + "): " + scanned.product().name()
+                    + (scanned.previousPrint() == null ? "" : " · настройки взяты из истории печати"));
         }, error -> status.setText("Ошибка поиска товара: " + error));
     }
 
@@ -424,6 +435,7 @@ public final class MainWindow extends JFrame {
 
     private record ChangedShelfProduct(ShelfItem shelfItem, int changeCount, Product product) { }
     private record ForcedShelfScan(ShelfItem shelfItem, Product product) { }
+    private record ScannedPrintProduct(Product product, PrintHistoryEntry previousPrint) { }
 
     private void search() {
         String query = search.query();

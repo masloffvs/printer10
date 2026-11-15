@@ -50,10 +50,7 @@ final class QueuePanel extends JPanel {
     private final JLabel summary = new JLabel("В очереди: 0");
     private final JLabel visibleCount = new JLabel("Показано: 0");
     private final JTextField filterField = new JTextField(24);
-    private final JButton assignButton = new JButton("Настроить выбранные…");
-    private final JButton removeButton = new JButton("Удалить выбранные");
     private final JButton printButton = new JButton("Печатать назначенные");
-    private final JButton clearButton = new JButton("Очистить очередь");
     private final TableRowSorter<DefaultTableModel> sorter = new TableRowSorter<>(tableModel);
     private final QuadConsumer<List<Integer>, AppConfig.PrintFormat, PriceType, Integer> assignSelected;
     private final Consumer<List<Integer>> removeSelected;
@@ -147,14 +144,13 @@ final class QueuePanel extends JPanel {
         add(split, BorderLayout.CENTER);
         JPanel footer = new JPanel(new BorderLayout(8, 0));
         JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 0));
-        assignButton.addActionListener(event -> showAssignmentDialog(selectedEntryIndexes()));
-        removeButton.addActionListener(event -> removeSelected.accept(selectedEntryIndexes()));
         printButton.addActionListener(event -> printAssigned.run());
-        clearButton.addActionListener(event -> clearQueue.run());
-        actions.add(assignButton);
-        actions.add(removeButton);
-        actions.add(printButton);
-        actions.add(clearButton);
+        printButton.putClientProperty("JButton.buttonType", "default");
+        printButton.setToolTipText("Отправить все назначенные ценники на печать");
+        JPanel printAction = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 0, 0));
+        printAction.add(printButton);
+        footer.add(printAction, BorderLayout.WEST);
+        actions.add(new JLabel("Выберите товар · правый клик — настройка и другие действия"));
         footer.add(actions, BorderLayout.CENTER);
         add(footer, BorderLayout.SOUTH);
         updateActionState();
@@ -211,11 +207,7 @@ final class QueuePanel extends JPanel {
     }
 
     private void updateActionState() {
-        boolean hasSelection = !selectedEntryIndexes().isEmpty();
-        assignButton.setEnabled(hasSelection);
-        removeButton.setEnabled(hasSelection);
         printButton.setEnabled(entries.stream().anyMatch(entry -> entry.format() != null));
-        clearButton.setEnabled(!entries.isEmpty());
     }
 
     private void selectTreeRows(List<Integer> rows) {
@@ -283,6 +275,12 @@ final class QueuePanel extends JPanel {
         JComboBox<AppConfig.PrintFormat> formatChoice = new JComboBox<>(AppConfig.PRINT_FORMATS.toArray(AppConfig.PrintFormat[]::new));
         JComboBox<PriceType> typeChoice = new JComboBox<>(PriceType.values());
         JSpinner amountChoice = new JSpinner(new SpinnerNumberModel(1, 1, 999, 1));
+        if (!selected.isEmpty() && selected.get(0) >= 0 && selected.get(0) < entries.size()) {
+            QueueItem current = entries.get(selected.get(0));
+            if (current.format() != null) formatChoice.setSelectedItem(current.format());
+            typeChoice.setSelectedItem(current.priceType());
+            if (current.amount() != null) amountChoice.setValue(Math.max(1, Math.min(999, current.amount())));
+        }
         JPanel options = new JPanel(new java.awt.GridLayout(0, 2, 8, 6));
         options.add(new JLabel("Формат:")); options.add(formatChoice);
         options.add(new JLabel("Тип цены:")); options.add(typeChoice);

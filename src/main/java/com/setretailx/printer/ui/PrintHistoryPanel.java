@@ -1,6 +1,8 @@
 package com.setretailx.printer.ui;
 
 import com.setretailx.printer.model.PrintBatch;
+import com.setretailx.printer.model.PrintHistoryEntry;
+import com.setretailx.printer.config.AppConfig;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -8,6 +10,7 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
+import javax.swing.JSplitPane;
 import javax.swing.ListSelectionModel;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
@@ -27,6 +30,11 @@ final class PrintHistoryPanel extends JPanel {
         @Override public boolean isCellEditable(int row, int column) { return false; }
     };
     private final JTable table = new JTable(model);
+    private final DefaultTableModel detailsModel = new DefaultTableModel(
+            new Object[]{"Артикул", "Товар", "Формат", "Тип ценника", "Тираж", "Экземпляров", "Результат"}, 0) {
+        @Override public boolean isCellEditable(int row, int column) { return false; }
+    };
+    private final JTable detailsTable = new JTable(detailsModel);
     private final JLabel info = new JLabel("Партии печати сохраняются локально.");
     private final JButton restore = new JButton("Восстановить в очередь");
     private List<PrintBatch> batches = List.of();
@@ -37,7 +45,15 @@ final class PrintHistoryPanel extends JPanel {
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         table.setRowSelectionAllowed(true);
         table.setFillsViewportHeight(true);
-        add(new JScrollPane(table), BorderLayout.CENTER);
+        detailsTable.setFillsViewportHeight(true);
+        detailsTable.setAutoCreateRowSorter(true);
+        table.getSelectionModel().addListSelectionListener(event -> {
+            if (!event.getValueIsAdjusting()) showSelectedBatchDetails();
+        });
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(table), new JScrollPane(detailsTable));
+        split.setResizeWeight(0.56);
+        split.setBorder(null);
+        add(split, BorderLayout.CENTER);
 
         JPanel footer = new JPanel(new BorderLayout(8, 0));
         footer.add(info, BorderLayout.CENTER);
@@ -63,6 +79,11 @@ final class PrintHistoryPanel extends JPanel {
         }
         info.setText("Сохранено партий: " + this.batches.size());
         restore.setEnabled(!this.batches.isEmpty());
+        if (!this.batches.isEmpty()) {
+            table.setRowSelectionInterval(0, 0);
+        } else {
+            detailsModel.setRowCount(0);
+        }
     }
 
     void setMessage(String message) {
@@ -75,5 +96,28 @@ final class PrintHistoryPanel extends JPanel {
         } catch (DateTimeParseException ignored) {
             return value == null ? "" : value.replace('T', ' ');
         }
+    }
+
+    private void showSelectedBatchDetails() {
+        int row = table.getSelectedRow();
+        detailsModel.setRowCount(0);
+        if (row < 0 || row >= batches.size()) return;
+        PrintBatch batch = batches.get(table.convertRowIndexToModel(row));
+        java.util.Set<Integer> successful = new java.util.HashSet<>(batch.successfulIndexes());
+        for (int index = 0; index < batch.entries().size(); index++) {
+            PrintHistoryEntry entry = batch.entries().get(index);
+            AppConfig.PrintFormat format = AppConfig.formatByKey(entry.formatKey());
+            String result = successful.contains(index) || (batch.successfulIndexes().isEmpty()
+                    && "Отправлено".equals(batch.status())) ? "Отправлено"
+                    : "Частично отправлено".equals(batch.status()) ? "Не отправлено" : batch.status();
+            detailsModel.addRow(new Object[]{article(entry), entry.product().name(),
+                    format == null ? "—" : format.name(), entry.priceType().title(),
+                    entry.amount() == null ? "—" : entry.amount(), entry.quantity(), result});
+        }
+    }
+
+    private static String article(PrintHistoryEntry entry) {
+        String marking = entry.product().marking();
+        return marking.isBlank() ? entry.product().barcode() : marking;
     }
 }
