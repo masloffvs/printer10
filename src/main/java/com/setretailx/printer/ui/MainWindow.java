@@ -42,7 +42,8 @@ public final class MainWindow extends JFrame {
     private final ScannerPanel scanner = new ScannerPanel(this::submitScan);
     private final ComparisonPanel comparison = new ComparisonPanel(products);
     private final SearchPanel search = new SearchPanel(this::search, this::updateSearchSelection,
-            this::addSelectedSearchResults, this::showProductCard);
+            this::addSelectedSearchResults, this::showProductCard,
+            picker -> workspace.addDynamicWindow("Выбор категории", picker, 500, 520));
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
             this::clearQueue, this::moveSelected, this::printAssigned);
     private final ExchangePanel exchange = new ExchangePanel(this::checkNetworkConnection);

@@ -5,7 +5,7 @@ import com.setretailx.printer.repository.ProductRepository.SearchOptions;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
-import javax.swing.JComboBox;
+import javax.swing.JInternalFrame;
 import javax.swing.JLabel;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
@@ -14,9 +14,12 @@ import javax.swing.JScrollPane;
 import javax.swing.JSlider;
 import javax.swing.JTable;
 import javax.swing.JTextField;
+import javax.swing.JTree;
 import javax.swing.ListSelectionModel;
-import javax.swing.SwingConstants;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.tree.DefaultMutableTreeNode;
+import javax.swing.tree.DefaultTreeModel;
+import javax.swing.tree.TreePath;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
@@ -25,6 +28,7 @@ import java.awt.Insets;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -34,9 +38,10 @@ final class SearchPanel extends JPanel {
     private static final int PRICE_SLIDER_STEPS = 1000;
 
     private final JTextField input = new JTextField();
-    private final JComboBox<String> category = new JComboBox<>();
-    private final JComboBox<String> attributeName = new JComboBox<>();
-    private final JComboBox<String> attributeValue = new JComboBox<>();
+    private final JButton category = new JButton("Выбрать категорию…");
+    private final JLabel selectedCategory = new JLabel("Все категории");
+    private final javax.swing.JComboBox<String> attributeName = new javax.swing.JComboBox<>();
+    private final javax.swing.JComboBox<String> attributeValue = new javax.swing.JComboBox<>();
     private final JSlider minimumPrice = new JSlider();
     private final JSlider maximumPrice = new JSlider();
     private final JLabel minimumPriceLabel = new JLabel("Без ограничения");
@@ -47,14 +52,19 @@ final class SearchPanel extends JPanel {
     private final JPanel filters = new JPanel(new GridBagLayout());
     private final JButton find = new JButton("Найти товары");
     private final JButton clear = new JButton("Сбросить");
+    private final Consumer<JPanel> openCategoryPicker;
     private List<Product> results = List.of();
+    private List<String> categories = List.of();
+    private String categoryPath = "";
     private Map<String, List<String>> attributeOptions = Map.of();
     private long priceMinimum;
     private long priceMaximum;
     private boolean updatingControls;
 
-    SearchPanel(Runnable search, Runnable selectionChanged, Runnable addSelected, Consumer<Product> openProduct) {
+    SearchPanel(Runnable search, Runnable selectionChanged, Runnable addSelected, Consumer<Product> openProduct,
+                Consumer<JPanel> openCategoryPicker) {
         super(new BorderLayout(12, 10));
+        this.openCategoryPicker = openCategoryPicker;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
         JPanel resultPane = new JPanel(new BorderLayout(0, 8));
@@ -114,8 +124,13 @@ final class SearchPanel extends JPanel {
         filters.add(input, at(c, 1));
 
         addSectionLabel("Категория товара", c, 2);
-        category.addItem("Все категории");
-        filters.add(category, at(c, 3));
+        category.addActionListener(event -> chooseCategory());
+        JPanel categoryChoice = new JPanel(new BorderLayout(0, 5));
+        categoryChoice.setOpaque(false);
+        selectedCategory.setForeground(javax.swing.UIManager.getColor("Label.disabledForeground"));
+        categoryChoice.add(category, BorderLayout.NORTH);
+        categoryChoice.add(selectedCategory, BorderLayout.CENTER);
+        filters.add(categoryChoice, at(c, 3));
 
         addSectionLabel("Цена от", c, 4);
         minimumPrice.setFocusable(false);
@@ -140,11 +155,6 @@ final class SearchPanel extends JPanel {
         attributeValue.addItem("Любое значение");
         filters.add(attributeValue, at(c, 13));
 
-        JLabel hint = new JLabel("Характеристики применяются до поиска и сужают выборку.");
-        hint.setVerticalAlignment(SwingConstants.TOP);
-        hint.setForeground(javax.swing.UIManager.getColor("Label.disabledForeground"));
-        filters.add(hint, at(c, 14));
-
         minimumPrice.addChangeListener(event -> {
             if (minimumPrice.getValue() > maximumPrice.getValue()) maximumPrice.setValue(minimumPrice.getValue());
             updatePriceLabels();
@@ -153,7 +163,7 @@ final class SearchPanel extends JPanel {
             if (maximumPrice.getValue() < minimumPrice.getValue()) minimumPrice.setValue(maximumPrice.getValue());
             updatePriceLabels();
         });
-        c.gridy = 15;
+        c.gridy = 14;
         c.weighty = 1;
         filters.add(new JPanel(), c);
     }
@@ -206,7 +216,9 @@ final class SearchPanel extends JPanel {
         updatingControls = true;
         try {
             input.setText("");
-            category.setSelectedIndex(0);
+            categoryPath = "";
+            selectedCategory.setText("Все категории");
+            selectedCategory.setToolTipText(null);
             attributeName.setSelectedIndex(0);
             minimumPrice.setValue(0);
             maximumPrice.setValue(PRICE_SLIDER_STEPS);
@@ -254,7 +266,7 @@ final class SearchPanel extends JPanel {
     void setStatus(String message) { status.setText(message); }
     void setSearchEnabled(boolean enabled) { find.setEnabled(enabled); }
 
-    String categoryFilter() { return selected(category, "Все категории"); }
+    String categoryFilter() { return categoryPath; }
     String attributeNameFilter() { return selected(attributeName, "Не выбрана"); }
     String attributeValueFilter() { return selected(attributeValue, "Любое значение"); }
 
@@ -271,9 +283,12 @@ final class SearchPanel extends JPanel {
     void setSearchOptions(SearchOptions options) {
         updatingControls = true;
         try {
-            category.removeAllItems();
-            category.addItem("Все категории");
-            options.categories().forEach(category::addItem);
+            categories = options.categories();
+            if (!categoryPath.isBlank() && !categories.contains(categoryPath)) {
+                categoryPath = "";
+                selectedCategory.setText("Все категории");
+                selectedCategory.setToolTipText(null);
+            }
             attributeOptions = options.attributes();
             attributeName.removeAllItems();
             attributeName.addItem("Не выбрана");
@@ -295,6 +310,119 @@ final class SearchPanel extends JPanel {
         updatePriceLabels();
     }
 
+    private void chooseCategory() {
+        JPanel content = new JPanel(new BorderLayout(8, 8));
+        content.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+        JTextField filter = new JTextField();
+        filter.setToolTipText("Введите часть названия категории");
+        content.add(filter, BorderLayout.NORTH);
+
+        JTree tree = new JTree(new DefaultTreeModel(new DefaultMutableTreeNode("Категории")));
+        tree.setRootVisible(false);
+        tree.setShowsRootHandles(true);
+        JScrollPane scroll = new JScrollPane(tree);
+        scroll.setPreferredSize(new Dimension(430, 360));
+        content.add(scroll, BorderLayout.CENTER);
+
+        Runnable rebuild = () -> {
+            DefaultMutableTreeNode newRoot = new DefaultMutableTreeNode("Категории");
+            String query = filter.getText().trim().toLowerCase(Locale.ROOT);
+            for (String fullPath : categories) {
+                if (!query.isEmpty() && !fullPath.toLowerCase(Locale.ROOT).contains(query)) continue;
+                DefaultMutableTreeNode parent = newRoot;
+                StringBuilder path = new StringBuilder();
+                for (String part : fullPath.split("\\s+›\\s+")) {
+                    if (path.length() > 0) path.append(" › ");
+                    path.append(part);
+                    String currentPath = path.toString();
+                    DefaultMutableTreeNode child = null;
+                    for (int index = 0; index < parent.getChildCount(); index++) {
+                        DefaultMutableTreeNode existing = (DefaultMutableTreeNode) parent.getChildAt(index);
+                        if (existing.getUserObject() instanceof CategoryNode existingCategory
+                                && currentPath.equals(existingCategory.path())) {
+                            child = existing;
+                            break;
+                        }
+                    }
+                    if (child == null) {
+                        child = new DefaultMutableTreeNode(new CategoryNode(currentPath, part));
+                        parent.add(child);
+                    }
+                    parent = child;
+                }
+            }
+            tree.setModel(new DefaultTreeModel(newRoot));
+            for (int row = 0; row < tree.getRowCount(); row++) tree.expandRow(row);
+            if (!categoryPath.isBlank()) {
+                DefaultMutableTreeNode node = findNode(newRoot, categoryPath);
+                if (node != null) tree.setSelectionPath(new TreePath(node.getPath()));
+            }
+        };
+        filter.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent event) { rebuild.run(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent event) { rebuild.run(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent event) { rebuild.run(); }
+        });
+        rebuild.run();
+
+        JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.RIGHT));
+        JButton clear = new JButton("Все категории");
+        clear.addActionListener(event -> {
+            setCategory("");
+            closeCategoryPicker(content);
+        });
+        JButton cancel = new JButton("Отмена");
+        cancel.addActionListener(event -> closeCategoryPicker(content));
+        JButton apply = new JButton("Выбрать");
+        apply.addActionListener(event -> {
+            TreePath path = tree.getSelectionPath();
+            if (path == null) return;
+            Object node = path.getLastPathComponent();
+            if (node instanceof DefaultMutableTreeNode categoryNode
+                    && categoryNode.getUserObject() instanceof CategoryNode value) setCategory(value.path());
+            else return;
+            closeCategoryPicker(content);
+        });
+        tree.addMouseListener(new MouseAdapter() {
+            @Override public void mouseClicked(MouseEvent event) {
+                if (event.getClickCount() == 2 && javax.swing.SwingUtilities.isLeftMouseButton(event)) {
+                    apply.doClick();
+                }
+            }
+        });
+        actions.add(clear);
+        actions.add(cancel);
+        actions.add(apply);
+        content.add(actions, BorderLayout.SOUTH);
+        openCategoryPicker.accept(content);
+    }
+
+    private void setCategory(String path) {
+        categoryPath = path;
+        selectedCategory.setText(categoryPath.isBlank() ? "Все категории" : categoryPath);
+        selectedCategory.setToolTipText(categoryPath.isBlank() ? null : categoryPath);
+    }
+
+    private static void closeCategoryPicker(JPanel content) {
+        JInternalFrame frame = (JInternalFrame) javax.swing.SwingUtilities.getAncestorOfClass(
+                JInternalFrame.class, content);
+        if (frame != null) frame.dispose();
+    }
+
+    private static DefaultMutableTreeNode findNode(DefaultMutableTreeNode root, String path) {
+        if (root.getUserObject() instanceof CategoryNode category && path.equals(category.path())) return root;
+        for (int index = 0; index < root.getChildCount(); index++) {
+            DefaultMutableTreeNode child = (DefaultMutableTreeNode) root.getChildAt(index);
+            DefaultMutableTreeNode found = findNode(child, path);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private record CategoryNode(String path, String label) {
+        @Override public String toString() { return label; }
+    }
+
     void showResults(List<Product> products) {
         results = List.copyOf(products);
         model.setRowCount(0);
@@ -310,7 +438,7 @@ final class SearchPanel extends JPanel {
         return modelRow >= 0 && modelRow < results.size() ? results.get(modelRow) : null;
     }
 
-    private static String selected(JComboBox<String> combo, String defaultValue) {
+    private static String selected(javax.swing.JComboBox<String> combo, String defaultValue) {
         String value = (String) combo.getSelectedItem();
         return value == null || value.equals(defaultValue) ? "" : value;
     }

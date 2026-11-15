@@ -17,7 +17,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Locale;
 import java.util.function.Consumer;
+import org.sqlite.Function;
 
 /** Exact barcode lookup and local catalog search against all_products.sqlite. */
 public final class ProductRepository {
@@ -169,6 +171,12 @@ public final class ProductRepository {
         String text = filters.query().trim();
         String pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
         try (Connection connection = connect()) {
+            Function.create(connection, "unicode_lower", new Function() {
+                @Override protected void xFunc() throws SQLException {
+                    String value = value_text(0);
+                    result(value == null ? "" : value.toLowerCase(Locale.ROOT));
+                }
+            });
             Set<String> columns = columns(connection);
             List<String> searchable = new ArrayList<>();
             for (String column : List.of("name", "vendor_code", "barcode")) {
@@ -181,14 +189,19 @@ public final class ProductRepository {
             List<Object> parameters = new ArrayList<>();
             if (!text.isEmpty()) {
                 conditions.add("(" + String.join(" OR ", searchable.stream()
-                        .map(column -> "CAST(\"" + column + "\" AS TEXT) LIKE ? ESCAPE '\\' COLLATE NOCASE")
+                        .map(column -> "unicode_lower(CAST(\"" + column + "\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\'")
                         .toList()) + ")");
                 for (int i = 0; i < searchable.size(); i++) parameters.add(pattern);
             }
             if (!filters.category().isBlank() && hasTable(connection, "product_categories_path")) {
-                conditions.add("(SELECT group_concat(name, ' › ') FROM (SELECT name FROM product_categories_path pcp "
-                        + "WHERE pcp.product_id = products.product_id ORDER BY position)) = ?");
+                String categoryExpression = "unicode_lower((SELECT group_concat(name, ' › ') "
+                        + "FROM (SELECT name FROM product_categories_path pcp "
+                        + "WHERE pcp.product_id = products.product_id ORDER BY position)))";
+                conditions.add("(" + categoryExpression + " = unicode_lower(?) OR "
+                        + categoryExpression + " LIKE unicode_lower(?) ESCAPE '\\')");
                 parameters.add(filters.category());
+                parameters.add(filters.category().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                        + " › %");
             }
             if (filters.minimumPrice() != null && columns.contains("price")) {
                 conditions.add("CAST(price AS INTEGER) >= ?");
@@ -209,12 +222,16 @@ public final class ProductRepository {
                 parameters.add(filters.attributeName());
                 if (!filters.attributeValue().isBlank()) parameters.add(filters.attributeValue());
             }
-            String orderColumn = columns.contains("name") ? "name" : "product_id";
+            List<Object> orderingParameters = new ArrayList<>();
+            String relevance = relevanceOrder(columns, text, orderingParameters);
             String sql = selectColumns(connection, columns) + " FROM products"
                     + (conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions))
-                    + " ORDER BY \"" + orderColumn + "\" LIMIT 500";
+                    + " ORDER BY " + relevance + " LIMIT 500";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 for (int i = 0; i < parameters.size(); i++) statement.setObject(i + 1, parameters.get(i));
+                for (int i = 0; i < orderingParameters.size(); i++) {
+                    statement.setObject(parameters.size() + i + 1, orderingParameters.get(i));
+                }
                 try (ResultSet rows = statement.executeQuery()) {
                     List<Product> products = new ArrayList<>();
                     while (rows.next()) products.add(product(rows));
@@ -222,6 +239,42 @@ public final class ProductRepository {
                 }
             }
         }
+    }
+
+    private static String relevanceOrder(Set<String> columns, String text, List<Object> parameters) {
+        if (text.isEmpty()) return columns.contains("name") ? "\"name\" COLLATE NOCASE, product_id" : "product_id";
+
+        StringBuilder order = new StringBuilder("CASE");
+        if (columns.contains("barcode")) {
+            order.append(" WHEN CAST(\"barcode\" AS TEXT) = ? THEN 0");
+            parameters.add(text);
+            order.append(" WHEN unicode_lower(CAST(\"barcode\" AS TEXT)) = unicode_lower(?) THEN 1");
+            parameters.add(text);
+        }
+        if (columns.contains("vendor_code")) {
+            order.append(" WHEN unicode_lower(CAST(\"vendor_code\" AS TEXT)) = unicode_lower(?) THEN 2");
+            parameters.add(text);
+        }
+        if (columns.contains("name")) {
+            order.append(" WHEN unicode_lower(CAST(\"name\" AS TEXT)) = unicode_lower(?) THEN 3");
+            parameters.add(text);
+        }
+        if (columns.contains("barcode")) {
+            order.append(" WHEN unicode_lower(CAST(\"barcode\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\' THEN 4");
+            parameters.add(text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%");
+        }
+        if (columns.contains("vendor_code")) {
+            order.append(" WHEN unicode_lower(CAST(\"vendor_code\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\' THEN 5");
+            parameters.add(text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%");
+        }
+        if (columns.contains("name")) {
+            order.append(" WHEN unicode_lower(CAST(\"name\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\' THEN 6");
+            parameters.add(text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%");
+        }
+        order.append(" ELSE 7 END");
+        if (columns.contains("name")) order.append(", unicode_lower(CAST(\"name\" AS TEXT))");
+        else order.append(", product_id");
+        return order.toString();
     }
 
     public SearchOptions searchOptions() throws SQLException {
