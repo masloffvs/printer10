@@ -11,14 +11,155 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /** Exact barcode lookup and local catalog search against all_products.sqlite. */
 public final class ProductRepository {
+    private static final int MAX_CACHED_PRODUCTS = 12_000;
+    private static volatile CatalogCache catalogCache;
+
+    /** Checks the catalog's hot-path indexes and warms a heap-sized, bounded lookup cache. */
+    public StartupSummary prepareForStartup(Consumer<StartupProgress> progress) throws SQLException {
+        Consumer<StartupProgress> updates = progress == null ? ignored -> { } : progress;
+        updates.accept(new StartupProgress("Проверяем базу товаров и индексы…", -1));
+        try (Connection connection = connect(); Statement statement = connection.createStatement()) {
+            Set<String> productColumns = columns(connection);
+            if (!productColumns.contains("product_id")) {
+                throw new SQLException("В таблице products отсутствует поле product_id.");
+            }
+            int indexesCreated = 0;
+            if (productColumns.contains("barcode")) {
+                indexesCreated += ensureIndex(statement, connection, "products", "idx_products_barcode", "barcode");
+            }
+            if (productColumns.contains("vendor_code")) {
+                indexesCreated += ensureIndex(statement, connection, "products", "idx_products_vendor_code", "vendor_code");
+            }
+            if (productColumns.contains("product_id") && !isPrimaryKey(connection, "products", "product_id")) {
+                indexesCreated += ensureIndex(statement, connection, "products", "idx_products_product_id", "product_id");
+            }
+            indexesCreated += ensureIndexIfPresent(statement, connection, "product_categories_path",
+                    "idx_product_categories_path_product_position", "product_id", "position");
+            indexesCreated += ensureIndexIfPresent(statement, connection, "product_attributes",
+                    "idx_product_attributes_product", "product_id");
+            indexesCreated += ensureIndexIfPresent(statement, connection, "product_attribute_values",
+                    "idx_product_attribute_values_attribute", "attribute_id");
+            updates.accept(new StartupProgress("Индексы проверены · загружаем каталог в оперативную память…", -1));
+
+            int cacheLimit = cacheLimit();
+            long total;
+            try (ResultSet row = statement.executeQuery("SELECT COUNT(*) FROM products")) {
+                total = row.next() ? row.getLong(1) : 0;
+            }
+            int target = (int) Math.min(total, cacheLimit);
+            Map<String, Product> byBarcode = new HashMap<>(Math.max(16, target));
+            Map<String, Product> byMarking = new HashMap<>(Math.max(16, target));
+            String sql = selectColumns(connection, productColumns) + " FROM products ORDER BY product_id LIMIT ?";
+            try (PreparedStatement products = connection.prepareStatement(sql)) {
+                products.setInt(1, target);
+                try (ResultSet rows = products.executeQuery()) {
+                    int loaded = 0;
+                    while (rows.next()) {
+                        Product product = product(rows);
+                        if (!product.barcode().isBlank()) byBarcode.putIfAbsent(product.barcode().trim(), product);
+                        String marking = product.marking().trim();
+                        if (!marking.isBlank()) byMarking.putIfAbsent(marking, product);
+                        loaded++;
+                        if (loaded % 500 == 0 || loaded == target) {
+                            int percent = target == 0 ? 100 : (int) ((long) loaded * 100 / target);
+                            updates.accept(new StartupProgress("Загружаем товары: " + loaded + " из " + total, percent));
+                        }
+                    }
+                    java.nio.file.Path databasePath = AppConfig.DB_PATH.toAbsolutePath().normalize();
+                    catalogCache = new CatalogCache(databasePath, fileSize(databasePath), lastModified(databasePath),
+                            Map.copyOf(byBarcode), Map.copyOf(byMarking), loaded, total);
+                    updates.accept(new StartupProgress("Каталог готов · " + loaded + " товаров в быстром кэше", 100));
+                    return new StartupSummary(total, loaded, indexesCreated);
+                }
+            }
+        }
+    }
+
+    private static int cacheLimit() {
+        long heapBasedLimit = Runtime.getRuntime().maxMemory() / (128L * 1024);
+        return (int) Math.max(500, Math.min(MAX_CACHED_PRODUCTS, heapBasedLimit));
+    }
+
+    private static int ensureIndexIfPresent(Statement statement, Connection connection, String table,
+                                           String index, String... columns) throws SQLException {
+        if (!hasTable(connection, table)) return 0;
+        Set<String> existing = tableColumns(connection, table);
+        for (String column : columns) if (!existing.contains(column)) return 0;
+        return ensureIndex(statement, connection, table, index, columns);
+    }
+
+    private static int ensureIndex(Statement statement, Connection connection, String table,
+                                   String index, String... columns) throws SQLException {
+        if (hasIndex(connection, index) || hasIndexForColumns(connection, table, columns)) return 0;
+        String columnList = String.join(", ", java.util.Arrays.stream(columns).map(ProductRepository::quote).toList());
+        statement.executeUpdate("CREATE INDEX IF NOT EXISTS " + quote(index) + " ON " + quote(table)
+                + " (" + columnList + ")");
+        return 1;
+    }
+
+    private static boolean hasIndex(Connection connection, String index) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?")) {
+            statement.setString(1, index);
+            try (ResultSet rows = statement.executeQuery()) { return rows.next(); }
+        }
+    }
+
+    private static boolean hasIndexForColumns(Connection connection, String table, String... expectedColumns)
+            throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet indexes = statement.executeQuery("PRAGMA index_list(" + quote(table) + ")")) {
+            while (indexes.next()) {
+                if (indexes.getInt("partial") != 0) continue;
+                String indexName = indexes.getString("name");
+                List<String> indexedColumns = new ArrayList<>();
+                try (Statement details = connection.createStatement();
+                     ResultSet columns = details.executeQuery("PRAGMA index_info(" + quote(indexName) + ")")) {
+                    while (columns.next()) indexedColumns.add(columns.getString("name"));
+                }
+                if (indexedColumns.size() < expectedColumns.length) continue;
+                boolean matches = true;
+                for (int i = 0; i < expectedColumns.length; i++) {
+                    if (!expectedColumns[i].equalsIgnoreCase(indexedColumns.get(i))) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (matches) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isPrimaryKey(Connection connection, String table, String column) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("PRAGMA table_info(" + quote(table) + ")")) {
+            while (rows.next()) {
+                if (column.equalsIgnoreCase(rows.getString("name"))) return rows.getInt("pk") > 0;
+            }
+        }
+        return false;
+    }
+
+    private static Set<String> tableColumns(Connection connection, String table) throws SQLException {
+        Set<String> columns = new LinkedHashSet<>();
+        try (Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("PRAGMA table_info(" + quote(table) + ")")) {
+            while (rows.next()) columns.add(rows.getString("name").toLowerCase(java.util.Locale.ROOT));
+        }
+        return columns;
+    }
+
     public List<Product> search(String query) throws SQLException {
         return search(new SearchCriteria(query, "", "", "", null, null));
     }
@@ -128,14 +269,21 @@ public final class ProductRepository {
     }
 
     public Product findByBarcode(String barcode) throws SQLException {
+        if (barcode != null) {
+            CatalogCache cache = currentCache();
+            if (cache != null) {
+                Product cached = cache.byBarcode().get(barcode.trim());
+                if (cached != null) return cached;
+            }
+        }
         try (Connection connection = connect()) {
             Set<String> columns = columns(connection);
             if (!columns.contains("product_id") || !columns.contains("barcode")) {
                 throw new SQLException("В таблице products отсутствуют поля barcode или product_id.");
             }
-            String sql = selectColumns(connection, columns) + " FROM products WHERE CAST(barcode AS TEXT) = ? LIMIT 1";
+            String sql = selectColumns(connection, columns) + " FROM products WHERE barcode = ? LIMIT 1";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                statement.setString(1, barcode);
+                statement.setString(1, barcode.trim());
                 try (ResultSet rows = statement.executeQuery()) {
                     return rows.next() ? product(rows) : null;
                 }
@@ -146,6 +294,11 @@ public final class ProductRepository {
     /** Finds a local product by the canonical article used by price labels. */
     public Product findByMarking(String marking) throws SQLException {
         if (marking == null || marking.isBlank()) return null;
+        CatalogCache cache = currentCache();
+        if (cache != null) {
+            Product cached = cache.byMarking().get(marking.trim());
+            if (cached != null) return cached;
+        }
         try (Connection connection = connect()) {
             Set<String> columns = columns(connection);
             if (!columns.contains("product_id")) {
@@ -204,14 +357,31 @@ public final class ProductRepository {
         return select.toString();
     }
 
-    private boolean hasTable(Connection connection, String name) throws SQLException {
+    private static boolean hasTable(Connection connection, String name) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")) {
             statement.setString(1, name);
-            try (ResultSet rows = statement.executeQuery()) {
-                return rows.next();
-            }
+            try (ResultSet rows = statement.executeQuery()) { return rows.next(); }
         }
+    }
+
+    private static CatalogCache currentCache() {
+        CatalogCache cache = catalogCache;
+        if (cache == null) return null;
+        java.nio.file.Path path = AppConfig.DB_PATH.toAbsolutePath().normalize();
+        if (!cache.path().equals(path) || cache.fileSize() != fileSize(path)
+                || cache.lastModified() != lastModified(path)) return null;
+        return cache;
+    }
+
+    private static long fileSize(java.nio.file.Path path) {
+        try { return java.nio.file.Files.size(path); }
+        catch (java.io.IOException ignored) { return -1; }
+    }
+
+    private static long lastModified(java.nio.file.Path path) {
+        try { return java.nio.file.Files.getLastModifiedTime(path).toMillis(); }
+        catch (java.io.IOException ignored) { return -1; }
     }
 
     private static String quote(String identifier) {
@@ -271,4 +441,10 @@ public final class ProductRepository {
             attributes = java.util.Collections.unmodifiableMap(copy);
         }
     }
+
+    public record StartupProgress(String message, int percent) { }
+    public record StartupSummary(long catalogProducts, int cachedProducts, int indexesCreated) { }
+    private record CatalogCache(java.nio.file.Path path, long fileSize, long lastModified,
+                                Map<String, Product> byBarcode,
+                                Map<String, Product> byMarking, int cachedProducts, long totalProducts) { }
 }
