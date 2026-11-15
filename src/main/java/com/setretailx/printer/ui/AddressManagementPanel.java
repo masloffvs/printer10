@@ -113,7 +113,7 @@ final class AddressManagementPanel extends JPanel {
             JMenuItem label24 = new JMenuItem("Печать наклейки · 2×4");
             label24.addActionListener(ignored -> printBoxLabel(address, box, LabelLayout.TWO_BY_FOUR));
             menu.add(label24);
-            JMenuItem label26 = new JMenuItem("Печать пустых наклеек · 2×6");
+            JMenuItem label26 = new JMenuItem("Печать наклейки · 2×6 компактная");
             label26.addActionListener(ignored -> printBoxLabel(address, box, LabelLayout.TWO_BY_SIX));
             menu.add(label26);
             JMenuItem productList = new JMenuItem("Печать списка товаров коробки");
@@ -202,8 +202,9 @@ final class AddressManagementPanel extends JPanel {
     private void printBoxProducts(StorageAddress address, StorageBox box) {
         run("Готовим список товаров…", () -> repository.productsInBox(box.boxId()), rows ->
                 print(new PrintJobData("Список товаров · " + box.boxCode(), new ProductListPrintable(address,
-                        box.boxCode(), rows.stream().map(product -> new ProductRow(product.name(), product.article(),
-                        product.barcode(), product.quantity())).toList()), null)), this::showError);
+                        "Состав коробки " + box.boxCode(), "Коробка " + box.boxCode(), rows.stream()
+                        .map(product -> new ProductRow(box.boxCode(), product.name(), product.article(),
+                                product.barcode(), product.quantity())).toList()), null)), this::showError);
     }
 
     private void printAddressProducts(StorageAddress address) {
@@ -211,12 +212,12 @@ final class AddressManagementPanel extends JPanel {
             List<ProductRow> products = new ArrayList<>();
             for (StorageBox box : repository.boxes(address.addressId())) {
                 for (StoredProduct product : repository.productsInBox(box.boxId()))
-                    products.add(new ProductRow(box.boxCode() + " · " + product.name(), product.article(),
+                    products.add(new ProductRow(box.boxCode(), product.name(), product.article(),
                             product.barcode(), product.quantity()));
             }
             return products;
         }, rows -> print(new PrintJobData("Список товаров · " + address.addressId(),
-                new ProductListPrintable(address, "Все коробки", rows), null)), this::showError);
+                new ProductListPrintable(address, "Товары адреса", "Все коробки · адрес " + address.addressId(), rows), null)), this::showError);
     }
 
     private void print(PrintJobData data) {
@@ -224,7 +225,8 @@ final class AddressManagementPanel extends JPanel {
         job.setJobName(data.title());
         PageFormat format = job.defaultPage();
         Paper paper = new Paper();
-        double width = 210 / 25.4 * 72, height = 297 / 25.4 * 72, margin = 5 / 25.4 * 72;
+        double width = 210 / 25.4 * 72, height = 297 / 25.4 * 72;
+        double margin = (data.layout() == null ? 14 : 5) / 25.4 * 72;
         paper.setSize(width, height);
         paper.setImageableArea(margin, margin, width - margin * 2, height - margin * 2);
         format.setPaper(paper);
@@ -264,7 +266,7 @@ final class AddressManagementPanel extends JPanel {
     private record BoxNode(StorageAddress address, StorageBox box) {
         @Override public String toString() { return box.boxCode() + " · товаров: " + box.productCount(); }
     }
-    private record ProductRow(String name, String article, String barcode, int quantity) { }
+    private record ProductRow(String group, String name, String article, String barcode, int quantity) { }
     private record PrintJobData(String title, Printable printable, LabelLayout layout) { }
     private enum LabelLayout {
         TWO_BY_FOUR(2, 4, "2×4"), TWO_BY_SIX(2, 6, "2×6 пустой лист");
@@ -279,6 +281,9 @@ final class AddressManagementPanel extends JPanel {
         private final StorageBox box;
         private final LabelLayout layout;
         private final BufferedImage qr;
+        private static final java.awt.Font CODE_FONT = new java.awt.Font("DejaVu Sans Mono", java.awt.Font.BOLD, 17);
+        private static final java.awt.Font BODY_FONT = new java.awt.Font("DejaVu Sans", java.awt.Font.PLAIN, 8);
+        private static final java.awt.Font SECTION_FONT = new java.awt.Font("DejaVu Sans", java.awt.Font.BOLD, 8);
         private BoxLabelsPrintable(StorageAddress address, StorageBox box, LabelLayout layout) {
             this.address = address; this.box = box; this.layout = layout;
             this.qr = createQr(box.boxCode());
@@ -292,16 +297,38 @@ final class AddressManagementPanel extends JPanel {
                 double gap = 7 / 25.4 * 72;
                 double w = (page.getImageableWidth() - gap * (layout.columns - 1)) / layout.columns;
                 double h = (page.getImageableHeight() - gap * (layout.rows - 1)) / layout.rows;
+                g.setColor(java.awt.Color.BLACK);
                 for (int r = 0; r < layout.rows; r++) for (int c = 0; c < layout.columns; c++) {
                     int x = (int) (c * (w + gap)), y = (int) (r * (h + gap));
-                    if (layout == LabelLayout.TWO_BY_FOUR) {
-                        g.drawString(box.boxCode(), x + 12, y + 32);
-                        g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, 11));
-                        g.drawString(address.addressId() + " — " + address.name(), x + 12, y + 52);
-                        g.drawString("Товаров: " + box.productCount(), x + 12, y + 69);
-                        if (qr != null) g.drawImage(qr, (int) (x + w - 72), y + 8, 58, 58, null);
-                        g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, 18));
+                    int cellWidth = (int) w, cellHeight = (int) h;
+                    g.setColor(java.awt.Color.BLACK);
+                    g.fillRect(x, y, cellWidth, 15);
+                    g.setFont(SECTION_FONT);
+                    g.setColor(java.awt.Color.WHITE);
+                    g.drawString("АДРЕСНОЕ ХРАНЕНИЕ", x + 9, y + 10);
+                    g.setColor(java.awt.Color.BLACK);
+                    g.setFont(CODE_FONT.deriveFont(layout == LabelLayout.TWO_BY_FOUR ? 17f : 12f));
+                    g.drawString(box.boxCode(), x + 10, y + (layout == LabelLayout.TWO_BY_FOUR ? 38 : 33));
+                    if (qr != null) {
+                        int qrSize = (int) Math.min(layout == LabelLayout.TWO_BY_FOUR ? 68 : 48, h - 30);
+                        int qrX = (int) (x + w - qrSize - 9), qrY = y + 21;
+                        g.setColor(java.awt.Color.WHITE);
+                        g.fillRect(qrX - 3, qrY - 3, qrSize + 6, qrSize + 6);
+                        g.setColor(java.awt.Color.BLACK);
+                        g.drawImage(qr, qrX, qrY, qrSize, qrSize, null);
                     }
+                    int textWidth = (int) w - 20 - (qr == null ? 0 : (int) Math.min(layout == LabelLayout.TWO_BY_FOUR ? 68 : 48, h - 30) + 8);
+                    g.setFont(BODY_FONT);
+                    g.setColor(new java.awt.Color(51, 51, 51));
+                    String context = address.addressId() + " — " + address.name();
+                    g.drawString(clipToWidth(g, context, textWidth), x + 10, y + 49);
+                    g.setColor(java.awt.Color.BLACK);
+                    g.setFont(SECTION_FONT);
+                    g.drawString("ЕДИНИЦ: " + box.productCount(), x + 10, y + 63);
+                    g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.PLAIN, 6));
+                    g.setColor(new java.awt.Color(51, 51, 51));
+                    g.drawString(clipToWidth(g, "Адрес: " + address.addressId() + " · QR: код коробки · Источник: адресное хранение",
+                            w - 20), x + 10, (int) (y + h - 5));
                 }
                 return PAGE_EXISTS;
             } finally { g.dispose(); }
@@ -313,46 +340,168 @@ final class AddressManagementPanel extends JPanel {
                         BarcodeFormat.QR_CODE, 160, 160, Map.of(EncodeHintType.MARGIN, 1)));
             } catch (WriterException | IllegalArgumentException ignored) { return null; }
         }
+
+        private static String clipToWidth(java.awt.Graphics2D g, String text, double width) {
+            String clean = text == null ? "" : text.replaceAll("[\\r\\n\\t]", " ");
+            if (g.getFontMetrics().stringWidth(clean) <= width) return clean;
+            String ellipsis = "…";
+            int end = clean.length();
+            while (end > 0 && g.getFontMetrics().stringWidth(clean.substring(0, end) + ellipsis) > width) end--;
+            return end == 0 ? "" : clean.substring(0, end) + ellipsis;
+        }
     }
 
     private static final class ProductListPrintable implements Printable {
+        private static final double HEADER_HEIGHT = 62;
+        private static final double TABLE_HEADER_HEIGHT = 22;
+        private static final double FOOTER_HEIGHT = 23;
+        private static final double MIN_LINE_HEIGHT = 16;
         private final StorageAddress address;
         private final String title;
+        private final String source;
         private final List<ProductRow> rows;
-        private ProductListPrintable(StorageAddress address, String title, List<ProductRow> rows) {
-            this.address = address; this.title = title; this.rows = List.copyOf(rows);
+        private ProductListPrintable(StorageAddress address, String title, String source, List<ProductRow> rows) {
+            this.address = address;
+            this.title = title;
+            this.source = source;
+            this.rows = List.copyOf(rows);
         }
         @Override public int print(java.awt.Graphics graphics, PageFormat page, int pageIndex) {
             java.awt.Graphics2D g = (java.awt.Graphics2D) graphics.create();
             try {
-                int perPage = 36, from = pageIndex * perPage;
-                if (from >= Math.max(1, rows.size())) return NO_SUCH_PAGE;
+                double width = page.getImageableWidth();
+                double height = page.getImageableHeight();
+                double tableBodyHeight = height - HEADER_HEIGHT - TABLE_HEADER_HEIGHT - FOOTER_HEIGHT;
+                List<List<ProductListLine>> pages = paginate(tableBodyHeight);
+                int pageCount = pages.size();
+                if (pageIndex >= pageCount) return NO_SUCH_PAGE;
+                List<ProductListLine> lines = pages.get(pageIndex);
                 g.translate(page.getImageableX(), page.getImageableY());
                 g.setColor(java.awt.Color.BLACK);
-                g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, 14));
-                g.drawString("Адрес: " + address.addressId() + " — " + address.name() + " · " + title, 0, 18);
-                g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.BOLD, 10));
-                g.drawString("ТОВАР / КОРОБКА", 0, 40); g.drawString("АРТИКУЛ", 300, 40);
-                g.drawString("ШТРИХКОД", 405, 40); g.drawString("КОЛ-ВО", 520, 40);
-                g.drawLine(0, 44, (int) page.getImageableWidth(), 44);
-                g.setFont(new java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, 9));
-                int end = Math.min(rows.size(), from + perPage);
-                for (int i = from; i < end; i++) {
-                    ProductRow row = rows.get(i); int y = 59 + (i - from) * 19;
-                    g.drawString(clip(row.name(), 48), 0, y);
-                    g.drawString(clip(row.article(), 16), 300, y);
-                    g.drawString(clip(row.barcode(), 18), 405, y);
-                    g.drawString(Integer.toString(row.quantity()), 520, y);
-                    g.drawLine(0, y + 4, (int) page.getImageableWidth(), y + 4);
+                g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.BOLD, 15));
+                g.drawString(title.toUpperCase(java.util.Locale.ROOT), 0, 17);
+                g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.BOLD, 8));
+                int totalUnits = rows.stream().mapToInt(ProductRow::quantity).sum();
+                drawRight(g, "ПОЗИЦИЙ: " + rows.size() + " · ЕДИНИЦ: " + totalUnits, width, 17);
+                g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.PLAIN, 8));
+                g.setColor(new java.awt.Color(51, 51, 51));
+                String context = address.addressId() + " — " + address.name() + " · " + source
+                        + " · " + java.time.LocalDate.now();
+                g.drawString(clipToWidth(g, context, width), 0, 33);
+                g.setColor(java.awt.Color.BLACK);
+                g.setStroke(new java.awt.BasicStroke(1.5f));
+                g.drawLine(0, 43, (int) width, 43);
+                double[] columnX = {0, width * .54, width * .69, width * .87};
+                double[] columnW = {width * .54, width * .15, width * .18, width * .13};
+                double tableTop = HEADER_HEIGHT;
+                g.setColor(new java.awt.Color(217, 217, 217));
+                g.fillRect(0, (int) tableTop, (int) width, (int) TABLE_HEADER_HEIGHT);
+                g.setColor(java.awt.Color.BLACK);
+                g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.BOLD, 8));
+                String[] headers = {"НАИМЕНОВАНИЕ ТОВАРА", "АРТИКУЛ", "ШТРИХКОД", "КОЛ-ВО"};
+                for (int col = 0; col < headers.length; col++) {
+                    int baseline = (int) (tableTop + 15);
+                    if (col == 3) drawRight(g, headers[col], columnX[col] + columnW[col] - 4, baseline);
+                    else g.drawString(headers[col], (int) columnX[col] + 4, baseline);
                 }
-                if (rows.isEmpty()) g.drawString("В этом адресе пока нет товаров.", 0, 64);
+                g.setStroke(new java.awt.BasicStroke(.5f));
+                g.drawLine(0, (int) (tableTop + TABLE_HEADER_HEIGHT), (int) width, (int) (tableTop + TABLE_HEADER_HEIGHT));
+                if (lines.isEmpty()) {
+                    g.setColor(new java.awt.Color(51, 51, 51));
+                    g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.PLAIN, 9));
+                    g.drawString("В выбранном месте хранения пока нет товаров.", 4,
+                            (int) (tableTop + TABLE_HEADER_HEIGHT + 17));
+                } else {
+                    double lineHeight = Math.min(23, tableBodyHeight / lines.size());
+                    double tableBottom = tableTop + TABLE_HEADER_HEIGHT + lines.size() * lineHeight;
+                    for (int i = 0; i < lines.size(); i++) {
+                        ProductListLine line = lines.get(i);
+                        double lineTop = tableTop + TABLE_HEADER_HEIGHT + i * lineHeight;
+                        int baseline = (int) (lineTop + lineHeight * .68);
+                        if (line.groupHeader()) {
+                            g.setColor(new java.awt.Color(236, 236, 236));
+                            g.fillRect(0, (int) lineTop, (int) width, (int) lineHeight);
+                            g.setColor(java.awt.Color.BLACK);
+                            g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.BOLD, 8));
+                            g.drawString(clipToWidth(g, "КОРОБКА " + line.group(), width - 8), 4, baseline);
+                        } else {
+                            ProductRow row = line.row();
+                            g.setColor(java.awt.Color.BLACK);
+                            g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.PLAIN, 8));
+                            g.drawString(clipToWidth(g, row.name(), columnW[0] - 8), (int) columnX[0] + 4, baseline);
+                            g.setFont(new java.awt.Font("DejaVu Sans Mono", java.awt.Font.PLAIN, 8));
+                            g.drawString(clipToWidth(g, row.article(), columnW[1] - 8), (int) columnX[1] + 4, baseline);
+                            g.drawString(clipToWidth(g, row.barcode(), columnW[2] - 8), (int) columnX[2] + 4, baseline);
+                            g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.BOLD, 9));
+                            drawRight(g, Integer.toString(row.quantity()), columnX[3] + columnW[3] - 4, baseline);
+                        }
+                        g.setColor(new java.awt.Color(187, 187, 187));
+                        g.drawLine(0, (int) (lineTop + lineHeight), (int) width, (int) (lineTop + lineHeight));
+                    }
+                    g.setColor(new java.awt.Color(217, 217, 217));
+                    double[] separators = {columnX[1], columnX[2], columnX[3]};
+                    for (double separator : separators)
+                        g.draw(new java.awt.geom.Line2D.Double(separator, tableTop, separator, tableBottom));
+                }
+                double footerY = height - FOOTER_HEIGHT;
+                g.setColor(java.awt.Color.BLACK);
+                g.setStroke(new java.awt.BasicStroke(.5f));
+                g.drawLine(0, (int) footerY, (int) width, (int) footerY);
+                g.setFont(new java.awt.Font("DejaVu Sans", java.awt.Font.PLAIN, 6));
+                g.setColor(new java.awt.Color(51, 51, 51));
+                String pageLabel = "Лист " + (pageIndex + 1) + " / " + pageCount;
+                String legend = "Источник: адресное хранение · Артикул и штрихкод — коды товара · Кол-во — единиц в коробке";
+                double legendWidth = width - g.getFontMetrics().stringWidth(pageLabel) - 8;
+                g.drawString(clipToWidth(g, legend, legendWidth), 0, (int) (footerY + 10));
+                drawRight(g, pageLabel, width, (int) (footerY + 19));
                 return PAGE_EXISTS;
             } finally { g.dispose(); }
         }
-        private static String clip(String text, int limit) {
-            if (text == null) return "";
-            String clean = text.replaceAll("[\\r\\n\\t]", " ");
-            return clean.length() <= limit ? clean : clean.substring(0, limit - 1) + "…";
+        private List<List<ProductListLine>> paginate(double tableBodyHeight) {
+            int capacity = Math.max(3, (int) (tableBodyHeight / MIN_LINE_HEIGHT));
+            List<List<ProductListLine>> pages = new ArrayList<>();
+            List<ProductListLine> current = new ArrayList<>();
+            String currentGroup = null;
+            for (ProductRow row : rows) {
+                String group = row.group() == null ? "" : row.group();
+                boolean needsHeader = !group.equals(currentGroup);
+                int needed = 1 + (needsHeader ? 1 : 0);
+                if (!current.isEmpty() && current.size() + needed > capacity) {
+                    pages.add(List.copyOf(current));
+                    current.clear();
+                    currentGroup = null;
+                    needsHeader = true;
+                    needed = 2;
+                }
+                if (needsHeader) {
+                    current.add(new ProductListLine(group, null));
+                    currentGroup = group;
+                }
+                if (current.size() >= capacity) {
+                    pages.add(List.copyOf(current));
+                    current.clear();
+                    current.add(new ProductListLine(group, null));
+                    currentGroup = group;
+                }
+                current.add(new ProductListLine(null, row));
+            }
+            if (!current.isEmpty()) pages.add(List.copyOf(current));
+            if (pages.isEmpty()) pages.add(List.of());
+            return pages;
+        }
+        private static void drawRight(java.awt.Graphics2D g, String text, double right, int baseline) {
+            g.drawString(text, (int) (right - g.getFontMetrics().stringWidth(text)), baseline);
+        }
+        private static String clipToWidth(java.awt.Graphics2D g, String text, double width) {
+            String clean = text == null ? "" : text.replaceAll("[\\r\\n\\t]", " ");
+            if (g.getFontMetrics().stringWidth(clean) <= width) return clean;
+            String ellipsis = "…";
+            int end = clean.length();
+            while (end > 0 && g.getFontMetrics().stringWidth(clean.substring(0, end) + ellipsis) > width) end--;
+            return end == 0 ? "" : clean.substring(0, end) + ellipsis;
+        }
+        private record ProductListLine(String group, ProductRow row) {
+            private boolean groupHeader() { return row == null; }
         }
     }
 }

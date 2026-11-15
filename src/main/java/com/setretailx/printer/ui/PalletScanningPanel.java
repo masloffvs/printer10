@@ -81,7 +81,7 @@ final class PalletScanningPanel extends JPanel {
         JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.TRAILING, 6, 0));
         JButton closeBox = new JButton("Закрыть коробку");
         closeBox.addActionListener(event -> closeCurrentBox(message -> setStatus(message)));
-        JButton print = new JButton("Печать наклеек текущей сессии · 2×4 A4");
+        JButton print = new JButton("Печать наклеек текущей сессии · 2×4 / 2×6 A4");
         print.addActionListener(event -> printSessionLabels());
         actions.add(closeBox);
         actions.add(print);
@@ -405,6 +405,14 @@ final class PalletScanningPanel extends JPanel {
             setStatus("Нет заполненных коробок для печати.");
             return;
         }
+        LabelGrid[] grids = {LabelGrid.TWO_BY_FOUR, LabelGrid.TWO_BY_SIX};
+        JComboBox<LabelGrid> gridSelector = new JComboBox<>(grids);
+        gridSelector.setSelectedItem(LabelGrid.TWO_BY_FOUR);
+        int choice = JOptionPane.showConfirmDialog(this, gridSelector, "Формат листа наклеек",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (choice != JOptionPane.OK_OPTION) return;
+        LabelGrid grid = (LabelGrid) gridSelector.getSelectedItem();
+        if (grid == null) return;
         PrinterJob job = PrinterJob.getPrinterJob();
         job.setJobName("Наклейки паллеты · " + (selectedAddressId() == null ? "сессия" : selectedAddressId()));
         PageFormat format = job.defaultPage();
@@ -416,11 +424,12 @@ final class PalletScanningPanel extends JPanel {
         paper.setImageableArea(margin, margin, width - margin * 2, height - margin * 2);
         format.setPaper(paper);
         format.setOrientation(PageFormat.PORTRAIT);
-        job.setPrintable(new PalletLabelPrintable(labels), format);
+        job.setPrintable(new PalletLabelPrintable(labels, selectedAddressId(), grid), format);
         if (!job.printDialog()) return;
         try {
             job.print();
-            setStatus("Наклейки отправлены на печать: " + labels.size() + " коробок, сетка 2×4 на A4.");
+            setStatus("Наклейки отправлены на печать: " + labels.size() + " коробок, сетка "
+                    + grid.description + " на A4.");
         } catch (Exception error) {
             showError(error.getMessage() == null ? error.toString() : error.getMessage());
         }
@@ -477,23 +486,41 @@ final class PalletScanningPanel extends JPanel {
     private record ScanResult(long boxId, String boxCode, boolean created) { }
     private record SessionBox(long boxId, String boxCode, StoredProduct product) { }
     private record LabelItem(String article, String name, int quantity) { }
+    private enum LabelGrid {
+        TWO_BY_FOUR(2, 4, "2×4 · крупный формат"),
+        TWO_BY_SIX(2, 6, "2×6 · компактный формат");
+        private final int columns;
+        private final int rows;
+        private final String description;
+        LabelGrid(int columns, int rows, String description) {
+            this.columns = columns;
+            this.rows = rows;
+            this.description = description;
+        }
+        @Override public String toString() { return description; }
+    }
     @FunctionalInterface private interface Work<T> { T run() throws Exception; }
 
     private static final class PalletLabelPrintable implements Printable {
         private static final double GAP = 7 / 25.4 * 72;
-        private static final Font ARTICLE_FONT = new Font(Font.MONOSPACED, Font.BOLD, 42);
-        private static final Font NAME_FONT = new Font(Font.SANS_SERIF, Font.PLAIN, 13);
-        private static final Font QUANTITY_FONT = new Font(Font.SANS_SERIF, Font.PLAIN, 15);
+        private static final Font ARTICLE_FONT = new Font("DejaVu Sans Mono", Font.BOLD, 36);
+        private static final Font NAME_FONT = new Font("DejaVu Sans", Font.PLAIN, 9);
+        private static final Font CONTEXT_FONT = new Font("DejaVu Sans", Font.PLAIN, 7);
+        private static final Font SECTION_FONT = new Font("DejaVu Sans", Font.BOLD, 8);
         private final List<LabelItem> labels;
         private final List<BufferedImage> qrCodes;
+        private final String addressId;
+        private final LabelGrid grid;
 
-        private PalletLabelPrintable(List<LabelItem> labels) {
+        private PalletLabelPrintable(List<LabelItem> labels, String addressId, LabelGrid grid) {
             this.labels = List.copyOf(labels);
             this.qrCodes = labels.stream().map(item -> createQrCode(item.article())).toList();
+            this.addressId = addressId == null || addressId.isBlank() ? "ПАЛЛЕТ" : addressId;
+            this.grid = grid;
         }
 
         @Override public int print(Graphics graphics, PageFormat format, int pageIndex) {
-            int perPage = 8;
+            int perPage = grid.columns * grid.rows;
             int pages = (labels.size() + perPage - 1) / perPage;
             if (pageIndex >= pages) return NO_SUCH_PAGE;
             Graphics2D g = (Graphics2D) graphics.create();
@@ -501,17 +528,17 @@ final class PalletScanningPanel extends JPanel {
                 g.translate(format.getImageableX(), format.getImageableY());
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                 g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-                double cellWidth = (format.getImageableWidth() - GAP) / 2;
-                double cellHeight = (format.getImageableHeight() - GAP * 3) / 4;
+                double cellWidth = (format.getImageableWidth() - GAP * (grid.columns - 1)) / grid.columns;
+                double cellHeight = (format.getImageableHeight() - GAP * (grid.rows - 1)) / grid.rows;
                 int from = pageIndex * perPage;
                 int to = Math.min(labels.size(), from + perPage);
                 for (int index = from; index < to; index++) {
                     int local = index - from;
-                    int column = local % 2;
-                    int row = local / 2;
+                    int column = local % grid.columns;
+                    int row = local / grid.columns;
                     double x = column * (cellWidth + GAP);
                     double y = row * (cellHeight + GAP);
-                    drawLabel(g, labels.get(index), qrCodes.get(index), x, y, cellWidth, cellHeight);
+                    drawLabel(g, labels.get(index), qrCodes.get(index), addressId, x, y, cellWidth, cellHeight);
                 }
                 return PAGE_EXISTS;
             } finally {
@@ -519,53 +546,60 @@ final class PalletScanningPanel extends JPanel {
             }
         }
 
-        private static void drawLabel(Graphics2D g, LabelItem label, BufferedImage qr, double x, double y,
+        private static void drawLabel(Graphics2D g, LabelItem label, BufferedImage qr, String addressId,
+                                      double x, double y,
                                       double width, double height) {
             g.setColor(Color.BLACK);
-            g.drawRect((int) x, (int) y, (int) width, (int) height);
-            int padding = 10;
-            int qrSize = (int) Math.min(60, height * 0.42);
+            int padding = 9;
+            int bandHeight = Math.max(14, (int) (height * .09));
+            g.fillRect((int) x, (int) y, (int) width, bandHeight);
+            g.setFont(SECTION_FONT);
+            g.setColor(Color.WHITE);
+            String section = "АДРЕСНОЕ ХРАНЕНИЕ";
+            g.drawString(section, (int) x + padding, (int) y + bandHeight - 4);
+            String quantity = "КОЛ-ВО: " + label.quantity();
+            FontMetrics metrics = g.getFontMetrics(SECTION_FONT);
+            g.drawString(quantity, (int) (x + width - padding - metrics.stringWidth(quantity)), (int) y + bandHeight - 4);
+            g.setColor(Color.BLACK);
+            int qrSize = (int) Math.min(Math.min(88, height * .48), width * .34);
             int qrX = (int) (x + width - qrSize - padding);
-            int qrY = (int) (y + padding);
+            int qrY = (int) (y + bandHeight + Math.max(5, height * .04));
+            g.setColor(Color.WHITE);
+            g.fillRect(qrX - 3, qrY - 3, qrSize + 6, qrSize + 6);
+            g.setColor(Color.BLACK);
             if (qr != null) g.drawImage(qr, qrX, qrY, qrSize, qrSize, null);
 
             int articleWidth = qrX - (int) x - padding * 2;
             String article = safe(label.article());
             Font articleFont = ARTICLE_FONT;
-            while (articleFont.getSize() > 22 && g.getFontMetrics(articleFont).stringWidth(article) > articleWidth) {
+            int minimumFontSize = height < 150 ? 22 : 26;
+            while (articleFont.getSize() > minimumFontSize && g.getFontMetrics(articleFont).stringWidth(article) > articleWidth) {
                 articleFont = articleFont.deriveFont((float) (articleFont.getSize() - 1));
             }
             g.setFont(articleFont);
             FontMetrics articleMetrics = g.getFontMetrics();
-            int articleBaseline = (int) (y + padding + Math.max(articleMetrics.getAscent(), qrSize * 0.62));
+            int articleBaseline = (int) (y + bandHeight + Math.max(8, height * .06)
+                    + Math.max(articleMetrics.getAscent(), qrSize * .60));
             g.drawString(article, (int) x + padding, articleBaseline);
-
-            g.setFont(NAME_FONT);
-            drawWrappedName(g, safe(label.name()), (int) x + padding,
-                    (int) (y + height * 0.56), width - padding * 2, height * 0.32);
-            if (label.quantity() > 1) {
-                g.setFont(QUANTITY_FONT);
-                g.drawString("Кол-во: " + label.quantity(), (int) x + padding,
-                        (int) (y + height - padding - 2));
-            }
+            int detailsX = (int) x + padding;
+            int detailsWidth = Math.max(20, articleWidth);
+            g.setFont(NAME_FONT.deriveFont(height < 150 ? 8f : 9f));
+            g.setColor(new Color(51, 51, 51));
+            String name = safe(label.name()).replaceAll("[\\r\\n\\t]", " ");
+            g.drawString(clipToWidth(g, name, detailsWidth), detailsX,
+                    (int) Math.min(y + height - 20, articleBaseline + g.getFontMetrics().getHeight() + 3));
+            g.setFont(CONTEXT_FONT);
+            g.drawString(clipToWidth(g, "Адрес: " + addressId + " · Источник: паллетное сканирование · QR: артикул",
+                    width - padding * 2), detailsX,
+                    (int) (y + height - 6));
         }
 
-        private static void drawWrappedName(Graphics2D g, String text, int x, int y, double width, double height) {
-            java.awt.FontMetrics metrics = g.getFontMetrics();
-            List<String> lines = new ArrayList<>();
-            StringBuilder line = new StringBuilder();
-            for (String word : text.split("\\s+")) {
-                String candidate = line.isEmpty() ? word : line + " " + word;
-                if (!line.isEmpty() && metrics.stringWidth(candidate) > width) {
-                    lines.add(line.toString());
-                    line = new StringBuilder(word);
-                } else line = new StringBuilder(candidate);
-            }
-            if (!line.isEmpty()) lines.add(line.toString());
-            int maxLines = Math.max(1, (int) (height / metrics.getHeight()));
-            for (int i = 0; i < Math.min(lines.size(), maxLines); i++) {
-                g.drawString(lines.get(i), x, y + metrics.getAscent() + i * metrics.getHeight());
-            }
+        private static String clipToWidth(Graphics2D g, String value, double width) {
+            String text = safe(value);
+            if (g.getFontMetrics().stringWidth(text) <= width) return text;
+            while (!text.isEmpty() && g.getFontMetrics().stringWidth(text + "…") > width)
+                text = text.substring(0, text.length() - 1);
+            return text.isEmpty() ? "" : text + "…";
         }
 
         private static BufferedImage createQrCode(String value) {

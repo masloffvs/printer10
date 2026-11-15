@@ -31,6 +31,7 @@ import java.awt.RenderingHints;
 import java.awt.BasicStroke;
 import java.awt.print.Printable;
 import java.awt.print.PageFormat;
+import java.awt.print.Paper;
 import java.awt.print.PrinterJob;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
@@ -243,6 +244,11 @@ final class AddressStoragePanel extends JPanel {
         job.setJobName("Состав коробки " + box.boxCode());
         PageFormat pageFormat = job.defaultPage();
         pageFormat.setOrientation(PageFormat.LANDSCAPE);
+        Paper paper = new Paper();
+        double paperWidth = 210 / 25.4 * 72, paperHeight = 297 / 25.4 * 72, margin = 14 / 25.4 * 72;
+        paper.setSize(paperWidth, paperHeight);
+        paper.setImageableArea(margin, margin, paperWidth - margin * 2, paperHeight - margin * 2);
+        pageFormat.setPaper(paper);
         job.setPrintable(new BoxLabelPrintable(address, box, rows), pageFormat);
         if (!job.printDialog()) return;
         try {
@@ -255,18 +261,19 @@ final class AddressStoragePanel extends JPanel {
 
     /** A compact landscape box label with a scannable QR code in every product row. */
     private static final class BoxLabelPrintable implements Printable {
-        private static final double OUTER_MARGIN = 3;
-        private static final double HEADER_HEIGHT = 68;
-        private static final double TABLE_HEADER_HEIGHT = 25;
-        private static final double ROW_HEIGHT = 54;
-        private static final Font BODY = new Font(Font.SANS_SERIF, Font.PLAIN, 13);
-        private static final Font HEADER = new Font(Font.SANS_SERIF, Font.BOLD, 15);
-        private static final Font BOX_CODE = new Font(Font.SANS_SERIF, Font.BOLD, 38);
-        private static final Font ARTICLE = new Font(Font.SANS_SERIF, Font.BOLD, 19);
+        private static final double OUTER_MARGIN = 0;
+        private static final double HEADER_HEIGHT = 52;
+        private static final double TABLE_HEADER_HEIGHT = 19;
+        private static final double FOOTER_HEIGHT = 15;
+        private static final double MIN_ROW_HEIGHT = 31;
+        private static final Font BODY = new Font("DejaVu Sans", Font.PLAIN, 8);
+        private static final Font HEADER = new Font("DejaVu Sans", Font.BOLD, 8);
+        private static final Font TITLE = new Font("DejaVu Sans", Font.BOLD, 15);
+        private static final Font BOX_CODE = new Font("DejaVu Sans Mono", Font.BOLD, 18);
+        private static final Font ARTICLE = new Font("DejaVu Sans Mono", Font.BOLD, 11);
+        private static final Font FOOTER = new Font("DejaVu Sans", Font.PLAIN, 6);
         private static final String[] COLUMNS = {"№", "НАИМЕНОВАНИЕ ТОВАРА", "АРТИКУЛ", "QR-КОД", "КОЛ-ВО"};
         private static final double[] WIDTHS = {0.05, 0.35, 0.27, 0.18, 0.15};
-        private static final BasicStroke DASHED_STROKE = new BasicStroke(0.7f, BasicStroke.CAP_BUTT,
-                BasicStroke.JOIN_MITER, 10f, new float[]{2.2f, 2.2f}, 0f);
 
         private final StorageAddress address;
         private final StorageBox box;
@@ -284,8 +291,8 @@ final class AddressStoragePanel extends JPanel {
         @Override public int print(java.awt.Graphics graphics, PageFormat pageFormat, int pageIndex) {
             double width = pageFormat.getImageableWidth() - OUTER_MARGIN * 2;
             double height = pageFormat.getImageableHeight() - OUTER_MARGIN * 2;
-            double tableBodyHeight = height - HEADER_HEIGHT - TABLE_HEADER_HEIGHT;
-            int rowsPerPage = Math.max(1, (int) Math.floor(tableBodyHeight / ROW_HEIGHT));
+            double tableBodyHeight = height - HEADER_HEIGHT - TABLE_HEADER_HEIGHT - FOOTER_HEIGHT;
+            int rowsPerPage = Math.max(1, (int) Math.floor(tableBodyHeight / MIN_ROW_HEIGHT));
             int pageCount = Math.max(1, (int) Math.ceil((double) Math.max(1, rows.size()) / rowsPerPage));
             if (pageIndex >= pageCount) return NO_SUCH_PAGE;
 
@@ -300,7 +307,8 @@ final class AddressStoragePanel extends JPanel {
                 int start = pageIndex * rowsPerPage;
                 int end = Math.min(rows.size(), start + rowsPerPage);
                 int visibleRows = Math.max(1, end - start);
-                double rowHeight = tableBodyHeight / visibleRows;
+                double rowHeight = rows.isEmpty() ? MIN_ROW_HEIGHT
+                        : Math.min(tableBodyHeight / visibleRows, MIN_ROW_HEIGHT * 1.4);
                 if (rows.isEmpty()) {
                     drawEmptyRow(g, width, tableTop + TABLE_HEADER_HEIGHT, rowHeight);
                 } else {
@@ -310,6 +318,7 @@ final class AddressStoragePanel extends JPanel {
                     }
                 }
                 drawTableGrid(g, width, tableTop, visibleRows, rowHeight);
+                drawFooter(g, width, height, pageIndex, pageCount);
                 return PAGE_EXISTS;
             } finally {
                 g.dispose();
@@ -318,27 +327,32 @@ final class AddressStoragePanel extends JPanel {
 
         private void drawHeader(Graphics2D g, double width, int pageIndex, int pageCount) {
             g.setColor(Color.BLACK);
-            g.setFont(HEADER);
-            g.drawString("СКЛАД · " + safe(address.addressId()) + " · " + safe(address.name()), 0, 17);
+            g.setFont(TITLE);
+            g.drawString("СПИСОК ТОВАРОВ В КОРОБКЕ", 0, 15);
+            g.setFont(BODY);
+            g.setColor(new Color(51, 51, 51));
+            g.drawString("АДРЕС: " + safe(address.addressId()) + " — " + safe(address.name()), 0, 29);
             g.setFont(BOX_CODE);
-            g.drawString(box.boxCode(), 0, 61);
+            g.setColor(Color.BLACK);
+            g.drawString(box.boxCode(), 0, 48);
             g.setFont(HEADER);
-            String page = pageCount > 1 ? "ЛИСТ " + (pageIndex + 1) + " / " + pageCount : "";
-            String count = "ПОЗИЦИЙ: " + rows.size();
+            String info = "ПОЗИЦИЙ: " + rows.size() + (pageCount > 1 ? " · ЛИСТ " + (pageIndex + 1) + "/" + pageCount : "");
             int infoX = (int) Math.max(width * 0.58, g.getFontMetrics().stringWidth(box.boxCode()) + 24);
-            g.drawString(count, infoX, 37);
-            if (!page.isEmpty()) g.drawString(page, infoX, 59);
-            g.setStroke(DASHED_STROKE);
-            g.drawLine(0, (int) (HEADER_HEIGHT - 3), (int) width, (int) (HEADER_HEIGHT - 3));
+            g.drawString(info, infoX, 44);
+            g.setStroke(new BasicStroke(1.5f));
+            g.drawLine(0, (int) (HEADER_HEIGHT - 1), (int) width, (int) (HEADER_HEIGHT - 1));
         }
 
         private static void drawTableHeader(Graphics2D g, double width, double y) {
+            g.setColor(new Color(217, 217, 217));
+            g.fillRect(0, (int) y, (int) width, (int) TABLE_HEADER_HEIGHT);
             double x = 0;
-            g.setFont(HEADER.deriveFont(12f));
+            g.setFont(HEADER);
             g.setColor(Color.BLACK);
             for (int col = 0; col < COLUMNS.length; col++) {
                 double cellWidth = width * WIDTHS[col];
-                drawCentered(g, COLUMNS[col], x, y, cellWidth, TABLE_HEADER_HEIGHT);
+                if (col == 4) drawRight(g, COLUMNS[col], x + cellWidth - 3, (int) (y + 13));
+                else g.drawString(COLUMNS[col], (int) x + 3, (int) (y + 13));
                 x += cellWidth;
             }
         }
@@ -347,7 +361,7 @@ final class AddressStoragePanel extends JPanel {
                                            LocationResult item, BufferedImage qrCode) {
             double x = 0;
             String[] values = {Integer.toString(index + 1), item.name(), item.vendorCode(), "", Integer.toString(item.quantity())};
-            float fontSize = (float) Math.max(13, Math.min(27, rowHeight * 0.18));
+            float fontSize = (float) Math.max(7, Math.min(8, rowHeight * 0.24));
             g.setFont(BODY.deriveFont(fontSize));
             g.setColor(Color.BLACK);
             for (int col = 0; col < WIDTHS.length; col++) {
@@ -357,8 +371,12 @@ final class AddressStoragePanel extends JPanel {
                 } else if (col == 1) {
                     drawWrapped(g, values[col], x + 4, y + 3, cellWidth - 8, rowHeight - 6);
                 } else if (col == 2) {
-                    g.setFont(ARTICLE.deriveFont((float) Math.max(17, Math.min(29, rowHeight * 0.38))));
+                    g.setFont(ARTICLE.deriveFont((float) Math.max(8, Math.min(12, rowHeight * 0.34))));
                     drawCentered(g, values[col], x + 2, y, cellWidth - 4, rowHeight);
+                    g.setFont(BODY.deriveFont(fontSize));
+                } else if (col == 4) {
+                    g.setFont(BODY.deriveFont(Font.BOLD, 8f));
+                    drawRight(g, values[col], x + cellWidth - 4, (int) (y + rowHeight / 2 + g.getFontMetrics().getAscent() / 2.5));
                     g.setFont(BODY.deriveFont(fontSize));
                 } else {
                     drawCentered(g, values[col], x, y, cellWidth, rowHeight);
@@ -374,15 +392,15 @@ final class AddressStoragePanel extends JPanel {
                         x + 3, y, width - 6, rowHeight);
                 return;
             }
-            int imageSize = (int) Math.min(Math.min(width - 8, rowHeight - 6), 50);
+            int imageSize = (int) Math.min(Math.min(width - 8, rowHeight - 4), 34);
             int imageX = (int) (x + (width - imageSize) / 2);
             int imageY = (int) (y + (rowHeight - imageSize) / 2);
             g.drawImage(qrCode, imageX, imageY, imageSize, imageSize, null);
         }
 
         private static void drawTableGrid(Graphics2D g, double width, double tableTop, int rows, double rowHeight) {
-            g.setColor(Color.BLACK);
-            g.setStroke(DASHED_STROKE);
+            g.setColor(new Color(187, 187, 187));
+            g.setStroke(new BasicStroke(.5f));
             double tableBottom = tableTop + TABLE_HEADER_HEIGHT + rows * rowHeight;
             double[] horizontal = new double[rows + 2];
             horizontal[0] = tableTop;
@@ -392,11 +410,26 @@ final class AddressStoragePanel extends JPanel {
             }
             for (double lineY : horizontal) g.draw(new java.awt.geom.Line2D.Double(0, lineY, width, lineY));
             double x = 0;
-            g.draw(new java.awt.geom.Line2D.Double(0, tableTop, 0, tableBottom));
             for (double columnWidth : WIDTHS) {
                 x += width * columnWidth;
+                g.setColor(new Color(217, 217, 217));
                 g.draw(new java.awt.geom.Line2D.Double(x, tableTop, x, tableBottom));
             }
+        }
+
+        private void drawFooter(Graphics2D g, double width, double height, int pageIndex, int pageCount) {
+            double y = height - FOOTER_HEIGHT;
+            g.setColor(new Color(187, 187, 187));
+            g.setStroke(new BasicStroke(.5f));
+            g.drawLine(0, (int) y, (int) width, (int) y);
+            g.setFont(FOOTER);
+            g.setColor(new Color(51, 51, 51));
+            g.drawString("Адресное хранение · QR: штрихкод товара · Кол-во: единиц в коробке", 0, (int) (y + 10));
+            drawRight(g, "Лист " + (pageIndex + 1) + " / " + pageCount, width, (int) (y + 10));
+        }
+
+        private static void drawRight(Graphics2D g, String text, double right, int baseline) {
+            g.drawString(text, (int) (right - g.getFontMetrics().stringWidth(text)), baseline);
         }
 
         private static void drawEmptyRow(Graphics2D g, double width, double y, double rowHeight) {
