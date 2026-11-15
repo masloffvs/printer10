@@ -5,7 +5,7 @@ import com.setretailx.printer.repository.ProductRepository;
 import com.setretailx.printer.ui.MainWindow;
 import com.setretailx.printer.ui.StartupSplash;
 
-import com.formdev.flatlaf.FlatDarkLaf;
+import com.formdev.flatlaf.intellijthemes.FlatOneDarkIJTheme;
 
 import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
@@ -18,7 +18,7 @@ public final class PrinterApp {
 
     public static void main(String[] args) {
         AppConfig.loadDotEnv();
-        FlatDarkLaf.setup();
+        FlatOneDarkIJTheme.setup();
         UIManager.put("Button.arc", 10);
         UIManager.put("Component.arc", 8);
         SwingUtilities.invokeLater(PrinterApp::startWithSplash);
