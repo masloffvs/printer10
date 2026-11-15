@@ -52,6 +52,19 @@ public final class MainWindow extends JFrame {
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
     private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService, workspace);
     private final AddressStoragePanel addressStoragePanel = new AddressStoragePanel(addressStorage);
+    private final PalletScanningPanel palletScanningPanel = new PalletScanningPanel(addressStorage);
+    private final AddressManagementPanel addressManagementPanel = new AddressManagementPanel(addressStorage,
+            () -> workspace.showWindow("addressCreate"),
+            () -> {
+                addressStoragePanel.refreshAvailableAddresses();
+                palletScanningPanel.refreshAvailableAddresses();
+            });
+    private final AddressCreatePanel addressCreatePanel = new AddressCreatePanel(addressStorage, () -> {
+        addressManagementPanel.refreshAddresses();
+        addressStoragePanel.refreshAvailableAddresses();
+        palletScanningPanel.refreshAvailableAddresses();
+    });
+    private final AddressSearchPanel addressSearchPanel = new AddressSearchPanel(addressStorage);
     private final SalesPointEditorPanel salesPointEditorPanel = new SalesPointEditorPanel(salesPoints);
     private final SalesPointMapPanel salesPointMapPanel = new SalesPointMapPanel(salesPoints,
             point -> {
@@ -59,9 +72,6 @@ public final class MainWindow extends JFrame {
                 salesPointEditorPanel.selectPoint(point);
                 workspace.showWindow("salesPointEditor");
             }, salesPointEditorPanel::refreshPoints);
-    private final AddressManagementPanel addressManagementPanel = new AddressManagementPanel(addressStorage,
-            addressStoragePanel::refreshAvailableAddresses);
-    private final PalletScanningPanel palletScanningPanel = new PalletScanningPanel(addressStorage, this::submitPalletScan);
     private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService, (marking, name, barcode) ->
             workspace.addDynamicWindow("История цен — " + marking,
                     new PriceHistoryPanel(taskService, marking, name, barcode), 760, 480));
@@ -84,7 +94,7 @@ public final class MainWindow extends JFrame {
         status.setBorder(BorderFactory.createEmptyBorder(6, 10, 6, 10));
         add(status, BorderLayout.SOUTH);
 
-        workspace.addWindow("scanner", scanner, 560, 270);
+        workspace.addWindow("scanner", scanner, 650, 470);
         workspace.addWindow("comparison", comparison, 900, 470);
         workspace.addWindow("search", search, 760, 480);
         workspace.addWindow("queue", queue, 760, 440);
@@ -93,6 +103,8 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("tasks", taskPanel, 900, 520);
         workspace.addWindow("storage", addressStoragePanel, 900, 560);
         workspace.addWindow("storageAddresses", addressManagementPanel, 900, 520);
+        workspace.addWindow("addressCreate", addressCreatePanel, 560, 300);
+        workspace.addWindow("addressSearch", addressSearchPanel, 860, 520);
         workspace.addWindow("salesPointMap", salesPointMapPanel, 1000, 680);
         workspace.addWindow("salesPointEditor", salesPointEditorPanel, 760, 520);
         workspace.addWindow("palletScanning", palletScanningPanel, 900, 600);
@@ -106,12 +118,16 @@ public final class MainWindow extends JFrame {
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Печать ценников");
         scanner.registerRecipient("storage", "Сканирование единичных коробок");
+        scanner.registerRecipient("palletScanning", "Сканирование паллет");
         scanner.registerRecipient("salesPointEditor", "Редактор торговой точки · ценники");
         runBackground(products::searchOptions, search::setSearchOptions,
                 error -> search.setStatus("Не удалось загрузить фильтры каталога: " + error));
         workspace.setWindowVisibilityListener((key, open) -> {
             scanner.setRecipientOpen(key, open);
-            if ("palletScanning".equals(key) && open) palletScanningPanel.focusScanner();
+            if ("palletScanning".equals(key) && open) {
+                palletScanningPanel.prepareForScanning();
+                scanner.focusInput();
+            }
         });
         workspace.showWindow("scanner");
         refreshHistory();
@@ -148,6 +164,11 @@ public final class MainWindow extends JFrame {
         String raw = scanner.inputText().trim();
         if (raw.isEmpty()) return;
         scanner.clearInput();
+        if (scanner.sendsTo("palletScanning")) {
+            submitPalletScan(raw);
+            scanner.focusInput();
+            return;
+        }
         ScannedProbe probe = null;
         try {
             probe = ScannedProbe.fromText(raw);
@@ -279,16 +300,18 @@ public final class MainWindow extends JFrame {
             return;
         }
         if (!palletScanningPanel.beginProductLookup()) {
-            if (palletScanningPanel.selectedAddress() == null) {
-                status.setText("Выберите паллет и дождитесь завершения текущей операции перед сканированием.");
-            }
+            status.setText(palletScanningPanel.selectedAddress() == null
+                    ? "Выберите паллет перед сканированием товара."
+                    : "Дождитесь завершения текущей операции перед сканированием.");
             return;
         }
         ScannedProbe probe;
         try {
             probe = ScannedProbe.fromText(raw);
+            scanner.showParsedScan(probe);
             if (probe.hasPriceData()) probe.pricesAsDecimals();
         } catch (IllegalArgumentException error) {
+            scanner.showScanError(raw, error.getMessage());
             palletScanningPanel.scanFailed(error.getMessage());
             status.setText(error.getMessage());
             log("Ошибка разбора скана паллеты: " + error.getMessage());
@@ -595,7 +618,7 @@ public final class MainWindow extends JFrame {
 
     private void showProductCard(Product product) {
         if (product == null) return;
-        workspace.addProductCard("Карточка — " + product.name(), new ProductCardDialog(product));
+        workspace.addProductCard("Карточка — " + product.name(), new ProductCardDialog(product, addressStorage));
     }
 
     private void assignSelected(List<Integer> rows, AppConfig.PrintFormat format,

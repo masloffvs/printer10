@@ -81,7 +81,7 @@ public final class AddressStorageRepository {
     public List<StorageBox> boxes(String addressId) throws SQLException {
         List<StorageBox> result = new ArrayList<>();
         try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
-                "SELECT b.box_id, b.address_id, b.box_code, b.created_at, COUNT(p.product_key) "
+                "SELECT b.box_id, b.address_id, b.box_code, b.created_at, COALESCE(SUM(p.quantity), 0) "
                         + "FROM storage_boxes b LEFT JOIN storage_box_products p ON p.box_id=b.box_id "
                         + "WHERE b.address_id=? GROUP BY b.box_id ORDER BY b.created_at DESC, b.box_code")) {
             query.setString(1, addressId);
@@ -95,7 +95,7 @@ public final class AddressStorageRepository {
 
     public StorageBox box(long boxId) throws SQLException {
         try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
-                "SELECT b.box_id, b.address_id, b.box_code, b.created_at, COUNT(p.product_key) "
+                "SELECT b.box_id, b.address_id, b.box_code, b.created_at, COALESCE(SUM(p.quantity), 0) "
                         + "FROM storage_boxes b LEFT JOIN storage_box_products p ON p.box_id=b.box_id "
                         + "WHERE b.box_id=? GROUP BY b.box_id")) {
             query.setLong(1, boxId);
@@ -138,6 +138,42 @@ public final class AddressStorageRepository {
                 "DELETE FROM storage_boxes WHERE box_id=?")) {
             delete.setLong(1, boxId);
             if (delete.executeUpdate() == 0) throw new SQLException("Коробка больше не существует.");
+        }
+    }
+
+    /** Moves a box and all its contents to another address without changing its identity. */
+    public void moveBox(long boxId, String targetAddressId) throws SQLException {
+        String target = require(targetAddressId, "Выберите адрес назначения.");
+        try (Connection connection = connect()) {
+            connection.setAutoCommit(false);
+            try {
+                String currentAddress;
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT address_id FROM storage_boxes WHERE box_id=?")) {
+                    query.setLong(1, boxId);
+                    try (ResultSet row = query.executeQuery()) {
+                        if (!row.next()) throw new SQLException("Коробка больше не существует.");
+                        currentAddress = row.getString(1);
+                    }
+                }
+                if (currentAddress.equals(target)) {
+                    connection.commit();
+                    return;
+                }
+                try (PreparedStatement update = connection.prepareStatement(
+                        "UPDATE storage_boxes SET address_id=? WHERE box_id=?")) {
+                    update.setString(1, target);
+                    update.setLong(2, boxId);
+                    if (update.executeUpdate() == 0) throw new SQLException("Коробка больше не существует.");
+                }
+                connection.commit();
+            } catch (SQLException error) {
+                try { connection.rollback(); }
+                catch (SQLException rollbackError) { error.addSuppressed(rollbackError); }
+                throw error;
+            } finally {
+                connection.setAutoCommit(true);
+            }
         }
     }
 
@@ -213,6 +249,31 @@ public final class AddressStorageRepository {
         return result;
     }
 
+    /** Finds placements for a catalog product by its stable SetRetailX ID, vendor code, or barcode. */
+    public List<LocationResult> findProductLocations(Product product) throws SQLException {
+        Objects.requireNonNull(product, "product");
+        List<LocationResult> result = new ArrayList<>();
+        String sql = "SELECT a.address_id, a.name, b.box_code, p.name, p.vendor_code, p.barcode, p.quantity "
+                + "FROM storage_box_products p JOIN storage_boxes b ON b.box_id=p.box_id "
+                + "JOIN storage_addresses a ON a.address_id=b.address_id WHERE "
+                + "(? <> '' AND p.product_id=?) OR (? <> '' AND p.vendor_code=? COLLATE NOCASE) "
+                + "OR (? <> '' AND p.barcode=?) "
+                + "ORDER BY a.address_id COLLATE NOCASE, b.box_code, p.name COLLATE NOCASE";
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, product.stCode());
+            statement.setString(2, product.stCode());
+            statement.setString(3, product.marking());
+            statement.setString(4, product.marking());
+            statement.setString(5, product.barcode());
+            statement.setString(6, product.barcode());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new LocationResult(rows.getString(1), rows.getString(2),
+                        rows.getString(3), rows.getString(4), rows.getString(5), rows.getString(6), rows.getInt(7)));
+            }
+        }
+        return result;
+    }
+
     private void initialize() throws SQLException {
         try (Connection connection = connect(); Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA foreign_keys=ON");
@@ -271,7 +332,9 @@ public final class AddressStorageRepository {
     public record StorageBox(long boxId, String addressId, String boxCode, long createdAt, int productCount) {
         @Override public String toString() { return boxCode + " · товаров: " + productCount; }
     }
-    public record StoredProduct(String productId, String name, String vendorCode, String barcode, int quantity) { }
+    public record StoredProduct(String productId, String name, String vendorCode, String barcode, int quantity) {
+        public String article() { return vendorCode.isBlank() ? productId : vendorCode; }
+    }
     public record LocationResult(String addressId, String addressName, String boxCode, String name,
                                  String vendorCode, String barcode, int quantity) { }
 }

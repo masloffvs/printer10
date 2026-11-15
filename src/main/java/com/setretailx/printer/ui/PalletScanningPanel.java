@@ -19,7 +19,6 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
-import javax.swing.JTextField;
 import javax.swing.SwingWorker;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
@@ -45,10 +44,10 @@ import java.util.function.Consumer;
 @SuppressWarnings("serial")
 final class PalletScanningPanel extends JPanel {
     static final String CLOSE_BOX_BARCODE = "retailx-proto://close-box";
+    private static final long DIFFERENT_PRODUCT_WINDOW_MS = 15_000;
+    private static final int DIFFERENT_PRODUCT_CLOSE_SCANS = 3;
 
     private final AddressStorageRepository repository;
-    private final Consumer<String> scanHandler;
-    private final JTextField scanInput = new JTextField();
     private final JComboBox<StorageAddress> addresses = new JComboBox<>();
     private final DefaultTableModel boxesModel = new DefaultTableModel(
             new String[]{"Коробка", "Артикул", "Товар", "Кол-во"}, 0) {
@@ -62,28 +61,35 @@ final class PalletScanningPanel extends JPanel {
     private String currentProductKey;
     private boolean scanInProgress;
     private boolean updatingAddresses;
+    private boolean addressPromptPending;
+    private long currentScanStartedAt;
+    private long firstDifferentProductScanAt;
+    private int differentProductScanCount;
 
-    PalletScanningPanel(AddressStorageRepository repository, Consumer<String> scanHandler) {
+    PalletScanningPanel(AddressStorageRepository repository) {
         super(new BorderLayout(8, 8));
         this.repository = Objects.requireNonNull(repository, "repository");
-        this.scanHandler = Objects.requireNonNull(scanHandler, "scanHandler");
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         add(buildControls(), BorderLayout.NORTH);
         boxesTable.setFillsViewportHeight(true);
         boxesTable.setRowHeight(26);
         add(new JScrollPane(boxesTable), BorderLayout.CENTER);
-        JPanel footer = new JPanel(new BorderLayout(4, 4));
-        footer.add(activeBox, BorderLayout.NORTH);
-        footer.add(status, BorderLayout.SOUTH);
+        JPanel footer = new JPanel(new BorderLayout(8, 6));
+        JPanel info = new JPanel(new BorderLayout(4, 4));
+        info.add(activeBox, BorderLayout.NORTH);
+        info.add(status, BorderLayout.SOUTH);
+        JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.TRAILING, 6, 0));
+        JButton closeBox = new JButton("Закрыть коробку");
+        closeBox.addActionListener(event -> closeCurrentBox(message -> setStatus(message)));
+        JButton print = new JButton("Печать наклеек текущей сессии · 2×4 A4");
+        print.addActionListener(event -> printSessionLabels());
+        actions.add(closeBox);
+        actions.add(print);
+        footer.add(info, BorderLayout.CENTER);
+        footer.add(actions, BorderLayout.SOUTH);
         add(footer, BorderLayout.SOUTH);
 
         addresses.setPrototypeDisplayValue(new StorageAddress("ПАЛЛЕТ-01", "Паллет у зоны отгрузки"));
-        scanInput.addActionListener(event -> {
-            String raw = scanInput.getText().trim();
-            scanInput.setText("");
-            if (!raw.isEmpty()) this.scanHandler.accept(raw);
-            focusScanner();
-        });
         addresses.addActionListener(event -> {
             if (!updatingAddresses) resetSessionForAddress();
         });
@@ -100,23 +106,53 @@ final class PalletScanningPanel extends JPanel {
         refresh.addActionListener(event -> refreshAddresses(selectedAddressIdFromSession));
         palletRow.add(refresh);
         top.add(palletRow, BorderLayout.NORTH);
-        scanInput.setToolTipText("Отсканируйте штрихкод товара или retailx-proto://close-box");
-        scanInput.setBorder(BorderFactory.createTitledBorder("Сканирование товаров и закрытие коробки"));
-        top.add(scanInput, BorderLayout.SOUTH);
+        JLabel hint = new JLabel("Сканируйте в окне «Единый сканер» после выбора адреса. Для закрытия коробки используйте кнопку ниже или сервисный штрихкод.");
+        hint.setBorder(BorderFactory.createEmptyBorder(6, 2, 2, 2));
+        top.add(hint, BorderLayout.SOUTH);
         controls.add(top, BorderLayout.NORTH);
-
-        JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEADING, 6, 0));
-        JButton print = new JButton("Печать наклеек текущей сессии · 2×4 A4");
-        print.addActionListener(event -> printSessionLabels());
-        actions.add(print);
-        JLabel hint = new JLabel("Сервисный штрихкод закрытия: " + CLOSE_BOX_BARCODE);
-        actions.add(hint);
-        controls.add(actions, BorderLayout.SOUTH);
         return controls;
     }
 
     void focusScanner() {
-        javax.swing.SwingUtilities.invokeLater(() -> scanInput.requestFocusInWindow());
+        // The actual scan field lives in the shared ScannerPanel.
+    }
+
+    void prepareForScanning() {
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            if (selectedAddressIdFromSession == null) {
+                addressPromptPending = true;
+                promptForAddressIfReady();
+            }
+        });
+    }
+
+    private void promptForAddressIfReady() {
+        if (!addressPromptPending || addresses.getItemCount() == 0) return;
+        addressPromptPending = false;
+        JComboBox<StorageAddress> selector = new JComboBox<>();
+        for (int i = 0; i < addresses.getItemCount(); i++) selector.addItem(addresses.getItemAt(i));
+        selector.setSelectedIndex(-1);
+        JPanel prompt = new JPanel(new BorderLayout(6, 6));
+        prompt.add(new JLabel("Выберите адрес хранения, который будет использоваться как паллет:"), BorderLayout.NORTH);
+        prompt.add(selector, BorderLayout.CENTER);
+        int answer = JOptionPane.showConfirmDialog(this, prompt, "Выбор паллета",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+        if (answer == JOptionPane.OK_OPTION && selector.getSelectedItem() instanceof StorageAddress selected) {
+            selectAddress(selected.addressId());
+        }
+    }
+
+    private void selectAddress(String addressId) {
+        updatingAddresses = true;
+        for (int i = 0; i < addresses.getItemCount(); i++) {
+            if (addresses.getItemAt(i).addressId().equals(addressId)) {
+                addresses.setSelectedIndex(i);
+                break;
+            }
+        }
+        updatingAddresses = false;
+        selectedAddressIdFromSession = selectedAddressId();
+        setStatus("Паллет выбран. Сканируйте первый товар для автоматического создания коробки.");
     }
 
     /** Claims a scan before asynchronous product lookup, preventing overlapping scans. */
@@ -130,6 +166,7 @@ final class PalletScanningPanel extends JPanel {
             return false;
         }
         scanInProgress = true;
+        currentScanStartedAt = System.currentTimeMillis();
         addresses.setEnabled(false);
         setStatus("Ищем товар по штрихкоду…");
         return true;
@@ -137,11 +174,14 @@ final class PalletScanningPanel extends JPanel {
 
     void scanFailed(String message) {
         scanInProgress = false;
+        currentScanStartedAt = 0;
         if (currentBoxId == null) addresses.setEnabled(true);
         setStatus(message);
     }
 
     StorageAddress selectedAddress() { return (StorageAddress) addresses.getSelectedItem(); }
+
+    void refreshAvailableAddresses() { refreshAddresses(selectedAddressIdFromSession); }
 
     void addScannedProduct(Product product, Consumer<String> completion) {
         Objects.requireNonNull(completion, "completion");
@@ -153,16 +193,33 @@ final class PalletScanningPanel extends JPanel {
         }
         // The caller claims the scan before lookup and keeps it claimed through persistence.
         scanInProgress = true;
+        if (currentScanStartedAt == 0) currentScanStartedAt = System.currentTimeMillis();
         String productKey = productKey(product);
         if (currentProductKey != null && !currentProductKey.equals(productKey)) {
+            if (differentProductScanCount == 0 || currentScanStartedAt - firstDifferentProductScanAt > DIFFERENT_PRODUCT_WINDOW_MS) {
+                firstDifferentProductScanAt = currentScanStartedAt;
+                differentProductScanCount = 0;
+            }
+            differentProductScanCount++;
             scanInProgress = false;
-            addresses.setEnabled(currentBoxId == null);
-            String message = "В коробке уже другой товар. Закройте её штрихкодом " + CLOSE_BOX_BARCODE + ".";
+            currentScanStartedAt = 0;
+            addresses.setEnabled(false);
+            if (differentProductScanCount >= DIFFERENT_PRODUCT_CLOSE_SCANS) {
+                resetDifferentProductScans();
+                String message = "Коробка закрыта после трёх сканов другого товара за 15 секунд. "
+                        + "Этот товар не добавлен; отсканируйте его ещё раз, чтобы открыть новую коробку.";
+                closeBoxState();
+                setStatus(message);
+                completion.accept(message);
+                return;
+            }
+            String message = "В коробке другой товар. Скан " + differentProductScanCount + "/"
+                    + DIFFERENT_PRODUCT_CLOSE_SCANS + " в течение 15 секунд закроет коробку; товар не добавлен.";
             setStatus(message);
             completion.accept(message);
             return;
         }
-
+        resetDifferentProductScans();
         boolean createBox = currentBoxId == null;
         Long boxId = currentBoxId;
         SessionBox activeSessionBox = createBox ? null : sessionBoxes.get(boxId);
@@ -189,6 +246,7 @@ final class PalletScanningPanel extends JPanel {
             String boxCode = createBox ? newBox.boxCode() : activeSessionBox.boxCode();
             return new ScanResult(targetBoxId, boxCode, createBox);
         }, result -> {
+            currentScanStartedAt = 0;
             if (result.created()) {
                 currentBoxId = result.boxId();
                 currentProductKey = productKey;
@@ -211,6 +269,7 @@ final class PalletScanningPanel extends JPanel {
             completion.accept(message);
         }, message -> {
             scanInProgress = false;
+            currentScanStartedAt = 0;
             addresses.setEnabled(currentBoxId == null);
             setStatus("Не удалось сохранить скан: " + message);
             completion.accept("Не удалось добавить товар в паллет: " + message);
@@ -229,12 +288,22 @@ final class PalletScanningPanel extends JPanel {
             return;
         }
         String message = "Коробка закрыта. Сканируйте первый товар следующей коробки.";
-        currentBoxId = null;
-        currentProductKey = null;
-        addresses.setEnabled(true);
-        activeBox.setText("Активная коробка: нет");
+        closeBoxState();
         setStatus(message);
         completion.accept(message);
+    }
+
+    private void closeBoxState() {
+        currentBoxId = null;
+        currentProductKey = null;
+        resetDifferentProductScans();
+        addresses.setEnabled(true);
+        activeBox.setText("Активная коробка: нет");
+    }
+
+    private void resetDifferentProductScans() {
+        firstDifferentProductScanAt = 0;
+        differentProductScanCount = 0;
     }
 
     private void refreshAddresses(String selectId) {
@@ -249,15 +318,12 @@ final class PalletScanningPanel extends JPanel {
                         break;
                     }
                 }
+            } else if (selectedAddressIdFromSession == null) {
+                addresses.setSelectedIndex(-1);
             }
             updatingAddresses = false;
-            if (selectedAddressIdFromSession == null) {
-                selectedAddressIdFromSession = selectedAddressId();
-                if (selectedAddressIdFromSession != null) {
-                    setStatus("Паллет выбран. Сканируйте первый товар для автоматического создания коробки.");
-                }
-            }
             if (rows.isEmpty()) setStatus("Адресов нет. Создайте адрес хранения и используйте его как паллет.");
+            promptForAddressIfReady();
         }, this::showError);
     }
 
@@ -283,6 +349,7 @@ final class PalletScanningPanel extends JPanel {
         selectedAddressIdFromSession = selectedAddressId();
         currentBoxId = null;
         currentProductKey = null;
+        resetDifferentProductScans();
         sessionBoxes.clear();
         boxesModel.setRowCount(0);
         activeBox.setText("Активная коробка: нет");
@@ -339,7 +406,7 @@ final class PalletScanningPanel extends JPanel {
             return;
         }
         PrinterJob job = PrinterJob.getPrinterJob();
-        job.setJobName("Наклейки паллеты · " + selectedAddressId());
+        job.setJobName("Наклейки паллеты · " + (selectedAddressId() == null ? "сессия" : selectedAddressId()));
         PageFormat format = job.defaultPage();
         Paper paper = new Paper();
         double width = 210 / 25.4 * 72;
@@ -377,6 +444,8 @@ final class PalletScanningPanel extends JPanel {
 
     private static String articleForLabel(StoredProduct product) {
         String article = displayArticle(product).trim();
+        int suffix = article.indexOf('_');
+        if (suffix > 0) article = article.substring(0, suffix);
         if (!article.matches("\\d{1,6}")) {
             throw new IllegalArgumentException("Артикул товара «" + product.name()
                     + "» должен состоять из 1–6 цифр для печати шестизначной этикетки: «" + article + "».");

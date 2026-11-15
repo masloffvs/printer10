@@ -55,7 +55,20 @@ final class AddressStoragePanel extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         add(buildStorageControls(), BorderLayout.NORTH);
         add(buildContent(), BorderLayout.CENTER);
-        add(status, BorderLayout.SOUTH);
+        JPanel footer = new JPanel(new BorderLayout(8, 4));
+        JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.TRAILING, 6, 0));
+        JButton addBox = new JButton("Создать коробку");
+        addBox.addActionListener(event -> createBox());
+        JButton deleteBox = new JButton("Удалить коробку");
+        deleteBox.addActionListener(event -> deleteBox());
+        JButton printLabel = new JButton("Печать наклейки");
+        printLabel.addActionListener(event -> printLabel());
+        actions.add(addBox);
+        actions.add(deleteBox);
+        actions.add(printLabel);
+        footer.add(status, BorderLayout.CENTER);
+        footer.add(actions, BorderLayout.EAST);
+        add(footer, BorderLayout.SOUTH);
 
         addresses.addActionListener(event -> {
             if (!updatingSelectors) refreshBoxes(null);
@@ -78,15 +91,6 @@ final class AddressStoragePanel extends JPanel {
         boxRow.add(new JLabel("Коробка:"));
         boxes.setPrototypeDisplayValue(new StorageBox(0, "", "АЕБ123", 0, 0));
         boxRow.add(boxes);
-        JButton addBox = new JButton("Создать и открыть коробку");
-        addBox.addActionListener(event -> createBox());
-        boxRow.add(addBox);
-        JButton deleteBox = new JButton("Удалить коробку");
-        deleteBox.addActionListener(event -> deleteBox());
-        boxRow.add(deleteBox);
-        JButton printLabel = new JButton("Печать наклейки");
-        printLabel.addActionListener(event -> printLabel());
-        boxRow.add(printLabel);
         panel.add(boxRow, BorderLayout.SOUTH);
         return panel;
     }
@@ -190,10 +194,11 @@ final class AddressStoragePanel extends JPanel {
         }
         run("Загружаем содержимое коробки…", () -> repository.productsInBox(box.boxId()), rows -> {
             productsModel.setRowCount(0);
-            for (StoredProduct product : rows) productsModel.addRow(new Object[]{product.name(), product.vendorCode(),
+            for (StoredProduct product : rows) productsModel.addRow(new Object[]{product.name(), product.article(),
                     product.barcode(), product.quantity()});
-            updateSelectedBoxCount(box, rows.size());
-            setStatus("Коробка " + box.boxCode() + " открыта · товаров: " + rows.size()
+            int itemCount = rows.stream().mapToInt(StoredProduct::quantity).sum();
+            updateSelectedBoxCount(box, itemCount);
+            setStatus("Коробка " + box.boxCode() + " открыта · товаров: " + itemCount
                     + " · сканируйте товары в едином сканере.");
         }, this::showError);
     }

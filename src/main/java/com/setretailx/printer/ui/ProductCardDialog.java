@@ -1,6 +1,8 @@
 package com.setretailx.printer.ui;
 
 import com.setretailx.printer.model.Product;
+import com.setretailx.printer.repository.AddressStorageRepository;
+import com.setretailx.printer.repository.AddressStorageRepository.LocationResult;
 import com.setretailx.printer.service.ProductImageService;
 
 import javax.imageio.ImageIO;
@@ -12,11 +14,13 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
+import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.text.html.HTMLEditorKit;
+import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
@@ -68,10 +72,12 @@ final class ProductCardDialog extends JPanel {
 
     private final JLabel image = new JLabel("Загружаем фото…", SwingConstants.CENTER);
     private final JButton openPhotoButton = new JButton("Открыть в новом окне");
+    private final AddressStorageRepository addressStorage;
     private BufferedImage originalImage;
 
-    ProductCardDialog(Product product) {
+    ProductCardDialog(Product product, AddressStorageRepository addressStorage) {
         super(new BorderLayout());
+        this.addressStorage = addressStorage;
         JPanel content = new JPanel(new BorderLayout(16, 10));
         content.setBorder(BorderFactory.createEmptyBorder(18, 18, 18, 18));
 
@@ -85,12 +91,50 @@ final class ProductCardDialog extends JPanel {
         JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("Общее", createOverview(product));
         tabs.addTab("Характеристики", createCharacteristics(product));
+        tabs.addTab("Размещение", createLocations(product));
         tabs.addTab("Raw JSON", createRawJson(product));
         content.add(tabs, BorderLayout.CENTER);
 
         add(content, BorderLayout.CENTER);
         setPreferredSize(new Dimension(620, 540));
         loadImage(product);
+    }
+
+    private JPanel createLocations(Product product) {
+        JPanel panel = new JPanel(new BorderLayout(8, 8));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 8, 8, 8));
+        JLabel status = new JLabel("Загружаем адресное размещение…");
+        DefaultTableModel model = new DefaultTableModel(
+                new String[]{"Адрес", "Название", "Коробка", "Кол-во"}, 0) {
+            @Override public boolean isCellEditable(int row, int column) { return false; }
+        };
+        JTable table = new JTable(model);
+        table.setFillsViewportHeight(true);
+        panel.add(new JScrollPane(table), BorderLayout.CENTER);
+        panel.add(status, BorderLayout.SOUTH);
+        if (addressStorage == null) {
+            status.setText("Информация о размещении недоступна.");
+            return panel;
+        }
+        new SwingWorker<List<LocationResult>, Void>() {
+            @Override protected List<LocationResult> doInBackground() throws Exception {
+                return addressStorage.findProductLocations(product);
+            }
+            @Override protected void done() {
+                try {
+                    List<LocationResult> locations = get();
+                    model.setRowCount(0);
+                    for (LocationResult location : locations) model.addRow(new Object[]{location.addressId(),
+                            location.addressName(), location.boxCode(), location.quantity()});
+                    status.setText(locations.isEmpty() ? "Товар не размещён в адресном хранении."
+                            : "Мест размещения: " + locations.size());
+                } catch (Exception error) {
+                    Throwable cause = error.getCause() == null ? error : error.getCause();
+                    status.setText("Не удалось загрузить размещение: " + safeMessage(cause));
+                }
+            }
+        }.execute();
+        return panel;
     }
 
     /** Category is kept in the local catalog (product_categories_path) and must not sit in the attributes table. */

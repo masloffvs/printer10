@@ -44,7 +44,9 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("history", "История печати", "История"),
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
             new WindowSpec("storage", "Сканирование единичных коробок", "Единичные коробки"),
-            new WindowSpec("storageAddresses", "Адреса хранения", "Адреса"),
+            new WindowSpec("storageAddresses", "Адреса хранения", "Адреса хранения"),
+            new WindowSpec("addressCreate", "Создание адреса хранения", "Создать адрес"),
+            new WindowSpec("addressSearch", "Поиск в адресном хранении", "Поиск хранения"),
             new WindowSpec("salesPointMap", "Карта торговых точек", "Карта точек"),
             new WindowSpec("salesPointEditor", "Редактор торговой точки", "Редактор точки"),
             new WindowSpec("palletScanning", "Сканирование паллет", "Паллеты"),
@@ -247,7 +249,7 @@ final class MdiWorkspace extends JPanel {
         toolBar.setToolTipText("Навигация по разделам и открытым окнам");
         toolBar.setBorder(javax.swing.BorderFactory.createEmptyBorder(8, 6, 8, 6));
         addNavigationGroup("ТОВАРЫ", "scanner", "comparison", "search", "queue");
-        addNavigationGroup("СКЛАД", "storage", "storageAddresses", "palletScanning");
+        addNavigationGroup("СКЛАД", "storageAddresses", "addressCreate", "palletScanning", "storage", "addressSearch");
         addNavigationGroup("ТОРГОВЫЕ ТОЧКИ", "salesPointMap", "salesPointEditor");
         addNavigationGroup("ИСТОРИЯ И ЗАДАЧИ", "history", "priceChanges", "tasks");
         addNavigationGroup("ОБМЕН И СЕРВИС", "exchange", "environment");
@@ -485,7 +487,7 @@ final class MdiWorkspace extends JPanel {
                         g.drawLine(x + 10, y + 13, x + 10, y + 17);
                         if ("palletScanning".equals(key)) g.drawLine(x + 5, y + 3, x + 15, y + 3);
                     }
-                    case "storageAddresses" -> {
+                    case "storageAddresses", "addressSearch", "addressCreate" -> {
                         g.drawOval(x + 5, y + 2, 10, 10);
                         g.drawLine(x + 5, y + 9, x + 10, y + 18);
                         g.drawLine(x + 15, y + 9, x + 10, y + 18);
@@ -531,7 +533,7 @@ final class MdiWorkspace extends JPanel {
                 case "comparison", "priceChanges" -> new Color(135, 81, 170);
                 case "search" -> new Color(56, 133, 97);
                 case "queue", "history", "tasks" -> new Color(190, 125, 45);
-                case "storage", "storageAddresses", "palletScanning", "salesPointMap", "salesPointEditor" -> new Color(46, 139, 132);
+                case "storage", "storageAddresses", "addressCreate", "addressSearch", "palletScanning", "salesPointMap", "salesPointEditor" -> new Color(46, 139, 132);
                 default -> new Color(105, 113, 125);
             };
         }
