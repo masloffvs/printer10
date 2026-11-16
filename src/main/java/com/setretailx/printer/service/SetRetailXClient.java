@@ -187,19 +187,25 @@ final class SetRetailXClient implements AutoCloseable {
         return connect().thenCompose(ignored -> {
             // ProductsFinder expects the authenticated token as params[0] in addition to
             // the session cookie. Keep token handling in the transport, where it is owned.
-            if ("getSimpleProductsByFilter".equals(requestPayload.path("method").asText())) {
+            String method = requestPayload.path("method").asText();
+            if ("getSimpleProductsByFilter".equals(method)) {
                 JsonNode paramsNode = requestPayload.get("params");
                 if (paramsNode instanceof ArrayNode params && params.size() == 3
                         && params.get(0).isObject()) {
                     params.insert(0, token);
                 }
+            } else if (("findChecks".equals(method) || "findCheck".equals(method))
+                    && requestPayload.path("params").isArray()) {
+                ArrayNode params = (ArrayNode) requestPayload.path("params");
+                if (params.isEmpty() || !params.get(0).isTextual()
+                        || !params.get(0).asText().equals(token)) params.insert(0, token);
             }
-            String method = requestPayload.path("method").asText("JSON-RPC");
-            emit("Отправлен запрос: " + method, "URL: " + safeUrl() + "\n" + safeRequestBody(requestPayload));
+            String methodName = requestPayload.path("method").asText("JSON-RPC");
+            emit("Отправлен запрос: " + methodName, "URL: " + safeUrl() + "\n" + safeRequestBody(requestPayload));
             HttpRequest request = requestBuilder(requestPayload, Duration.ofSeconds(15))
-                    .header("Referer", refererFor(method))
+                    .header("Referer", refererFor(methodName))
                     .build();
-            return send(request, method);
+            return send(request, methodName);
         });
     }
 
@@ -344,7 +350,9 @@ final class SetRetailXClient implements AutoCloseable {
 
     private String safeRequestBody(ObjectNode payload) {
         ObjectNode safe = (ObjectNode) redactSensitiveFields(payload.deepCopy());
-        if ("getSimpleProductsByFilter".equals(safe.path("method").asText())
+        if (("getSimpleProductsByFilter".equals(safe.path("method").asText())
+                || "findChecks".equals(safe.path("method").asText())
+                || "findCheck".equals(safe.path("method").asText()))
                 && safe.path("params").isArray() && !safe.path("params").isEmpty()) {
             ((ArrayNode) safe.path("params")).set(0, JSON.getNodeFactory().textNode("[скрыто: токен авторизации]"));
         }

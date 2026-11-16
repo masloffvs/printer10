@@ -6,16 +6,18 @@ import com.setretailx.printer.service.PriceMonitoringTaskService;
 import com.setretailx.printer.model.BarInput;
 
 import javax.swing.BorderFactory;
-import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JLabel;
+import javax.swing.JMenuItem;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
 import javax.swing.Timer;
+import javax.swing.UIManager;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -56,7 +58,6 @@ final class PriceChangesPanel extends JPanel {
     private final JComboBox<PriceFilter> priceType = new JComboBox<>(PriceFilter.values());
     private final JComboBox<String> priceNumber = new JComboBox<>(new String[]{
             "Все позиции", "#1 · обычная", "#2 · до скидки", "#3 · неизвестно", "#4 · со скидкой"});
-    private final JButton printSelected = new JButton("Печать выделенных строк…");
     private final ChangeOverviewChart chart = new ChangeOverviewChart();
     private final JLabel count = new JLabel(" ");
     private final Timer refreshTimer;
@@ -74,26 +75,11 @@ final class PriceChangesPanel extends JPanel {
         filters.add(priceType);
         filters.add(new JLabel("Номер:"));
         filters.add(priceNumber);
-        printSelected.setEnabled(false);
-        printSelected.addActionListener(event -> printSelectedRows());
-        filters.add(printSelected);
         add(filters, BorderLayout.NORTH);
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setFillsViewportHeight(true);
-        table.setToolTipText("Нажмите на цену «Было» или «Стало», чтобы открыть полную историю цен артикула");
-        table.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
-        table.addMouseListener(new java.awt.event.MouseAdapter() {
-            @Override public void mouseClicked(java.awt.event.MouseEvent event) {
-                int row = table.rowAtPoint(event.getPoint());
-                int column = table.columnAtPoint(event.getPoint());
-                if (row < 0 || (column != 5 && column != 6 && column != 7)) return;
-                ChangeRow change = (ChangeRow) model.getValueAt(table.convertRowIndexToModel(row), 0);
-                if (change != null) openHistory.open(change.marking(), change.name(), change.barcode());
-            }
-        });
-        table.getSelectionModel().addListSelectionListener(event -> {
-            if (!event.getValueIsAdjusting()) printSelected.setEnabled(table.getSelectedRowCount() > 0);
-        });
+        table.setToolTipText("Щёлкните правой кнопкой по событию, чтобы открыть историю артикула или отправить изменения на печать");
+        installChangesContextMenu();
         JSplitPane content = new JSplitPane(JSplitPane.VERTICAL_SPLIT, chart, new JScrollPane(table));
         content.setResizeWeight(.28);
         content.setDividerLocation(155);
@@ -115,6 +101,43 @@ final class PriceChangesPanel extends JPanel {
         refresh();
         refreshTimer = new Timer(10000, event -> refresh());
         refreshTimer.start();
+    }
+
+    private void installChangesContextMenu() {
+        JPopupMenu menu = new JPopupMenu();
+        ChangeRow[] popupTarget = {null};
+        JMenuItem open = new JMenuItem("Открыть историю цен артикула");
+        open.addActionListener(event -> {
+            ChangeRow row = popupTarget[0];
+            if (row != null) openHistory.open(row.marking(), row.name(), row.barcode());
+        });
+        JMenuItem print = new JMenuItem("Печать выделенных событий…");
+        print.addActionListener(event -> printSelectedRows());
+        menu.add(open);
+        menu.add(print);
+        menu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
+            @Override public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent event) {
+                boolean hasSelection = table.getSelectedRowCount() > 0;
+                open.setEnabled(hasSelection);
+                print.setEnabled(hasSelection);
+            }
+            @Override public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent event) { }
+            @Override public void popupMenuCanceled(javax.swing.event.PopupMenuEvent event) { }
+        });
+        table.addMouseListener(new java.awt.event.MouseAdapter() {
+            private void selectPopupRow(java.awt.event.MouseEvent event) {
+                if (!event.isPopupTrigger()) return;
+                int row = table.rowAtPoint(event.getPoint());
+                if (row >= 0 && !table.isRowSelected(row)) table.setRowSelectionInterval(row, row);
+                popupTarget[0] = row < 0 ? null
+                        : (ChangeRow) model.getValueAt(table.convertRowIndexToModel(row), 0);
+                open.setEnabled(popupTarget[0] != null);
+                print.setEnabled(table.getSelectedRowCount() > 0);
+                menu.show(table, event.getX(), event.getY());
+            }
+            @Override public void mousePressed(java.awt.event.MouseEvent event) { selectPopupRow(event); }
+            @Override public void mouseReleased(java.awt.event.MouseEvent event) { selectPopupRow(event); }
+        });
     }
 
     private void refresh() {
@@ -220,9 +243,9 @@ final class PriceChangesPanel extends JPanel {
                 for (int tick = 0; tick <= 2; tick++) {
                     int y = bottom - (bottom - top) * tick / 2;
                     int value = scale * tick / 2;
-                    g.setColor(new Color(218, 218, 218));
+                    g.setColor(chartGrid());
                     g.drawLine(left, y, right, y);
-                    g.setColor(new Color(65, 65, 65));
+                    g.setColor(chartForeground());
                     g.drawString(Integer.toString(value), 8, y + 3);
                 }
                 int slot = (right - left) / totals.length;
@@ -231,19 +254,34 @@ final class PriceChangesPanel extends JPanel {
                     int barWidth = Math.max(5, Math.min(32, slot - 10));
                     int x = left + i * slot + (slot - barWidth) / 2;
                     int y = bottom - barHeight;
-                    g.setColor(Color.BLACK);
+                    g.setColor(new Color(55, 155, 245));
                     g.fillRect(x, y, barWidth, barHeight);
                     g.setFont(new Font("DejaVu Sans", Font.BOLD, 8));
                     String number = Integer.toString(totals[i]);
+                    g.setColor(chartForeground());
                     g.drawString(number, x + (barWidth - g.getFontMetrics().stringWidth(number)) / 2, Math.max(top + 9, y - 3));
                     g.setFont(new Font("DejaVu Sans", Font.PLAIN, 8));
                     String day = today.minusDays(6L - i).format(DateTimeFormatter.ofPattern("dd.MM"));
                     g.drawString(day, x + (barWidth - g.getFontMetrics().stringWidth(day)) / 2, getHeight() - 8);
                 }
-                g.setColor(new Color(70, 70, 70));
+                g.setColor(chartForeground());
                 g.drawString("Событий изменения цены", left, 15);
             } finally { g.dispose(); }
         }
+    }
+
+    private Color chartForeground() {
+        Color foreground = UIManager.getColor("Label.foreground");
+        return foreground == null ? getForeground() : foreground;
+    }
+
+    private Color chartGrid() {
+        Color background = UIManager.getColor("Panel.background");
+        if (background == null) background = getBackground();
+        Color foreground = chartForeground();
+        return new Color(Math.round(background.getRed() * .76f + foreground.getRed() * .24f),
+                Math.round(background.getGreen() * .76f + foreground.getGreen() * .24f),
+                Math.round(background.getBlue() * .76f + foreground.getBlue() * .24f));
     }
 
     private static final class SelectedChangesPrintable implements Printable {

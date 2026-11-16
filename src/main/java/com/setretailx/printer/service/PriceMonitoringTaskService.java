@@ -15,6 +15,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -31,8 +36,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class PriceMonitoringTaskService implements AutoCloseable {
     public static final String DISCOVERY_TASK_ID = "price_candidate_discovery";
     public static final String SNAPSHOT_TASK_ID = "price_snapshot";
+    public static final String SALES_TASK_ID = "sales_history_sync";
     public static final String DISCOVERY_TASK_NAME = "Поиск товаров с изменением цен";
     public static final String SNAPSHOT_TASK_NAME = "Снимки и сравнение цен";
+    public static final String SALES_TASK_NAME = "История продаж из чеков";
+    public static final int SALES_INITIAL_LOOKBACK_DAYS = 6;
+    private static final int SALES_STORE_ID = 1531;
+    private static final int SALES_PAGE_SIZE = 500;
+    private static final int SALES_MAX_PAGES = 10_000;
     public static final int DEFAULT_INTERVAL_SECONDS = 3600;
     public static final int CANDIDATE_TTL_SECONDS = 12 * 60 * 60;
     public static final int PRODUCT_BATCH_SIZE = 100;
@@ -180,6 +191,40 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return result;
     }
 
+    /** Daily sales totals for one exact SetRetailX article, newest day first. */
+    public List<SalesDay> salesHistory(String marking) throws SQLException {
+        List<SalesDay> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT CAST(strftime('%s', date(sold_at, 'unixepoch', 'localtime')) AS INTEGER) AS day, SUM(quantity) AS units, "
+                        + "SUM(cost) AS revenue, COUNT(DISTINCT check_id) AS checks "
+                        + "FROM sales_positions WHERE item=? GROUP BY day ORDER BY day DESC")) {
+            statement.setString(1, marking);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new SalesDay(rows.getLong("day"), rows.getDouble("units"),
+                        rows.getDouble("revenue"), rows.getInt("checks")));
+            }
+        }
+        return result;
+    }
+
+    /** Individual receipt lines for one article, including the receipt and position timestamps. */
+    public List<SalesPosition> salesPositions(String marking) throws SQLException {
+        List<SalesPosition> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT check_id, check_number, sold_at, date_commit, name, item, barcode, quantity, unit, price, cost, discount "
+                        + "FROM sales_positions WHERE item=? ORDER BY sold_at DESC, position_order DESC LIMIT 2000")) {
+            statement.setString(1, marking);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new SalesPosition(rows.getLong("check_id"),
+                        rows.getString("check_number"), rows.getDouble("sold_at"), rows.getDouble("date_commit"), rows.getString("name"),
+                        rows.getString("item"), rows.getString("barcode"), rows.getDouble("quantity"),
+                        rows.getString("unit"), rows.getDouble("price"), rows.getDouble("cost"),
+                        rows.getDouble("discount")));
+            }
+        }
+        return result;
+    }
+
     public List<TaskRun> taskRuns(String taskId, int limit) throws SQLException {
         List<TaskRun> result = new ArrayList<>();
         try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
@@ -211,8 +256,11 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     private void executeTask(TaskInfo task) {
         double startedAt = nowSeconds();
         try {
-            String result = task.taskId().equals(DISCOVERY_TASK_ID)
-                    ? runCandidateDiscovery() : runPriceSnapshots();
+            String result = switch (task.taskId()) {
+                case DISCOVERY_TASK_ID -> runCandidateDiscovery();
+                case SALES_TASK_ID -> runSalesHistory();
+                default -> runPriceSnapshots();
+            };
             finish(task.taskId(), startedAt, "Успешно", result);
         } catch (Throwable error) {
             Throwable cause = unwrap(error);
@@ -244,6 +292,189 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return "Активных артикулов: " + active.size() + "; снимков цен: " + counts.snapshots()
                 + "; новых изменений: " + counts.changes()
                 + "; ответов с неизвестным ProductVO.marking: " + counts.unmatched();
+    }
+
+    private String runSalesHistory() {
+        Instant until = Instant.now();
+        Instant since = salesSyncWatermark();
+        if (since == null) since = until.minusSeconds(SALES_INITIAL_LOOKBACK_DAYS * 24L * 60 * 60);
+        else since = since.minusSeconds(60 * 60); // overlap an hour to cover late-arriving receipts
+        List<JsonNode> checks = new ArrayList<>();
+        LinkedHashSet<Long> listedIds = new LinkedHashSet<>();
+        for (int pageNumber = 0; ; pageNumber++) {
+            if (pageNumber >= SALES_MAX_PAGES) {
+                throw new IllegalStateException("findChecks превысил безопасный предел страниц; watermark не обновлён.");
+            }
+            int offset = pageNumber * SALES_PAGE_SIZE;
+            List<JsonNode> page = checkRows(connector.findChecks(since, until, SALES_STORE_ID,
+                    offset, SALES_PAGE_SIZE).join());
+            int newIds = 0;
+            for (JsonNode summary : page) {
+                long id = checkId(summary);
+                if (listedIds.add(id)) {
+                    checks.add(summary);
+                    newIds++;
+                }
+            }
+            if (page.size() == SALES_PAGE_SIZE && newIds == 0) {
+                throw new IllegalStateException("findChecks повторяет страницу при offset=" + offset
+                        + "; watermark не обновлён.");
+            }
+            if (page.size() < SALES_PAGE_SIZE) break;
+        }
+        int loaded = 0;
+        int positions = 0;
+        for (JsonNode summary : checks) {
+            long id = checkId(summary);
+            if (id <= 0 || isSalesCheckProcessed(id)) continue;
+            JsonNode response = connector.findCheck(id).join();
+            JsonNode fullCheck = response.path("result");
+            if (fullCheck.isObject()) {
+                for (String property : List.of("check", "receipt", "data")) {
+                    if (fullCheck.path(property).isObject()) { fullCheck = fullCheck.path(property); break; }
+                }
+            }
+            if (!fullCheck.isObject()) throw new IllegalStateException("findCheck не вернул чек " + id);
+            positions += recordSalesCheck(fullCheck);
+            loaded++;
+        }
+        saveSalesSyncWatermark(until);
+        return "Период: " + since + " — " + until + "; найдено чеков: "
+                + checks.size() + "; новых чеков: " + loaded + "; позиций сохранено: " + positions;
+    }
+
+    private Instant salesSyncWatermark() {
+        try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
+                "SELECT value FROM sales_sync_state WHERE state_key='last_successful_until'")) {
+            try (ResultSet row = query.executeQuery()) {
+                return row.next() ? Instant.ofEpochMilli((long) (row.getDouble(1) * 1000)) : null;
+            }
+        } catch (SQLException error) { throw new IllegalStateException(error); }
+    }
+
+    private void saveSalesSyncWatermark(Instant until) {
+        try (Connection connection = connect(); PreparedStatement update = connection.prepareStatement(
+                "INSERT INTO sales_sync_state(state_key, value) VALUES ('last_successful_until', ?) "
+                        + "ON CONFLICT(state_key) DO UPDATE SET value=excluded.value")) {
+            update.setDouble(1, until.toEpochMilli() / 1000d);
+            update.executeUpdate();
+        } catch (SQLException error) { throw new IllegalStateException(error); }
+    }
+
+    private boolean isSalesCheckProcessed(long checkId) {
+        try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
+                "SELECT 1 FROM sales_checks WHERE check_id=?")) {
+            query.setLong(1, checkId);
+            try (ResultSet row = query.executeQuery()) { return row.next(); }
+        } catch (SQLException error) { throw new IllegalStateException(error); }
+    }
+
+    /** Saves a whole check atomically, so a retry can never duplicate only part of its lines. */
+    private int recordSalesCheck(JsonNode check) {
+        long checkId = check.path("id").asLong(0);
+        if (checkId <= 0) throw new IllegalStateException("В чеке отсутствует корректный id.");
+        double soldAt = epochSeconds(check.path("date"), nowSeconds());
+        JsonNode lines = check.path("positions");
+        if (!lines.isArray()) throw new IllegalStateException("В чеке " + checkId + " отсутствует positions.");
+        int saved = 0;
+        try (Connection connection = connect()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement insertCheck = connection.prepareStatement(
+                    "INSERT OR IGNORE INTO sales_checks(check_id, check_number, sold_at) VALUES (?, ?, ?)")) {
+                insertCheck.setLong(1, checkId);
+                insertCheck.setString(2, text(check.path("number")));
+                insertCheck.setDouble(3, soldAt);
+                if (insertCheck.executeUpdate() == 0) { connection.commit(); return 0; }
+            }
+            try (PreparedStatement insert = connection.prepareStatement(
+                    "INSERT INTO sales_positions(check_id, position_order, check_number, sold_at, name, item, barcode, "
+                            + "quantity, unit, price, cost, discount, date_commit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                for (int lineIndex = 0; lineIndex < lines.size(); lineIndex++) {
+                    JsonNode line = lines.get(lineIndex);
+                    insert.setLong(1, checkId);
+                    insert.setInt(2, lineIndex);
+                    insert.setString(3, text(check.path("number")));
+                    insert.setDouble(4, soldAt);
+                    insert.setString(5, text(line.path("name")));
+                    insert.setString(6, text(line.path("item")));
+                    insert.setString(7, text(line.path("barcode")));
+                    insert.setDouble(8, decimal(line.path("quantity")));
+                    insert.setString(9, text(line.path("unit")));
+                    insert.setDouble(10, decimal(line.path("price")));
+                    insert.setDouble(11, decimal(line.path("cost")));
+                    insert.setDouble(12, decimal(line.path("discount")));
+                    insert.setDouble(13, epochSeconds(line.path("dateCommit"), soldAt));
+                    insert.addBatch();
+                    saved++;
+                }
+                insert.executeBatch();
+            }
+            connection.commit();
+            return saved;
+        } catch (SQLException error) { throw new IllegalStateException("Не удалось сохранить чек " + checkId, error); }
+    }
+
+    private static List<JsonNode> checkRows(JsonNode response) {
+        JsonNode result = response == null ? null : response.path("result");
+        if (result == null || result.isMissingNode() || result.isNull()) {
+            throw new IllegalStateException("findChecks не вернул result; синхронизация остановлена без отметки об успехе.");
+        }
+        JsonNode rows = result;
+        if (result.isArray() && result.size() == 2) {
+            if (result.get(1).isArray()) rows = result.get(1);
+            else if (result.get(0).isArray()) rows = result.get(0);
+        }
+        if (rows.isObject()) {
+            for (String property : List.of("checks", "list", "items", "result", "data")) {
+                JsonNode nested = rows.path(property);
+                if (nested.isArray()) { rows = nested; break; }
+            }
+        }
+        if (!rows.isArray()) throw new IllegalStateException("findChecks вернул неожиданный формат списка.");
+        List<JsonNode> checks = new ArrayList<>();
+        for (JsonNode row : rows) {
+            if (!row.isObject()) throw new IllegalStateException("findChecks содержит строку неожиданного формата.");
+            checkId(row); // Fail rather than advance the watermark past an unidentifiable receipt.
+            checks.add(row);
+        }
+        return checks;
+    }
+
+    private static long checkId(JsonNode summary) {
+        JsonNode id = summary.path("id");
+        if (id.isMissingNode() || id.isNull() || id.asText().isBlank()) id = summary.path("checkId");
+        long value = id.asLong(0);
+        if (value <= 0) throw new IllegalStateException("В строке findChecks отсутствует корректный id чека.");
+        return value;
+    }
+
+    private static String text(JsonNode node) {
+        return node == null || node.isMissingNode() || node.isNull() ? "" : node.asText("").trim();
+    }
+
+    private static double decimal(JsonNode node) {
+        String value = text(node).replace("\u00a0", "").replace("\u202f", "").replace(',', '.').trim();
+        if (value.isEmpty()) return 0;
+        try { return new BigDecimal(value).doubleValue(); }
+        catch (NumberFormatException ignored) { return 0; }
+    }
+
+    private static double epochSeconds(JsonNode node, double fallback) {
+        if (node == null || node.isMissingNode() || node.isNull()) return fallback;
+        if (node.isNumber()) {
+            double value = node.asDouble();
+            return value > 100_000_000_000d ? value / 1000d : value;
+        }
+        String value = text(node);
+        if (value.isEmpty()) return fallback;
+        try {
+            double numeric = Double.parseDouble(value);
+            return numeric > 100_000_000_000d ? numeric / 1000d : numeric;
+        } catch (NumberFormatException ignored) { }
+        try { return Instant.parse(value).toEpochMilli() / 1000d; }
+        catch (DateTimeParseException ignored) { }
+        try { return LocalDateTime.parse(value).atZone(ZoneId.systemDefault()).toEpochSecond(); }
+        catch (DateTimeParseException ignored) { return fallback; }
     }
 
     private int recordCandidates(List<String> rawMarkings, double now) {
@@ -457,11 +688,24 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                     + "result TEXT NOT NULL DEFAULT '')");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_task_runs_task_started ON task_runs(task_id, started_at DESC)");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_price_changes_detected ON price_changes(detected_at DESC)");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_checks (check_id INTEGER PRIMARY KEY, "
+                    + "check_number TEXT NOT NULL DEFAULT '', sold_at REAL NOT NULL)");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_positions (check_id INTEGER NOT NULL "
+                    + "REFERENCES sales_checks(check_id) ON DELETE CASCADE, position_order INTEGER NOT NULL DEFAULT 0, "
+                    + "check_number TEXT NOT NULL DEFAULT '', sold_at REAL NOT NULL, name TEXT NOT NULL DEFAULT '', "
+                    + "item TEXT NOT NULL DEFAULT '', barcode TEXT NOT NULL DEFAULT '', quantity REAL NOT NULL DEFAULT 0, "
+                    + "unit TEXT NOT NULL DEFAULT '', price REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, "
+                    + "discount REAL NOT NULL DEFAULT 0, date_commit REAL NOT NULL DEFAULT 0, "
+                    + "PRIMARY KEY(check_id, position_order))");
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_sales_positions_item_time "
+                    + "ON sales_positions(item, sold_at DESC)");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_sync_state (state_key TEXT PRIMARY KEY, value REAL NOT NULL)");
             statement.executeUpdate("UPDATE long_tasks SET task_id='" + DISCOVERY_TASK_ID + "', name='"
                     + DISCOVERY_TASK_NAME + "' WHERE task_id='price_change_monitor' AND NOT EXISTS "
                     + "(SELECT 1 FROM long_tasks WHERE task_id='" + DISCOVERY_TASK_ID + "')");
             insertTask(connection, DISCOVERY_TASK_ID, DISCOVERY_TASK_NAME);
             insertTask(connection, SNAPSHOT_TASK_ID, SNAPSHOT_TASK_NAME);
+            insertTask(connection, SALES_TASK_ID, SALES_TASK_NAME);
             statement.executeUpdate("UPDATE long_tasks SET enabled=0, next_run_at=NULL, "
                     + "last_status='Отключена (устаревшая задача)' WHERE task_id='price_change_monitor'");
             statement.executeUpdate("UPDATE long_tasks SET last_status='Прервано при закрытии приложения', "
@@ -532,6 +776,10 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public record PriceChange(String marking, String name, String barcode, double detectedAt,
                               String oldPricesJson, String newPricesJson) { }
     public record PriceSnapshot(String name, String barcode, double capturedAt, String pricesJson) { }
+    public record SalesDay(long dayEpochSeconds, double units, double revenue, int checks) { }
+    public record SalesPosition(long checkId, String checkNumber, double soldAt, double dateCommit, String name, String item,
+                                String barcode, double quantity, String unit, double price, double cost,
+                                double discount) { }
     public record TaskRun(long id, String taskId, double startedAt, Double finishedAt,
                           String status, String result) { }
     private record SnapshotCounts(int snapshots, int changes, int unmatched) { }

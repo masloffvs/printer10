@@ -95,6 +95,7 @@ final class ProductCardDialog extends JPanel {
         tabs.addTab("Характеристики", createCharacteristics(product));
         tabs.addTab("Размещение", createLocations(product));
         tabs.addTab("История цен", createPriceHistory(product, priceHistoryService));
+        tabs.addTab("Продажи", createSalesHistory(product, priceHistoryService));
         tabs.addTab("Raw JSON", createRawJson(product));
         content.add(tabs, BorderLayout.CENTER);
 
@@ -110,6 +111,15 @@ final class ProductCardDialog extends JPanel {
             return panel;
         }
         return new PriceHistoryPanel(service, product.marking(), product.name(), product.barcode());
+    }
+
+    private JPanel createSalesHistory(Product product, PriceMonitoringTaskService service) {
+        if (product.marking() == null || product.marking().isBlank()) {
+            JPanel panel = new JPanel(new BorderLayout());
+            panel.add(new JLabel("Для этого товара не указан артикул — история продаж недоступна."), BorderLayout.NORTH);
+            return panel;
+        }
+        return new SalesHistoryPanel(service, product.marking(), product.name(), product.barcode());
     }
 
     private JPanel createLocations(Product product) {

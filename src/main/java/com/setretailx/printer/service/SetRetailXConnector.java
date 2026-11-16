@@ -2,6 +2,7 @@ package com.setretailx.printer.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.setretailx.printer.config.AppConfig;
 import com.setretailx.printer.service.setretailx.GetNearlyPriceChangingMethod;
 import com.setretailx.printer.service.setretailx.GetObjectsIdsMethod;
@@ -16,11 +17,15 @@ import com.setretailx.printer.service.setretailx.dto.SimpleProductsByFilterRespo
 
 import java.util.List;
 import java.util.Optional;
+import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 /** The single application-facing entry point for SetRetailX operations. */
 public final class SetRetailXConnector implements AutoCloseable {
+    private static final String CHECK_ENDPOINT = "java:app/SET-OperDay/SET/CheckManager!"
+            + "ru.crystals.operday.gui.flexendpoints.check.CheckManagerLocal";
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final Consumer<ExchangeEvent> eventHandler;
     private volatile SetRetailXClient transport;
 
@@ -53,6 +58,26 @@ public final class SetRetailXConnector implements AutoCloseable {
     /** Sends a pre-built JSON-RPC payload for operation classes that need custom request fields. */
     public CompletableFuture<JsonNode> call(ObjectNode payload) {
         return transport.call(payload);
+    }
+
+    /** Lists receipt summaries for a time range; the transport supplies the session token. */
+    public CompletableFuture<JsonNode> findChecks(Instant from, Instant to, int store) {
+        return findChecks(from, to, store, 0, 500);
+    }
+
+    /** Loads one page of receipt summaries. */
+    public CompletableFuture<JsonNode> findChecks(Instant from, Instant to, int store, int offset, int limit) {
+        ObjectNode filter = JSON.createObjectNode();
+        filter.put("@class", "ru.crystals.operday.gui.datastructs.check.Check");
+        filter.put("store", store);
+        filter.put("dateFrom", from.atZone(java.time.ZoneId.systemDefault()).toLocalDateTime().toString());
+        filter.put("dateTo", to.atZone(java.time.ZoneId.systemDefault()).toLocalDateTime().toString());
+        return call(CHECK_ENDPOINT, "findChecks", List.of(filter, Math.max(0, offset), Math.max(1, limit)));
+    }
+
+    /** Loads a receipt's complete positions array, not its duplicate discountInPositions list. */
+    public CompletableFuture<JsonNode> findCheck(long checkId) {
+        return call(CHECK_ENDPOINT, "findCheck", List.of(checkId));
     }
 
     public CompletableFuture<List<String>> getObjectsIds() {

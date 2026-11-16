@@ -12,13 +12,16 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTable;
+import javax.swing.JPopupMenu;
+import javax.swing.JMenuItem;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.ListSelectionModel;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.UIManager;
 import java.awt.BorderLayout;
-import java.awt.FlowLayout;
 import java.awt.Color;
+import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -51,7 +54,6 @@ final class PriceHistoryPanel extends JPanel {
     private final JTable table = new JTable(model);
     private final JComboBox<SourceFilter> sourceFilter = new JComboBox<>(SourceFilter.values());
     private final JComboBox<PriceKind> kindFilter = new JComboBox<>(PriceKind.values());
-    private final JButton printSelected = new JButton("Печать выделенных строк…");
     private final PriceChart chart = new PriceChart();
     private List<HistoryRow> historyRows = List.of();
     private List<PriceMonitoringTaskService.PriceSnapshot> snapshots = List.of();
@@ -73,18 +75,12 @@ final class PriceHistoryPanel extends JPanel {
         filters.add(sourceFilter);
         filters.add(new JLabel("Цены:"));
         filters.add(kindFilter);
-        printSelected.setEnabled(false);
-        printSelected.setToolTipText("Отправить на печать только выделенные строки таблицы");
-        printSelected.addActionListener(event -> printSelectedRows());
-        filters.add(printSelected);
         header.add(filters, BorderLayout.SOUTH);
         add(header, BorderLayout.NORTH);
         table.setFillsViewportHeight(true);
         table.setAutoCreateRowSorter(true);
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
-        table.getSelectionModel().addListSelectionListener(event -> {
-            if (!event.getValueIsAdjusting()) printSelected.setEnabled(table.getSelectedRowCount() > 0);
-        });
+        installHistoryContextMenu();
         JSplitPane content = new JSplitPane(JSplitPane.VERTICAL_SPLIT, chart, new JScrollPane(table));
         content.setResizeWeight(0.36);
         content.setDividerLocation(190);
@@ -94,6 +90,24 @@ final class PriceHistoryPanel extends JPanel {
         sourceFilter.addActionListener(event -> { renderRows(); chart.repaint(); });
         kindFilter.addActionListener(event -> { renderRows(); chart.repaint(); });
         load();
+    }
+
+    private void installHistoryContextMenu() {
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem print = new JMenuItem("Печать выделенных событий…");
+        print.addActionListener(event -> printSelectedRows());
+        menu.add(print);
+        table.addMouseListener(new java.awt.event.MouseAdapter() {
+            private void selectPopupRow(java.awt.event.MouseEvent event) {
+                if (!event.isPopupTrigger()) return;
+                int row = table.rowAtPoint(event.getPoint());
+                if (row >= 0 && !table.isRowSelected(row)) table.setRowSelectionInterval(row, row);
+                print.setEnabled(table.getSelectedRowCount() > 0);
+                menu.show(table, event.getX(), event.getY());
+            }
+            @Override public void mousePressed(java.awt.event.MouseEvent event) { selectPopupRow(event); }
+            @Override public void mouseReleased(java.awt.event.MouseEvent event) { selectPopupRow(event); }
+        });
     }
 
     private void load() {
@@ -255,7 +269,7 @@ final class PriceHistoryPanel extends JPanel {
                 List<BigDecimal> values = new ArrayList<>();
                 for (ChartSeries line : series) for (BigDecimal value : line.values()) if (value != null) values.add(value);
                 if (points.size() < 2 || values.isEmpty()) {
-                    g.setColor(new Color(90, 90, 90));
+                    g.setColor(chartForeground());
                     g.drawString("Недостаточно снимков цен для построения графика", left, top + 35);
                     return;
                 }
@@ -271,9 +285,9 @@ final class PriceHistoryPanel extends JPanel {
                 for (int tick = 0; tick <= 4; tick++) {
                     int y = bottom - (bottom - top) * tick / 4;
                     double value = minValue + (maxValue - minValue) * tick / 4;
-                    g.setColor(new Color(220, 220, 220));
+                    g.setColor(chartGrid());
                     g.drawLine(left, y, right, y);
-                    g.setColor(new Color(70, 70, 70));
+                    g.setColor(chartForeground());
                     g.drawString(BigDecimal.valueOf(value).setScale(2, java.math.RoundingMode.HALF_UP)
                             .stripTrailingZeros().toPlainString().replace('.', ','), 4, y + 3);
                 }
@@ -282,12 +296,13 @@ final class PriceHistoryPanel extends JPanel {
                 for (int tick = 0; tick <= 2; tick++) {
                     int x = left + (right - left) * tick / 2;
                     long time = firstTime + (lastTime - firstTime) * tick / 2;
-                    g.setColor(new Color(70, 70, 70));
+                    g.setColor(chartForeground());
                     String label = Instant.ofEpochSecond(time).atZone(ZoneId.systemDefault())
                             .format(DateTimeFormatter.ofPattern("dd.MM HH:mm"));
                     g.drawString(label, Math.max(left, Math.min(right - 74, x - 28)), getHeight() - 9);
                 }
-                Color[] colors = {Color.BLACK, new Color(85, 85, 85), new Color(125, 125, 125), new Color(165, 165, 165)};
+                Color[] colors = {new Color(50, 150, 255), new Color(255, 166, 64),
+                        new Color(69, 190, 130), new Color(209, 112, 235)};
                 int legendX = left;
                 int legendY = 15;
                 for (int s = 0; s < series.size(); s++) {
@@ -340,6 +355,25 @@ final class PriceHistoryPanel extends JPanel {
             }
             return result;
         }
+    }
+
+    private Color chartForeground() {
+        Color foreground = UIManager.getColor("Label.foreground");
+        return foreground == null ? getForeground() : foreground;
+    }
+
+    private Color chartGrid() {
+        Color background = UIManager.getColor("Panel.background");
+        Color foreground = chartForeground();
+        if (background == null) background = getBackground();
+        return mix(background, foreground, .24f);
+    }
+
+    private static Color mix(Color base, Color other, float amount) {
+        if (base == null) base = Color.GRAY;
+        return new Color(Math.round(base.getRed() * (1 - amount) + other.getRed() * amount),
+                Math.round(base.getGreen() * (1 - amount) + other.getGreen() * amount),
+                Math.round(base.getBlue() * (1 - amount) + other.getBlue() * amount));
     }
 
     private static BigDecimal readChartValue(JsonNode node) {
