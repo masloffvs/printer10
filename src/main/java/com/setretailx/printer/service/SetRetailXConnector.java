@@ -1,8 +1,9 @@
 package com.setretailx.printer.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.setretailx.printer.config.AppConfig;
 import com.setretailx.printer.service.setretailx.GetNearlyPriceChangingMethod;
 import com.setretailx.printer.service.setretailx.GetObjectsIdsMethod;
@@ -61,18 +62,25 @@ public final class SetRetailXConnector implements AutoCloseable {
     }
 
     /** Lists receipt summaries for a time range; the transport supplies the session token. */
-    public CompletableFuture<JsonNode> findChecks(Instant from, Instant to, int store) {
-        return findChecks(from, to, store, 0, 500);
+    public CompletableFuture<JsonNode> findChecks(Instant from, Instant to, int limit) {
+        ArrayNode arguments = JSON.createArrayNode();
+        addCheckSearchArgument(arguments, "CheckType",
+                "CHECK,REFUND_CHECK,CANCEL_CHECK,DEFERRED_CHECK,EXPENSE_RECEIPT,RETURN_EXPENSE_RECEIPT");
+        java.time.ZoneId zone = java.time.ZoneId.systemDefault();
+        java.time.format.DateTimeFormatter dateFormat =
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+        addCheckSearchArgument(arguments, "CheckCommitBeginDate",
+                dateFormat.format(from.atZone(zone).toLocalDateTime()));
+        addCheckSearchArgument(arguments, "CheckCommitEndDate",
+                dateFormat.format(to.atZone(zone).toLocalDateTime()));
+        return call(CHECK_ENDPOINT, "findChecks", List.of(arguments, Math.max(1, limit)));
     }
 
-    /** Loads one page of receipt summaries. */
-    public CompletableFuture<JsonNode> findChecks(Instant from, Instant to, int store, int offset, int limit) {
-        ObjectNode filter = JSON.createObjectNode();
-        filter.put("@class", "ru.crystals.operday.gui.datastructs.check.Check");
-        filter.put("store", store);
-        filter.put("dateFrom", from.atZone(java.time.ZoneId.systemDefault()).toLocalDateTime().toString());
-        filter.put("dateTo", to.atZone(java.time.ZoneId.systemDefault()).toLocalDateTime().toString());
-        return call(CHECK_ENDPOINT, "findChecks", List.of(filter, Math.max(0, offset), Math.max(1, limit)));
+    private static void addCheckSearchArgument(ArrayNode arguments, String type, String value) {
+        ObjectNode argument = arguments.addObject();
+        argument.put("type", type);
+        argument.put("value", value);
+        argument.put("@class", "ru.crystals.operday.vo.SearchArgumentVO");
     }
 
     /** Loads a receipt's complete positions array, not its duplicate discountInPositions list. */

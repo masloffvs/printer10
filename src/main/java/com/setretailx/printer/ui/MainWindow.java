@@ -5,6 +5,8 @@ import com.setretailx.printer.model.Product;
 import com.setretailx.printer.model.BarInput;
 import com.setretailx.printer.model.PrintBatch;
 import com.setretailx.printer.model.PrintHistoryEntry;
+import com.setretailx.printer.repository.PriceChangePrintHistoryRepository;
+import com.setretailx.printer.repository.ChangedLabelPrintHistoryRepository;
 import com.setretailx.printer.model.PriceType;
 import com.setretailx.printer.model.ScannedProbe;
 import com.setretailx.printer.repository.ProductRepository;
@@ -35,6 +37,8 @@ import javax.swing.SwingUtilities;
 public final class MainWindow extends JFrame {
     private final ProductRepository products = new ProductRepository();
     private final PrintHistoryRepository printHistory = new PrintHistoryRepository();
+    private final PriceChangePrintHistoryRepository priceChangePrintHistory = new PriceChangePrintHistoryRepository();
+    private final ChangedLabelPrintHistoryRepository changedLabelPrintHistory = new ChangedLabelPrintHistoryRepository();
     private final AddressStorageRepository addressStorage = new AddressStorageRepository();
     private final SalesPointRepository salesPoints = new SalesPointRepository();
     private final MdiWorkspace workspace = new MdiWorkspace();
@@ -72,9 +76,14 @@ public final class MainWindow extends JFrame {
                 salesPointEditorPanel.selectPoint(point);
                 workspace.showWindow("salesPointEditor");
             }, salesPointEditorPanel::refreshPoints);
-    private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService, (marking, name, barcode) ->
+    private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService, priceChangePrintHistory,
+            (marking, name, barcode) ->
             workspace.addDynamicWindow("История цен — " + marking,
-                    new PriceHistoryPanel(taskService, marking, name, barcode), 760, 480));
+                    new PriceHistoryPanel(taskService, marking, name, barcode), 760, 480),
+            this::enqueueChangedLabels);
+    private final PrintChangesHistoryPanel changedPrintHistoryPanel = new PrintChangesHistoryPanel(
+            new ChangedLabelPrintHistoryPanel(changedLabelPrintHistory),
+            new PriceChangePrintHistoryPanel(priceChangePrintHistory));
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
     private List<Product> searchResults = new ArrayList<>();
     private boolean printInProgress;
@@ -100,6 +109,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("queue", queue, 760, 440);
         workspace.addWindow("exchange", exchange, 650, 400);
         workspace.addWindow("history", history, 760, 420);
+        workspace.addWindow("priceChangePrintHistory", changedPrintHistoryPanel, 950, 540);
         workspace.addWindow("tasks", taskPanel, 900, 520);
         workspace.addWindow("storage", addressStoragePanel, 900, 560);
         workspace.addWindow("storageAddresses", addressManagementPanel, 900, 520);
@@ -136,6 +146,7 @@ public final class MainWindow extends JFrame {
             @Override public void windowClosing(java.awt.event.WindowEvent event) {
                 taskPanel.close();
                 priceChanges.close();
+                changedPrintHistoryPanel.close();
                 network.close();
             }
         });
@@ -373,6 +384,30 @@ public final class MainWindow extends JFrame {
         log("Несовпавший ценник добавлен в очередь без назначения формата и тиража: " + product.name());
     }
 
+    private void enqueueChangedLabels(List<PriceChangesPanel.ChangedLabelCandidate> candidates) {
+        if (candidates == null || candidates.isEmpty()) return;
+        status.setText("Подбираем товары для очереди изменённых ценников…");
+        runBackground(() -> {
+            List<Product> found = new ArrayList<>();
+            for (PriceChangesPanel.ChangedLabelCandidate candidate : candidates) {
+                Product product = candidate.marking().isBlank() ? null : products.findByMarking(candidate.marking());
+                if (product == null && !candidate.barcode().isBlank()) product = products.findByBarcode(candidate.barcode());
+                if (product == null && !candidate.barcode().isBlank()) {
+                    product = network.searchOnlineProduct(candidate.barcode()).join().orElse(null);
+                }
+                if (product != null) found.add(product);
+            }
+            return found;
+        }, found -> {
+            for (Product product : found) entries.add(new QueueEntry(product, true));
+            refreshQueue();
+            workspace.showWindow("queue");
+            int missing = candidates.size() - found.size();
+            status.setText("В очередь добавлено ценников по изменениям: " + found.size()
+                    + (missing == 0 ? "" : " · товары не найдены: " + missing));
+        }, error -> status.setText("Не удалось добавить изменённые ценники в очередь: " + error));
+    }
+
     private void checkSalesPointPriceHistory(List<ShelfItem> shelfItems) {
         if (shelfItems == null || shelfItems.isEmpty()) return;
         status.setText("Проверяем историю изменения ценников…");
@@ -565,6 +600,20 @@ public final class MainWindow extends JFrame {
                             + (error.getMessage() == null ? error.toString() : error.getMessage()));
                     log("Ошибка обновления истории партии " + batchId + ": " + error);
                 }
+                List<PrintHistoryEntry> successfullyPrintedChangedLabels = new ArrayList<>();
+                for (int candidateIndex : successfulCandidateIndexes) {
+                    if (candidateEntries.get(candidateIndex).changedLabel) {
+                        successfullyPrintedChangedLabels.add(candidates.get(candidateIndex));
+                    }
+                }
+                if (!successfullyPrintedChangedLabels.isEmpty()) {
+                    try {
+                        changedLabelPrintHistory.addSuccessful(successfullyPrintedChangedLabels);
+                    } catch (Exception error) {
+                        failures.add("Ценники напечатаны, но история изменённых ценников не сохранена: "
+                                + (error.getMessage() == null ? error.toString() : error.getMessage()));
+                    }
+                }
                 return new PrintOutcome(batchId, successfulCandidateIndexes, failures);
             }
 
@@ -730,12 +779,18 @@ public final class MainWindow extends JFrame {
 
     private static final class QueueEntry {
         private final Product product;
+        private final boolean changedLabel;
         private AppConfig.PrintFormat format;
         private Integer amount;
         private int quantity = 1;
         private PriceType priceType = PriceType.PROMO;
 
-        private QueueEntry(Product product) { this.product = product; }
+        private QueueEntry(Product product) { this(product, false); }
+
+        private QueueEntry(Product product, boolean changedLabel) {
+            this.product = product;
+            this.changedLabel = changedLabel;
+        }
 
         private PrintHistoryEntry snapshot() {
             return PrintHistoryEntry.fromQueue(product, format, amount, quantity, priceType);

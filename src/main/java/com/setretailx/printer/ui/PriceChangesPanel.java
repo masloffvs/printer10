@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
 import com.setretailx.printer.model.BarInput;
+import com.setretailx.printer.model.PriceChangePrintEntry;
+import com.setretailx.printer.repository.PriceChangePrintHistoryRepository;
 
 import javax.swing.BorderFactory;
 import javax.swing.JComboBox;
@@ -47,7 +49,9 @@ final class PriceChangesPanel extends JPanel {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final DateTimeFormatter CHANGE_TIME = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
     private final PriceMonitoringTaskService service;
+    private final PriceChangePrintHistoryRepository printHistory;
     private final HistoryOpener openHistory;
+    private final ChangedLabelsQueueHandler queueChangedLabels;
     private final DefaultTableModel model = new DefaultTableModel(
             new Object[]{"Когда", "Артикул", "Товар", "Штрихкод", "Ценовая позиция",
                     "Цена до · обычная / 99", "Цена после · обычная / 99", "Изменение · обычная / 99"}, 0) {
@@ -62,10 +66,13 @@ final class PriceChangesPanel extends JPanel {
     private final JLabel count = new JLabel(" ");
     private final Timer refreshTimer;
 
-    PriceChangesPanel(PriceMonitoringTaskService service, HistoryOpener openHistory) {
+    PriceChangesPanel(PriceMonitoringTaskService service, PriceChangePrintHistoryRepository printHistory,
+                      HistoryOpener openHistory, ChangedLabelsQueueHandler queueChangedLabels) {
         super(new BorderLayout(8, 8));
         this.service = service;
+        this.printHistory = printHistory;
         this.openHistory = openHistory;
+        this.queueChangedLabels = queueChangedLabels;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         filters.add(new JLabel("Поиск товара:"));
@@ -113,13 +120,17 @@ final class PriceChangesPanel extends JPanel {
         });
         JMenuItem print = new JMenuItem("Печать выделенных событий…");
         print.addActionListener(event -> printSelectedRows());
+        JMenuItem queueLabels = new JMenuItem("Добавить товары в очередь ценников…");
+        queueLabels.addActionListener(event -> enqueueSelectedLabels());
         menu.add(open);
         menu.add(print);
+        menu.add(queueLabels);
         menu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
             @Override public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent event) {
                 boolean hasSelection = table.getSelectedRowCount() > 0;
                 open.setEnabled(hasSelection);
                 print.setEnabled(hasSelection);
+                queueLabels.setEnabled(hasSelection);
             }
             @Override public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent event) { }
             @Override public void popupMenuCanceled(javax.swing.event.PopupMenuEvent event) { }
@@ -133,6 +144,7 @@ final class PriceChangesPanel extends JPanel {
                         : (ChangeRow) model.getValueAt(table.convertRowIndexToModel(row), 0);
                 open.setEnabled(popupTarget[0] != null);
                 print.setEnabled(table.getSelectedRowCount() > 0);
+                queueLabels.setEnabled(table.getSelectedRowCount() > 0);
                 menu.show(table, event.getX(), event.getY());
             }
             @Override public void mousePressed(java.awt.event.MouseEvent event) { selectPopupRow(event); }
@@ -201,11 +213,33 @@ final class PriceChangesPanel extends JPanel {
         if (!job.printDialog()) return;
         try {
             job.print();
-            count.setText("На печать отправлено выделенных строк: " + rows.size());
+            List<PriceChangePrintEntry> printedRows = rows.stream().map(row -> new PriceChangePrintEntry(
+                    row.marking(), row.name(), row.barcode(), row.priceType(), row.oldValue(),
+                    row.newValue(), row.delta())).toList();
+            long reportId = printHistory.addReport(printedRows);
+            count.setText("Отчёт отправлен на печать и сохранён в истории #" + reportId
+                    + " · строк: " + rows.size());
         } catch (Exception error) {
             Throwable cause = error.getCause() == null ? error : error.getCause();
-            count.setText("Не удалось напечатать выбранные изменения: " + cause.getMessage());
+            count.setText("Печать или сохранение отчёта не выполнены: " + cause.getMessage());
         }
+    }
+
+    private void enqueueSelectedLabels() {
+        List<ChangeRow> rows = selectedRows();
+        if (rows.isEmpty()) return;
+        queueChangedLabels.enqueue(rows.stream().map(row -> new ChangedLabelCandidate(
+                row.marking(), row.name(), row.barcode())).toList());
+    }
+
+    private List<ChangeRow> selectedRows() {
+        int[] selected = table.getSelectedRows();
+        List<ChangeRow> rows = new ArrayList<>(selected.length);
+        for (int viewRow : selected) {
+            Object value = model.getValueAt(table.convertRowIndexToModel(viewRow), 0);
+            if (value instanceof ChangeRow row) rows.add(row);
+        }
+        return rows;
     }
 
     private final class ChangeOverviewChart extends JPanel {
@@ -484,5 +518,9 @@ final class PriceChangesPanel extends JPanel {
     }
     @FunctionalInterface interface HistoryOpener {
         void open(String marking, String name, String barcode);
+    }
+    record ChangedLabelCandidate(String marking, String name, String barcode) { }
+    @FunctionalInterface interface ChangedLabelsQueueHandler {
+        void enqueue(List<ChangedLabelCandidate> candidates);
     }
 }

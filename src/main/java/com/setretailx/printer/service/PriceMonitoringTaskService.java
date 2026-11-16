@@ -16,10 +16,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -41,9 +43,8 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public static final String SNAPSHOT_TASK_NAME = "Снимки и сравнение цен";
     public static final String SALES_TASK_NAME = "История продаж из чеков";
     public static final int SALES_INITIAL_LOOKBACK_DAYS = 6;
-    private static final int SALES_STORE_ID = 1531;
-    private static final int SALES_PAGE_SIZE = 500;
-    private static final int SALES_MAX_PAGES = 10_000;
+    private static final int SALES_CHECK_LIMIT = 40;
+    private static final int SALES_MAX_QUERIES = 10_000;
     public static final int DEFAULT_INTERVAL_SECONDS = 3600;
     public static final int CANDIDATE_TTL_SECONDS = 12 * 60 * 60;
     public static final int PRODUCT_BATCH_SIZE = 100;
@@ -299,28 +300,36 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         Instant since = salesSyncWatermark();
         if (since == null) since = until.minusSeconds(SALES_INITIAL_LOOKBACK_DAYS * 24L * 60 * 60);
         else since = since.minusSeconds(60 * 60); // overlap an hour to cover late-arriving receipts
+        // SearchArgumentVO date values have second precision.
+        since = Instant.ofEpochSecond(since.getEpochSecond());
+        until = Instant.ofEpochSecond(until.getEpochSecond());
         List<JsonNode> checks = new ArrayList<>();
         LinkedHashSet<Long> listedIds = new LinkedHashSet<>();
-        for (int pageNumber = 0; ; pageNumber++) {
-            if (pageNumber >= SALES_MAX_PAGES) {
-                throw new IllegalStateException("findChecks превысил безопасный предел страниц; watermark не обновлён.");
+        ArrayDeque<CheckRange> ranges = new ArrayDeque<>();
+        ranges.add(new CheckRange(since, until));
+        int queryCount = 0;
+        while (!ranges.isEmpty()) {
+            if (++queryCount > SALES_MAX_QUERIES) {
+                throw new IllegalStateException("findChecks превысил безопасный предел запросов; watermark не обновлён.");
             }
-            int offset = pageNumber * SALES_PAGE_SIZE;
-            List<JsonNode> page = checkRows(connector.findChecks(since, until, SALES_STORE_ID,
-                    offset, SALES_PAGE_SIZE).join());
-            int newIds = 0;
-            for (JsonNode summary : page) {
-                long id = checkId(summary);
-                if (listedIds.add(id)) {
-                    checks.add(summary);
-                    newIds++;
+            CheckRange range = ranges.removeFirst();
+            List<JsonNode> page = checkRows(connector.findChecks(range.from(), range.to(), SALES_CHECK_LIMIT).join());
+            if (page.size() >= SALES_CHECK_LIMIT) {
+                long midpoint = range.from().getEpochSecond()
+                        + Duration.between(range.from(), range.to()).getSeconds() / 2;
+                Instant split = Instant.ofEpochSecond(midpoint);
+                if (!split.isAfter(range.from()) || !split.isBefore(range.to())) {
+                    throw new IllegalStateException("findChecks достиг лимита " + SALES_CHECK_LIMIT
+                            + " для минимального временного интервала; watermark не обновлён.");
                 }
+                // The server accepts whole-second dates and may include both ends; duplicate IDs are deduplicated.
+                ranges.addFirst(new CheckRange(split, range.to()));
+                ranges.addFirst(new CheckRange(range.from(), split));
+                continue;
             }
-            if (page.size() == SALES_PAGE_SIZE && newIds == 0) {
-                throw new IllegalStateException("findChecks повторяет страницу при offset=" + offset
-                        + "; watermark не обновлён.");
+            for (JsonNode summary : page) {
+                if (listedIds.add(checkId(summary))) checks.add(summary);
             }
-            if (page.size() < SALES_PAGE_SIZE) break;
         }
         int loaded = 0;
         int positions = 0;
@@ -342,6 +351,8 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return "Период: " + since + " — " + until + "; найдено чеков: "
                 + checks.size() + "; новых чеков: " + loaded + "; позиций сохранено: " + positions;
     }
+
+    private record CheckRange(Instant from, Instant to) { }
 
     private Instant salesSyncWatermark() {
         try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
