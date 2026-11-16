@@ -1,17 +1,27 @@
 package com.setretailx.printer.ui;
 
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.EncodeHintType;
+import com.google.zxing.MultiFormatWriter;
+import com.google.zxing.WriterException;
+import com.google.zxing.client.j2se.MatrixToImageWriter;
 import com.setretailx.printer.model.Product;
 import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.repository.AddressStorageRepository.LocationResult;
 import com.setretailx.printer.service.ProductImageService;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
+import com.setretailx.printer.service.SetRetailXConnector;
+import com.setretailx.printer.service.setretailx.dto.ProductDto;
 
 import javax.imageio.ImageIO;
 import javax.swing.BorderFactory;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
 import javax.swing.JEditorPane;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
@@ -28,6 +38,7 @@ import java.awt.Component;
 import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics2D;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
@@ -35,13 +46,19 @@ import java.awt.Image;
 import java.awt.Insets;
 import java.awt.RenderingHints;
 import java.awt.Toolkit;
+import java.awt.print.PageFormat;
+import java.awt.print.Paper;
+import java.awt.print.PrinterJob;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Readable product details dialog with asynchronously loaded catalog photography.
@@ -73,13 +90,16 @@ final class ProductCardDialog extends JPanel {
 
     private final JLabel image = new JLabel("Загружаем фото…", SwingConstants.CENTER);
     private final JButton openPhotoButton = new JButton("Открыть в новом окне");
+    private final JButton printInfoButton = new JButton("Печать информационного листа…");
     private final AddressStorageRepository addressStorage;
+    private final SetRetailXConnector connector;
     private BufferedImage originalImage;
 
     ProductCardDialog(Product product, AddressStorageRepository addressStorage,
-                      PriceMonitoringTaskService priceHistoryService) {
+                      PriceMonitoringTaskService priceHistoryService, SetRetailXConnector connector) {
         super(new BorderLayout());
         this.addressStorage = addressStorage;
+        this.connector = connector;
         JPanel content = new JPanel(new BorderLayout(16, 10));
         content.setBorder(BorderFactory.createEmptyBorder(18, 18, 18, 18));
 
@@ -99,9 +119,137 @@ final class ProductCardDialog extends JPanel {
         tabs.addTab("Raw JSON", createRawJson(product));
         content.add(tabs, BorderLayout.CENTER);
 
+        JPanel actions = new JPanel(new BorderLayout());
+        actions.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
+        actions.add(printInfoButton, BorderLayout.LINE_END);
+        printInfoButton.addActionListener(event -> printProductInfo(product));
+        content.add(actions, BorderLayout.SOUTH);
+
         add(content, BorderLayout.CENTER);
         setPreferredSize(new Dimension(620, 540));
         loadImage(product);
+    }
+
+    private void printProductInfo(Product product) {
+        JComboBox<PaperSize> paperSize = new JComboBox<>(PaperSize.values());
+        JCheckBox includePhoto = new JCheckBox("Добавить чёрно-белое фото", originalImage != null);
+        includePhoto.setEnabled(originalImage != null);
+        if (originalImage == null) includePhoto.setToolTipText("Фото ещё не загружено или недоступно");
+        JPanel options = new JPanel(new GridBagLayout());
+        JLabel formatLabel = new JLabel("Формат листа");
+        formatLabel.setForeground(LABEL_COLOR);
+        GridBagConstraints formatConstraints = gridBagConstraints(0);
+        options.add(formatLabel, formatConstraints);
+        formatConstraints.gridx = 1;
+        formatConstraints.weightx = 1;
+        options.add(paperSize, formatConstraints);
+        GridBagConstraints photoConstraints = gridBagConstraints(1);
+        photoConstraints.gridwidth = 2;
+        options.add(includePhoto, photoConstraints);
+        int choice = JOptionPane.showConfirmDialog(this, options, "Печать информации о товаре",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (choice != JOptionPane.OK_OPTION) return;
+
+        printInfoButton.setEnabled(false);
+        printInfoButton.setText("Запрашиваем цены…");
+        BufferedImage photo = includePhoto.isSelected() && originalImage != null ? toGrayscale(originalImage) : null;
+        PaperSize selectedSize = (PaperSize) paperSize.getSelectedItem();
+        new SwingWorker<List<String>, Void>() {
+            @Override protected List<String> doInBackground() {
+                try {
+                    List<ProductDto> results = connector.getProducts(List.of(product.marking()))
+                            .get(12, TimeUnit.SECONDS);
+                    ProductDto match = results.stream()
+                            .filter(item -> item.marking() != null && item.marking().equalsIgnoreCase(product.marking()))
+                            .findFirst().orElse(results.size() == 1 ? results.get(0) : null);
+                    return match == null ? List.of() : productPrices(match);
+                } catch (Exception ignored) {
+                    return List.of();
+                }
+            }
+
+            @Override protected void done() {
+                try {
+                    List<String> prices = get();
+                    String priceNote = prices.isEmpty()
+                            ? "Ценника, к сожалению, нет. Узнайте цену в прайсчекере."
+                            : "";
+                    openProductPrintDialog(product, selectedSize, photo, prices, priceNote);
+                } catch (Exception error) {
+                    JOptionPane.showMessageDialog(ProductCardDialog.this,
+                            "Не удалось подготовить лист: " + safeMessage(error), "Печать",
+                            JOptionPane.ERROR_MESSAGE);
+                } finally {
+                    printInfoButton.setEnabled(true);
+                    printInfoButton.setText("Печать информационного листа…");
+                }
+            }
+        }.execute();
+    }
+
+    private void openProductPrintDialog(Product product, PaperSize size, BufferedImage photo,
+                                        List<String> prices, String priceNote) {
+        PrinterJob job = PrinterJob.getPrinterJob();
+        job.setJobName("Информация о товаре · " + product.name());
+        PageFormat page = job.defaultPage();
+        Paper paper = new Paper();
+        double width = size.widthMm / 25.4 * 72;
+        double height = size.heightMm / 25.4 * 72;
+        double margin = 9 / 25.4 * 72;
+        paper.setSize(width, height);
+        paper.setImageableArea(margin, margin, width - margin * 2, height - margin * 2);
+        page.setPaper(paper);
+        page.setOrientation(PageFormat.PORTRAIT);
+        job.setPrintable(new ProductInfoPrintable(product, photo, prices, priceNote,
+                LocalDate.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy"))), page);
+        if (!job.printDialog()) return;
+        try {
+            job.print();
+        } catch (Exception error) {
+            JOptionPane.showMessageDialog(this, "Не удалось напечатать лист: " + safeMessage(error),
+                    "Печать", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private static List<String> productPrices(ProductDto product) {
+        List<String> prices = new ArrayList<>();
+        appendPrices(prices, "Цена", product.pricesMap());
+        appendPrices(prices, "Цена 99", product.prices99Map());
+        return List.copyOf(prices);
+    }
+
+    private static void appendPrices(List<String> target, String group,
+                                     Map<String, com.fasterxml.jackson.databind.JsonNode> values) {
+        values.forEach((key, rawValue) -> {
+            com.fasterxml.jackson.databind.JsonNode value = rawValue != null && rawValue.isObject()
+                    ? rawValue.get("value") : rawValue;
+            if (value == null || value.isNull() || value.asText().isBlank()) return;
+            String label = switch (key) {
+                case "2" -> group + " (обычная)";
+                case "4" -> group + " (акционная)";
+                default -> group + " · " + key;
+            };
+            target.add(label + ": " + value.asText().replace('.', ',') + " ₽");
+        });
+    }
+
+    private static BufferedImage toGrayscale(BufferedImage source) {
+        BufferedImage gray = new BufferedImage(source.getWidth(), source.getHeight(), BufferedImage.TYPE_BYTE_GRAY);
+        Graphics2D graphics = gray.createGraphics();
+        try { graphics.drawImage(source, 0, 0, null); }
+        finally { graphics.dispose(); }
+        return gray;
+    }
+
+    private enum PaperSize {
+        A5("A5 · половина A4", 148, 210), A4("A4", 210, 297);
+        private final String label;
+        private final int widthMm;
+        private final int heightMm;
+        PaperSize(String label, int widthMm, int heightMm) {
+            this.label = label; this.widthMm = widthMm; this.heightMm = heightMm;
+        }
+        @Override public String toString() { return label; }
     }
 
     private JPanel createPriceHistory(Product product, PriceMonitoringTaskService service) {
@@ -408,5 +556,185 @@ final class ProductCardDialog extends JPanel {
 
     private static String safeMessage(Throwable error) {
         return error.getMessage() == null ? "ошибка сети или формата" : error.getMessage();
+    }
+
+    private static final class ProductInfoPrintable implements java.awt.print.Printable {
+        private static final Font TITLE = new Font(Font.SANS_SERIF, Font.BOLD, 21);
+        private static final Font SECTION = new Font(Font.SANS_SERIF, Font.BOLD, 12);
+        private static final Font BODY = new Font(Font.SANS_SERIF, Font.PLAIN, 10);
+        private static final Font SMALL = new Font(Font.SANS_SERIF, Font.PLAIN, 8);
+        private final Product product;
+        private final BufferedImage photo;
+        private final List<String> prices;
+        private final String priceNote;
+        private final String date;
+        private final BufferedImage qr;
+        private final BufferedImage barcode;
+
+        private ProductInfoPrintable(Product product, BufferedImage photo, List<String> prices,
+                                     String priceNote, String date) {
+            this.product = product;
+            this.photo = photo;
+            this.prices = List.copyOf(prices);
+            this.priceNote = priceNote;
+            this.date = date;
+            qr = encode(product.stCode(), BarcodeFormat.QR_CODE, 180, 180);
+            barcode = encode(product.barcode(), BarcodeFormat.CODE_128, 360, 90);
+        }
+
+        @Override public int print(java.awt.Graphics graphics, PageFormat page, int pageIndex) {
+            if (pageIndex > 0) return NO_SUCH_PAGE;
+            Graphics2D g = (Graphics2D) graphics.create();
+            try {
+                g.translate(page.getImageableX(), page.getImageableY());
+                g.setColor(Color.BLACK);
+                g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                double width = page.getImageableWidth();
+                double height = page.getImageableHeight();
+                double scale = Math.min(width / 540.0, height / 770.0);
+                g.scale(scale, scale);
+                int w = (int) (width / scale);
+                int h = (int) (height / scale);
+                int x = 0;
+                int y = 0;
+
+                g.setFont(TITLE);
+                y = drawWrapped(g, product.name(), x, y + 24, w, 28);
+                g.setFont(SMALL);
+                g.setColor(new Color(65, 65, 65));
+                y += 2;
+                y = drawWrapped(g, "Информация о товаре · " + date, x, y + 12, w, 12);
+                g.setColor(Color.BLACK);
+                g.drawLine(x, y + 3, w, y + 3);
+                y += 14;
+
+                int photoWidth = photo == null ? 0 : Math.min(150, w / 3);
+                int columnGap = photo == null ? 0 : 16;
+                int detailsWidth = w - photoWidth - columnGap;
+                if (photo != null) {
+                    int photoHeight = Math.min(190, (int) ((double) photo.getHeight() / photo.getWidth() * photoWidth));
+                    g.drawImage(photo, x, y, photoWidth, photoHeight, null);
+                    g.setFont(SMALL);
+                    g.drawRect(x, y, photoWidth, photoHeight);
+                }
+                int dx = x + photoWidth + columnGap;
+                int dy = y;
+                g.setFont(SECTION);
+                dy = drawSection(g, "Коды и цены", dx, dy, detailsWidth);
+                g.setFont(BODY);
+                List<String> keyValues = new ArrayList<>();
+            keyValues.add("Код SAP / SetRetailX: " + blankAsDash(product.stCode()));
+                keyValues.add("Артикул SetRetailX: " + blankAsDash(product.marking()));
+                keyValues.add("Штрихкод: " + blankAsDash(product.barcode()));
+                keyValues.addAll(prices);
+                if (prices.isEmpty()) keyValues.add(priceNote);
+                for (String item : keyValues) dy = drawWrapped(g, item, dx, dy + 14, detailsWidth, 13);
+                int codeY = Math.max(dy + 8, photo == null ? dy + 8 : y + 155);
+                if (qr != null) {
+                    g.drawImage(qr, dx, codeY, 72, 72, null);
+                    g.setFont(SMALL);
+                    g.drawString("QR SAP", dx, codeY + 83);
+                }
+                if (barcode != null) {
+                    int bx = dx + (qr == null ? 0 : 88);
+                    int bw = Math.max(100, detailsWidth - (qr == null ? 0 : 88));
+                    g.drawImage(barcode, bx, codeY + 8, bw, 48, null);
+                    g.setFont(SMALL);
+                    g.drawString(product.barcode(), bx, codeY + 68);
+                }
+                y = Math.max(y + (photo == null ? 0 : 190), codeY + 94);
+                y += 14;
+
+                String description = findDetail(product.details(), "description");
+                if (!description.isBlank()) {
+                    g.setFont(SECTION);
+                    y = drawSection(g, "Описание", x, y, w);
+                    g.setFont(BODY);
+                    y = drawWrapped(g, normalizeText(description), x, y + 12, w, 13);
+                    y += 8;
+                }
+
+                List<Map.Entry<String, String>> attributes = product.details().entrySet().stream()
+                        .filter(entry -> !HIDDEN_FIELDS.contains(normalizeKey(entry.getKey())))
+                        .filter(entry -> !entry.getValue().isBlank())
+                        .toList();
+                if (!attributes.isEmpty()) {
+                    g.setFont(SECTION);
+                    y = drawSection(g, "Характеристики", x, y, w);
+                    g.setFont(BODY);
+                    int rowHeight = 18;
+                    int labelWidth = Math.min(180, w / 3);
+                    for (Map.Entry<String, String> attribute : attributes) {
+                        if (y + rowHeight > h - 12) break;
+                        if ((y / rowHeight) % 2 == 0) {
+                            g.setColor(new Color(242, 242, 242));
+                            g.fillRect(x, y, w, rowHeight);
+                            g.setColor(Color.BLACK);
+                        }
+                        String key = LABELS.getOrDefault(normalizeKey(attribute.getKey()), humanize(attribute.getKey()));
+                        g.drawString(clip(g, key, labelWidth - 12), x + 6, y + 13);
+                        g.drawString(clip(g, normalizeText(attribute.getValue()), w - labelWidth - 12), x + labelWidth, y + 13);
+                        g.drawLine(x, y + rowHeight, w, y + rowHeight);
+                        y += rowHeight;
+                    }
+                }
+                return PAGE_EXISTS;
+            } finally {
+                g.dispose();
+            }
+        }
+
+        private static int drawSection(Graphics2D g, String title, int x, int y, int width) {
+            g.setColor(Color.BLACK);
+            g.drawString(title, x, y + 13);
+            g.drawLine(x, y + 17, x + width, y + 17);
+            return y + 18;
+        }
+
+        private static int drawWrapped(Graphics2D g, String text, int x, int y, int width, int lineHeight) {
+            FontMetrics metrics = g.getFontMetrics();
+            for (String paragraph : text.split("\\n")) {
+                StringBuilder line = new StringBuilder();
+                for (String word : paragraph.split("\\s+")) {
+                    if (word.isEmpty()) continue;
+                    String proposed = line.isEmpty() ? word : line + " " + word;
+                    if (metrics.stringWidth(proposed) > width && !line.isEmpty()) {
+                        g.drawString(line.toString(), x, y);
+                        y += lineHeight;
+                        line.setLength(0);
+                        line.append(word);
+                    } else if (line.isEmpty()) line.append(word);
+                    else line.append(' ').append(word);
+                }
+                if (!line.isEmpty()) { g.drawString(line.toString(), x, y); y += lineHeight; }
+            }
+            return y;
+        }
+
+        private static String clip(Graphics2D g, String text, int width) {
+            String clean = normalizeText(text);
+            if (g.getFontMetrics().stringWidth(clean) <= width) return clean;
+            while (!clean.isEmpty() && g.getFontMetrics().stringWidth(clean + "…") > width) {
+                clean = clean.substring(0, clean.length() - 1);
+            }
+            return clean + "…";
+        }
+
+        private static String normalizeText(String text) {
+            return text.replaceAll("<[^>]*>", " ").replaceAll("&nbsp;", " ")
+                    .replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">")
+                    .replaceAll("[\\r\\t ]+", " ").replaceAll("\\n\\s*", "\n").trim();
+        }
+
+        private static BufferedImage encode(String value, BarcodeFormat format, int width, int height) {
+            if (value == null || value.isBlank()) return null;
+            try {
+                return MatrixToImageWriter.toBufferedImage(new MultiFormatWriter().encode(value.trim(), format,
+                        width, height, Map.of(EncodeHintType.MARGIN, 1)));
+            } catch (WriterException | IllegalArgumentException ignored) {
+                return null;
+            }
+        }
     }
 }

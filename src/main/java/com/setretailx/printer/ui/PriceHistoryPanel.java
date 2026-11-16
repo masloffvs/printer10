@@ -262,7 +262,7 @@ final class PriceHistoryPanel extends JPanel {
             Graphics2D g = (Graphics2D) graphics.create();
             try {
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                int left = 58, right = getWidth() - 18, top = 39, bottom = getHeight() - 34;
+                int left = 58, right = getWidth() - 18, top = 52, bottom = getHeight() - 34;
                 if (right <= left || bottom <= top) return;
                 List<ChartPoint> points = chartPoints;
                 List<ChartSeries> series = chartSeries(points);
@@ -303,8 +303,6 @@ final class PriceHistoryPanel extends JPanel {
                 }
                 Color[] colors = {new Color(50, 150, 255), new Color(255, 166, 64),
                         new Color(69, 190, 130), new Color(209, 112, 235)};
-                int legendX = left;
-                int legendY = 15;
                 for (int s = 0; s < series.size(); s++) {
                     ChartSeries line = series.get(s);
                     g.setColor(colors[s % colors.length]);
@@ -326,13 +324,12 @@ final class PriceHistoryPanel extends JPanel {
                     }
                     String label = line.label();
                     g.setFont(new Font("DejaVu Sans", Font.PLAIN, 8));
-                    int legendWidth = g.getFontMetrics().stringWidth(label) + 23;
-                    int labelX = legendX;
-                    int labelY = legendY;
-                    if (labelX + legendWidth > right) { labelX = left; labelY += 12; }
+                    int columnWidth = Math.max(1, (right - left) / 2);
+                    int labelX = left + (s % 2) * columnWidth;
+                    int labelY = 27 + (s / 2) * 12;
+                    label = clipLegendLabel(g, label, columnWidth - 21);
                     g.drawLine(labelX, labelY - 3, labelX + 13, labelY - 3);
                     g.drawString(label, labelX + 17, labelY);
-                    legendX = labelX + legendWidth;
                 }
             } finally { g.dispose(); }
         }
@@ -354,6 +351,14 @@ final class PriceHistoryPanel extends JPanel {
                 result.add(new ChartSeries("99 · price4", points.stream().map(ChartPoint::promoPromo).toList()));
             }
             return result;
+        }
+
+        private String clipLegendLabel(Graphics2D g, String label, int maxWidth) {
+            if (g.getFontMetrics().stringWidth(label) <= maxWidth) return label;
+            while (!label.isEmpty() && g.getFontMetrics().stringWidth(label + "…") > maxWidth) {
+                label = label.substring(0, label.length() - 1);
+            }
+            return label.isEmpty() ? "" : label + "…";
         }
     }
 

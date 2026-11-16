@@ -33,10 +33,8 @@ import java.util.function.Consumer;
 final class ComparisonPanel extends JPanel {
     private static final int BATCH_SIZE = 50;
     private final DefaultTableModel model = readOnlyModel(
-            "Статус", "Артикул", "Штрихкод", "price1 · обычная", "price2 · до скидки",
-            "price3 · неизвестно", "price4 · на ценнике", "Итоговая (price4/2)",
-            "Обычная #1", "Обычная #2", "Обычная #3", "Обычная #4",
-            "99 #1", "99 #2", "99 #3", "99 #4", "Совпал #1", "Совпал #2", "Совпал #3", "Совпал #4", "Результат");
+            "Статус", "Товар · артикул / штрихкод", "Цены на ценнике · #1–#4",
+            "SetRetailX · обычная / акция", "Совпадение · #1–#4", "Результат");
     private final JTable table = new JTable(model);
     private final JLabel status = new JLabel("Ожидаю сканирование ценников.");
     private final ProductRepository repository;
@@ -49,12 +47,13 @@ final class ComparisonPanel extends JPanel {
         super(new BorderLayout(8, 8));
         this.repository = repository;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
-        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        table.setRowHeight(24);
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS);
+        table.setRowHeight(46);
         table.getTableHeader().setToolTipText("price1 — обычная цена, price2 — до акции/скидки, "
                 + "price4 — цена на ценнике после скидки; итоговая = price4, иначе price2. "
                 + "Назначение price3 неизвестно, поэтому оно не участвует в выводе о совпадении. "
-                + "«Совпал» сверяет известные priceN со слотами #N в pricesMap (обычные) и prices99Map.");
+                + "В сгруппированных ячейках значения показаны по номерам #1–#4; «Совпадение» сравнивает "
+                + "цену ценника с обычной ценой или акционной ценой SetRetailX.");
         add(new JScrollPane(table), BorderLayout.CENTER);
         JPanel footer = new JPanel(new BorderLayout(8, 0));
         footer.add(status, BorderLayout.CENTER);
@@ -229,44 +228,69 @@ final class ComparisonPanel extends JPanel {
     private void appendError(ScannedProbe probe, String error) {
         ScanRecord scan = new ScanRecord(probe, Map.of(), model.getRowCount());
         model.addRow(row(scan, error, null, null, null, null));
-        table.getModel().setValueAt(error, scan.row, 20);
+        table.getModel().setValueAt(error, scan.row, 5);
         setStatus(error);
     }
 
     private void setRowError(ScanRecord scan, String error) {
         Object[] values = row(scan, error, null, null, null, null);
-        values[20] = error;
+        values[5] = error;
         updateRow(scan, values);
         setStatus(error);
     }
 
     private Object[] row(ScanRecord scan, String state, Map<Integer, BigDecimal> normal,
                          Map<Integer, BigDecimal> promo, Map<Integer, Boolean> matches, String marking) {
-        Object[] values = new Object[21];
+        Object[] values = new Object[6];
         values[0] = state;
-        values[1] = marking == null || marking.isBlank() ? "—" : marking;
-        values[2] = scan.probe.barcode();
-        for (int i = 1; i <= 4; i++) values[2 + i] = format(scan.prices.get(i));
-        values[7] = format(finalPrice(scan.prices));
+        String article = marking == null || marking.isBlank() ? "—" : marking;
+        String barcode = scan.probe.barcode().isBlank() ? "—" : scan.probe.barcode();
+        values[1] = article + " / " + barcode;
+        values[2] = formatPriceSlots(scan.prices);
+        values[3] = formatSetRetailPrices(normal, promo);
+        List<String> matchSlots = new ArrayList<>();
         for (int i = 1; i <= 4; i++) {
-            values[7 + i] = format(normal == null ? null : normal.get(i));
-            values[11 + i] = format(promo == null ? null : promo.get(i));
             Boolean match = matches == null ? null : matches.get(i);
-            values[15 + i] = match == null ? "—" : match ? "✓" : "✗";
+            matchSlots.add("#" + i + " " + (match == null ? "—" : match ? "✓" : "✗"));
         }
+        values[4] = pairedSlots(matchSlots);
         if (matches == null) {
-            values[20] = "—";
+            values[5] = "—";
         } else if (matches.values().stream().anyMatch(Boolean.FALSE::equals)) {
-            values[20] = "Не совпадает";
+            values[5] = "Не совпадает";
         } else if (matches.values().stream().noneMatch(value -> value != null)) {
-            values[20] = "Нет данных для сравнения";
+            values[5] = "Нет данных для сравнения";
         } else {
-            values[20] = "Совпадает";
+            values[5] = "Совпадает";
         }
         if (matches != null && matches.values().stream().anyMatch(Boolean.FALSE::equals)) {
-            values[20] = "В очередь печати";
+            values[5] = "В очередь печати";
         }
         return values;
+    }
+
+    private static String formatPriceSlots(Map<Integer, BigDecimal> prices) {
+        List<String> slots = new ArrayList<>();
+        for (int i = 1; i <= 4; i++) {
+            BigDecimal value = prices == null ? null : prices.get(i);
+            slots.add("#" + i + " " + format(value));
+        }
+        return pairedSlots(slots);
+    }
+
+    private static String formatSetRetailPrices(Map<Integer, BigDecimal> normal, Map<Integer, BigDecimal> promo) {
+        List<String> slots = new ArrayList<>();
+        for (int i = 1; i <= 4; i++) {
+            BigDecimal standard = normal == null ? null : normal.get(i);
+            BigDecimal sale = promo == null ? null : promo.get(i);
+            slots.add("#" + i + " " + format(standard) + " / " + format(sale));
+        }
+        return pairedSlots(slots);
+    }
+
+    private static String pairedSlots(List<String> slots) {
+        return "<html>" + slots.get(0) + " · " + slots.get(1)
+                + "<br>" + slots.get(2) + " · " + slots.get(3) + "</html>";
     }
 
     private void updateRow(ScanRecord scan, Object[] values) {

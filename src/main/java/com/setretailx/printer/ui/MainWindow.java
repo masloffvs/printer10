@@ -668,7 +668,7 @@ public final class MainWindow extends JFrame {
     private void showProductCard(Product product) {
         if (product == null) return;
         workspace.addProductCard("Карточка — " + product.name(),
-                new ProductCardDialog(product, addressStorage, taskService));
+                new ProductCardDialog(product, addressStorage, taskService, network));
     }
 
     private void assignSelected(List<Integer> rows, AppConfig.PrintFormat format,

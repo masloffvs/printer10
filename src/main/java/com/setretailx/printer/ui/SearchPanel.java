@@ -5,6 +5,7 @@ import com.setretailx.printer.repository.ProductRepository.SearchOptions;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
+import javax.swing.JComboBox;
 import javax.swing.JInternalFrame;
 import javax.swing.JLabel;
 import javax.swing.JMenuItem;
@@ -15,6 +16,7 @@ import javax.swing.JSlider;
 import javax.swing.JTable;
 import javax.swing.JTextField;
 import javax.swing.JTree;
+import javax.swing.Scrollable;
 import javax.swing.ListSelectionModel;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.tree.DefaultMutableTreeNode;
@@ -25,6 +27,7 @@ import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.Rectangle;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.List;
@@ -40,8 +43,8 @@ final class SearchPanel extends JPanel {
     private final JTextField input = new JTextField();
     private final JButton category = new JButton("Выбрать категорию…");
     private final JLabel selectedCategory = new JLabel("Все категории");
-    private final javax.swing.JComboBox<String> attributeName = new javax.swing.JComboBox<>();
-    private final javax.swing.JComboBox<String> attributeValue = new javax.swing.JComboBox<>();
+    private final JComboBox<String> attributeName = new CompactComboBox();
+    private final JComboBox<String> attributeValue = new CompactComboBox();
     private final JSlider minimumPrice = new JSlider();
     private final JSlider maximumPrice = new JSlider();
     private final JLabel minimumPriceLabel = new JLabel("Без ограничения");
@@ -49,7 +52,7 @@ final class SearchPanel extends JPanel {
     private final JLabel status = new JLabel("Задайте запрос или фильтры и выполните поиск.");
     private final DefaultTableModel model = readOnlyModel("Товар", "Артикул", "Штрихкод", "Цена", "Остаток");
     private final JTable table = new JTable(model);
-    private final JPanel filters = new JPanel(new GridBagLayout());
+    private final JPanel filters = new FilterPanel();
     private final JButton find = new JButton("Найти товары");
     private final JButton clear = new JButton("Сбросить");
     private final Consumer<JPanel> openCategoryPicker;
@@ -95,6 +98,8 @@ final class SearchPanel extends JPanel {
         buildFilters();
         JScrollPane filterScroll = new JScrollPane(filters);
         filterScroll.setBorder(null);
+        filterScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        filterScroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
         filterScroll.getVerticalScrollBar().setUnitIncrement(14);
         filterPane.add(filterScroll, BorderLayout.CENTER);
 
@@ -128,6 +133,7 @@ final class SearchPanel extends JPanel {
         JPanel categoryChoice = new JPanel(new BorderLayout(0, 5));
         categoryChoice.setOpaque(false);
         selectedCategory.setForeground(javax.swing.UIManager.getColor("Label.disabledForeground"));
+        selectedCategory.setPreferredSize(new Dimension(240, selectedCategory.getPreferredSize().height));
         categoryChoice.add(category, BorderLayout.NORTH);
         categoryChoice.add(selectedCategory, BorderLayout.CENTER);
         filters.add(categoryChoice, at(c, 3));
@@ -438,9 +444,33 @@ final class SearchPanel extends JPanel {
         return modelRow >= 0 && modelRow < results.size() ? results.get(modelRow) : null;
     }
 
-    private static String selected(javax.swing.JComboBox<String> combo, String defaultValue) {
+    private static String selected(JComboBox<String> combo, String defaultValue) {
         String value = (String) combo.getSelectedItem();
         return value == null || value.equals(defaultValue) ? "" : value;
+    }
+
+    private static final class CompactComboBox extends JComboBox<String> {
+        private static final int MAX_PREFERRED_WIDTH = 240;
+
+        @Override public Dimension getPreferredSize() {
+            Dimension preferred = super.getPreferredSize();
+            preferred.width = Math.min(preferred.width, MAX_PREFERRED_WIDTH);
+            return preferred;
+        }
+    }
+
+    private static final class FilterPanel extends JPanel implements Scrollable {
+        private FilterPanel() { super(new GridBagLayout()); }
+
+        @Override public Dimension getPreferredScrollableViewportSize() { return getPreferredSize(); }
+        @Override public int getScrollableUnitIncrement(Rectangle visibleRect, int orientation, int direction) {
+            return 14;
+        }
+        @Override public int getScrollableBlockIncrement(Rectangle visibleRect, int orientation, int direction) {
+            return Math.max(14, visibleRect.height - 14);
+        }
+        @Override public boolean getScrollableTracksViewportWidth() { return true; }
+        @Override public boolean getScrollableTracksViewportHeight() { return false; }
     }
 
     private static DefaultTableModel readOnlyModel(String... columns) {
