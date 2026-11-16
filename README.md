@@ -17,6 +17,12 @@ java -jar target/printer-1.0.0-SNAPSHOT.jar
 
 On first launch the dark FlatLaf theme is installed before Swing components are created. SetRetailX credentials can be supplied through environment variables or a root `.env` file (same variable names as `.env.example`). `SETRETAILX_CONNECTION_RETRIES` configures how many times requests are retried after a detected closed-connection failure (default `5`; use `0` to disable retries).
 
+## Office peer mesh
+
+The **Пиры** window discovers SetRetailX Printer instances on the local IPv4 broadcast domain and listens on TCP/UDP port `45873`. Allow that port in the office firewall on trusted private networks. The first encrypted synchronization displays the remote Ed25519 SHA-256 fingerprint and requires explicit approval; compare it with the other computer through a separate trusted channel. Identity and trust records are stored under `~/.setretailx/peer-mesh` (or the equivalent user home directory).
+
+Synchronization is additive: it imports missing product rows, sales-point definitions and shelf items, storage addresses, boxes, and stored-product rows. Existing rows are not overwritten. Sales, receipts, print history, application settings, and credentials are not included.
+
 ## UI layout rule
 
 In MDI work windows, primary and frequent actions (including save, close, scan-session completion, and printing) belong in a persistent footer at the bottom of the window. Keep selection and filtering controls near the top, and let the central content area use the remaining space. Avoid placing a window's only primary action in a scrollable area.

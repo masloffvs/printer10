@@ -17,6 +17,7 @@ import com.setretailx.printer.repository.SalesPointRepository.ShelfItem;
 import com.setretailx.printer.service.SetRetailXConnector;
 import com.setretailx.printer.service.ExchangeEvent;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
+import com.setretailx.printer.service.PeerMeshService;
 import com.setretailx.printer.service.setretailx.dto.PrintGroupItemDto;
 import com.setretailx.printer.service.setretailx.dto.PrintGroupResponseDto;
 
@@ -51,6 +52,9 @@ public final class MainWindow extends JFrame {
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
             this::clearQueue, this::moveSelected, this::printAssigned);
     private final ExchangePanel exchange = new ExchangePanel(this::checkNetworkConnection);
+    private final PeerMeshService peerMeshService = new PeerMeshService(
+            peer -> SwingUtilities.invokeLater(this::refreshPeerMesh), PeerMeshPanel::confirmTrust);
+    private final PeerMeshPanel peerMeshPanel = new PeerMeshPanel(peerMeshService);
     private final PrintHistoryPanel history = new PrintHistoryPanel(this::restoreBatch, this::refreshHistory);
     private final SetRetailXConnector network = new SetRetailXConnector(event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
@@ -108,6 +112,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("search", search, 760, 480);
         workspace.addWindow("queue", queue, 760, 440);
         workspace.addWindow("exchange", exchange, 650, 400);
+        workspace.addWindow("peerMesh", peerMeshPanel, 850, 500);
         workspace.addWindow("history", history, 760, 420);
         workspace.addWindow("priceChangePrintHistory", changedPrintHistoryPanel, 950, 540);
         workspace.addWindow("tasks", taskPanel, 900, 520);
@@ -148,6 +153,7 @@ public final class MainWindow extends JFrame {
                 priceChanges.close();
                 changedPrintHistoryPanel.close();
                 network.close();
+                peerMeshService.close();
             }
         });
     }
@@ -169,6 +175,10 @@ public final class MainWindow extends JFrame {
                 status.setText("Соединение с SetRetailX проверено");
             }
         }));
+    }
+
+    private void refreshPeerMesh() {
+        if (peerMeshPanel != null) peerMeshPanel.refreshPeers();
     }
 
     private void submitScan() {

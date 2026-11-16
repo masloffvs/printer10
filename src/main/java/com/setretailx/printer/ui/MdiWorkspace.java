@@ -41,6 +41,7 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("search", "Поиск товаров", "Поиск"),
             new WindowSpec("queue", "Печать ценников", "Печать ценников"),
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
+            new WindowSpec("peerMesh", "Офисная peer-сеть", "Пиры"),
             new WindowSpec("history", "История печати", "История"),
             new WindowSpec("priceChangePrintHistory", "История изменённых ценников и отчётов", "История изменений · печать"),
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
@@ -253,7 +254,7 @@ final class MdiWorkspace extends JPanel {
         addNavigationGroup("СКЛАД", "storageAddresses", "addressCreate", "palletScanning", "storage", "addressSearch");
         addNavigationGroup("ТОРГОВЫЕ ТОЧКИ", "salesPointMap", "salesPointEditor");
         addNavigationGroup("ИСТОРИЯ И ЗАДАЧИ", "history", "priceChangePrintHistory", "priceChanges", "tasks");
-        addNavigationGroup("ОБМЕН И СЕРВИС", "exchange", "environment");
+        addNavigationGroup("ОБМЕН И СЕРВИС", "exchange", "peerMesh", "environment");
         dynamicToolbarIndex = toolBar.getComponentCount();
         toolBar.addSeparator();
         JButton cascade = new JButton("Каскад");
