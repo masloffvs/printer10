@@ -29,6 +29,8 @@ import java.util.function.Consumer;
 
 /** Internal asynchronous HTTP/JSON-RPC transport used only by SetRetailXConnector. */
 final class SetRetailXClient implements AutoCloseable {
+    private static final Duration HTTP_CONNECT_TIMEOUT = Duration.ofMinutes(6);
+    private static final Duration HTTP_REQUEST_TIMEOUT = Duration.ofMinutes(6);
     private static final String REQUEST_CLASS = "ru.crystals.commons.jsonrpc.domain.JsonRpcRequest";
     private static final String LOGIN_ENDPOINT = "java:app/SET-Users/SessionManagerBean!"
             + "ru.crystals.setretailx.users.ejb.interfaces.ISessionManagerLocal";
@@ -46,7 +48,7 @@ final class SetRetailXClient implements AutoCloseable {
     });
     private final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
     private final HttpClient http = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(8))
+            .connectTimeout(HTTP_CONNECT_TIMEOUT)
             .followRedirects(HttpClient.Redirect.NORMAL)
             .cookieHandler(cookies)
             .executor(executor)
@@ -137,7 +139,7 @@ final class SetRetailXClient implements AutoCloseable {
         loginInFlight = attempt;
         String credentials = Base64.getEncoder().encodeToString(
                 (username + ":" + password).getBytes(StandardCharsets.UTF_8));
-        HttpRequest request = requestBuilder(payload, Duration.ofSeconds(10))
+        HttpRequest request = requestBuilder(payload, HTTP_REQUEST_TIMEOUT)
                 .header("Authorization", "Basic " + credentials)
                 .header("Origin", baseUrl)
                 .header("Referer", baseUrl + "/login?redirect=/products/search")
@@ -202,7 +204,7 @@ final class SetRetailXClient implements AutoCloseable {
             }
             String methodName = requestPayload.path("method").asText("JSON-RPC");
             emit("Отправлен запрос: " + methodName, "URL: " + safeUrl() + "\n" + safeRequestBody(requestPayload));
-            HttpRequest request = requestBuilder(requestPayload, Duration.ofSeconds(15))
+            HttpRequest request = requestBuilder(requestPayload, HTTP_REQUEST_TIMEOUT)
                     .header("Referer", refererFor(methodName))
                     .build();
             return send(request, methodName);
