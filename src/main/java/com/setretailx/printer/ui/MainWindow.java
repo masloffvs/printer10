@@ -284,7 +284,7 @@ public final class MainWindow extends JFrame {
         }
         status.setText("Ищем товар " + probe.barcode() + " для паллеты…");
         runBackground(() -> {
-            Product local = products.findByBarcode(probe.barcode());
+            Product local = products.findByBarcodeForPallet(probe.barcode());
             return local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
         }, product -> {
             if (product == null) {

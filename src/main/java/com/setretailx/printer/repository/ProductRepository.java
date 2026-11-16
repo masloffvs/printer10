@@ -344,6 +344,42 @@ public final class ProductRepository {
         }
     }
 
+    /**
+     * Fast exact lookup for pallet scans. The pallet workflow only needs the
+     * product identity and label fields, so avoid loading correlated category
+     * and attribute details on a cache miss.
+     */
+    public Product findByBarcodeForPallet(String barcode) throws SQLException {
+        if (barcode == null || barcode.isBlank()) return null;
+        String normalizedBarcode = barcode.trim();
+        CatalogCache cache = currentCache();
+        if (cache != null) {
+            Product cached = cache.byBarcode().get(normalizedBarcode);
+            if (cached != null) return cached;
+        }
+
+        try (Connection connection = connect()) {
+            Set<String> productColumns = columns(connection);
+            if (!productColumns.contains("product_id") || !productColumns.contains("barcode")) {
+                throw new SQLException("В таблице products отсутствуют поля barcode или product_id.");
+            }
+            String sql = selectBasicColumns(productColumns) + " FROM products WHERE barcode = ? LIMIT 1";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, normalizedBarcode);
+                try (ResultSet rows = statement.executeQuery()) {
+                    return rows.next() ? product(rows) : null;
+                }
+            }
+        }
+    }
+
+    private String selectBasicColumns(Set<String> columns) {
+        List<String> standard = List.of("product_id", "name", "vendor_code", "barcode", "uom", "price", "total_qty");
+        return "SELECT " + standard.stream()
+                .map(column -> (columns.contains(column) ? quote(column) : "NULL") + " AS \"" + column + "\"")
+                .collect(java.util.stream.Collectors.joining(", "));
+    }
+
     /** Finds a local product by the canonical article used by price labels. */
     public Product findByMarking(String marking) throws SQLException {
         if (marking == null || marking.isBlank()) return null;
