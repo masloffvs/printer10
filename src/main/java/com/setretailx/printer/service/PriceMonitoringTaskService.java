@@ -430,25 +430,115 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         if (result == null || result.isMissingNode() || result.isNull()) {
             throw new IllegalStateException("findChecks не вернул result; синхронизация остановлена без отметки об успехе.");
         }
-        JsonNode rows = result;
-        if (result.isArray() && result.size() == 2) {
-            if (result.get(1).isArray()) rows = result.get(1);
-            else if (result.get(0).isArray()) rows = result.get(0);
+        JsonNode rows = findCheckRows(result, 0);
+        if (rows == null && result.isObject() && hasCheckId(result)) {
+            rows = JSON.createArrayNode().add(result);
         }
-        if (rows.isObject()) {
-            for (String property : List.of("checks", "list", "items", "result", "data")) {
-                JsonNode nested = rows.path(property);
-                if (nested.isArray()) { rows = nested; break; }
-            }
+        if (rows == null && result.isArray() && isCheckIdArray(result)) {
+            var normalized = JSON.createArrayNode();
+            for (JsonNode id : result) normalized.addObject().put("id", id.asLong());
+            rows = normalized;
         }
-        if (!rows.isArray()) throw new IllegalStateException("findChecks вернул неожиданный формат списка.");
+        if (rows == null) {
+            String shape = result.isObject()
+                    ? "объект с полями " + fieldNames(result)
+                    : "значение типа " + result.getNodeType();
+            throw new IllegalStateException("findChecks вернул неожиданный формат списка (" + shape
+                    + "); история продаж остановлена без продвижения watermark. Ответ (фрагмент): "
+                    + diagnosticSnippet(result));
+        }
         List<JsonNode> checks = new ArrayList<>();
         for (JsonNode row : rows) {
-            if (!row.isObject()) throw new IllegalStateException("findChecks содержит строку неожиданного формата.");
+            if (!row.isObject()) {
+                throw new IllegalStateException("findChecks содержит строку неожиданного формата. Строка (фрагмент): "
+                        + diagnosticSnippet(row));
+            }
             checkId(row); // Fail rather than advance the watermark past an unidentifiable receipt.
             checks.add(row);
         }
         return checks;
+    }
+
+    /** Finds a receipt array in common JSON-RPC collection and paging wrappers. */
+    private static JsonNode findCheckRows(JsonNode node, int depth) {
+        if (node == null || depth > 8) return null;
+        if (node.isTextual()) {
+            String value = node.asText().trim();
+            if (value.startsWith("[") || value.startsWith("{")) {
+                try { return findCheckRows(JSON.readTree(value), depth + 1); }
+                catch (JsonProcessingException ignored) { return null; }
+            }
+            return null;
+        }
+        if (node.isArray()) {
+            if (isCheckRowArray(node)) return node;
+            if (isCheckIdArray(node)) {
+                var normalized = JSON.createArrayNode();
+                for (JsonNode id : node) normalized.addObject().put("id", id.asLong());
+                return normalized;
+            }
+            JsonNode emptyArray = null;
+            for (JsonNode child : node) {
+                JsonNode found = findCheckRows(child, depth + 1);
+                if (found != null && !found.isEmpty()) return found;
+                if (found != null) emptyArray = found;
+            }
+            return emptyArray;
+        }
+        if (!node.isObject()) return null;
+
+        for (String property : List.of("checks", "list", "items", "result", "data", "rows",
+                "records", "objects", "values", "content", "elements")) {
+            JsonNode nested = node.get(property);
+            if (nested == null) continue;
+            JsonNode found = findCheckRows(nested, depth + 1);
+            if (found != null) return found;
+        }
+        if (hasCheckId(node)) return JSON.createArrayNode().add(node);
+        // Some Java collection serializers wrap the actual values under implementation-specific keys.
+        for (var fields = node.fields(); fields.hasNext();) {
+            var field = fields.next();
+            if (List.of("@class", "class", "total", "count", "size").contains(field.getKey())) continue;
+            JsonNode found = findCheckRows(field.getValue(), depth + 1);
+            if (found != null && !found.isEmpty()) return found;
+        }
+        return null;
+    }
+
+    private static boolean isCheckRowArray(JsonNode rows) {
+        if (!rows.isArray()) return false;
+        for (JsonNode row : rows) {
+            if (!row.isObject() || !hasCheckId(row)) return false;
+        }
+        return true;
+    }
+
+    private static boolean hasCheckId(JsonNode summary) {
+        JsonNode id = summary.path("id");
+        if (id.isMissingNode() || id.isNull() || id.asText().isBlank()) id = summary.path("checkId");
+        return id.isValueNode() && id.asLong(0) > 0;
+    }
+
+    private static boolean isCheckIdArray(JsonNode rows) {
+        if (!rows.isArray() || rows.isEmpty()) return false;
+        for (JsonNode row : rows) {
+            if (!row.isIntegralNumber() || row.asLong(0) <= 0) return false;
+        }
+        return true;
+    }
+
+    private static String fieldNames(JsonNode object) {
+        List<String> names = new ArrayList<>();
+        object.fieldNames().forEachRemaining(names::add);
+        return names.isEmpty() ? "нет" : String.join(", ", names);
+    }
+
+    /** Keeps enough of an unexpected response in the task error to diagnose its shape without logging a full payload. */
+    private static String diagnosticSnippet(JsonNode node) {
+        final int maxLength = 600;
+        String json = node == null ? "null" : node.toString().replaceAll("\\s+", " ").trim();
+        if (json.length() <= maxLength) return json;
+        return json.substring(0, maxLength) + "… [фрагмент усечён; всего символов: " + json.length() + "]";
     }
 
     private static long checkId(JsonNode summary) {
