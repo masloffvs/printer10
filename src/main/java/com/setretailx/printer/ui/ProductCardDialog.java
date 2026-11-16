@@ -4,6 +4,7 @@ import com.setretailx.printer.model.Product;
 import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.repository.AddressStorageRepository.LocationResult;
 import com.setretailx.printer.service.ProductImageService;
+import com.setretailx.printer.service.PriceMonitoringTaskService;
 
 import javax.imageio.ImageIO;
 import javax.swing.BorderFactory;
@@ -75,7 +76,8 @@ final class ProductCardDialog extends JPanel {
     private final AddressStorageRepository addressStorage;
     private BufferedImage originalImage;
 
-    ProductCardDialog(Product product, AddressStorageRepository addressStorage) {
+    ProductCardDialog(Product product, AddressStorageRepository addressStorage,
+                      PriceMonitoringTaskService priceHistoryService) {
         super(new BorderLayout());
         this.addressStorage = addressStorage;
         JPanel content = new JPanel(new BorderLayout(16, 10));
@@ -92,12 +94,22 @@ final class ProductCardDialog extends JPanel {
         tabs.addTab("Общее", createOverview(product));
         tabs.addTab("Характеристики", createCharacteristics(product));
         tabs.addTab("Размещение", createLocations(product));
+        tabs.addTab("История цен", createPriceHistory(product, priceHistoryService));
         tabs.addTab("Raw JSON", createRawJson(product));
         content.add(tabs, BorderLayout.CENTER);
 
         add(content, BorderLayout.CENTER);
         setPreferredSize(new Dimension(620, 540));
         loadImage(product);
+    }
+
+    private JPanel createPriceHistory(Product product, PriceMonitoringTaskService service) {
+        if (product.marking() == null || product.marking().isBlank()) {
+            JPanel panel = new JPanel(new BorderLayout());
+            panel.add(new JLabel("Для этого товара не указан артикул — история цен недоступна."), BorderLayout.NORTH);
+            return panel;
+        }
+        return new PriceHistoryPanel(service, product.marking(), product.name(), product.barcode());
     }
 
     private JPanel createLocations(Product product) {

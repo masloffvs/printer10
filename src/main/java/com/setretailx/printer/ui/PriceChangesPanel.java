@@ -6,24 +6,38 @@ import com.setretailx.printer.service.PriceMonitoringTaskService;
 import com.setretailx.printer.model.BarInput;
 
 import javax.swing.BorderFactory;
+import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JSplitPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
 import javax.swing.Timer;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.FlowLayout;
+import java.awt.RenderingHints;
+import java.awt.print.PageFormat;
+import java.awt.print.Paper;
+import java.awt.print.Printable;
+import java.awt.print.PrinterJob;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /** Separate MDI view of the detected product price changes. */
 @SuppressWarnings("serial")
@@ -42,6 +56,8 @@ final class PriceChangesPanel extends JPanel {
     private final JComboBox<PriceFilter> priceType = new JComboBox<>(PriceFilter.values());
     private final JComboBox<String> priceNumber = new JComboBox<>(new String[]{
             "Все позиции", "#1 · обычная", "#2 · до скидки", "#3 · неизвестно", "#4 · со скидкой"});
+    private final JButton printSelected = new JButton("Печать выделенных строк…");
+    private final ChangeOverviewChart chart = new ChangeOverviewChart();
     private final JLabel count = new JLabel(" ");
     private final Timer refreshTimer;
 
@@ -58,8 +74,11 @@ final class PriceChangesPanel extends JPanel {
         filters.add(priceType);
         filters.add(new JLabel("Номер:"));
         filters.add(priceNumber);
+        printSelected.setEnabled(false);
+        printSelected.addActionListener(event -> printSelectedRows());
+        filters.add(printSelected);
         add(filters, BorderLayout.NORTH);
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setFillsViewportHeight(true);
         table.setToolTipText("Нажмите на цену «Было» или «Стало», чтобы открыть полную историю цен артикула");
         table.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
@@ -72,7 +91,13 @@ final class PriceChangesPanel extends JPanel {
                 if (change != null) openHistory.open(change.marking(), change.name(), change.barcode());
             }
         });
-        add(new JScrollPane(table), BorderLayout.CENTER);
+        table.getSelectionModel().addListSelectionListener(event -> {
+            if (!event.getValueIsAdjusting()) printSelected.setEnabled(table.getSelectedRowCount() > 0);
+        });
+        JSplitPane content = new JSplitPane(JSplitPane.VERTICAL_SPLIT, chart, new JScrollPane(table));
+        content.setResizeWeight(.28);
+        content.setDividerLocation(155);
+        add(content, BorderLayout.CENTER);
         JPanel footer = new JPanel(new BorderLayout(4, 4));
         footer.add(count, BorderLayout.NORTH);
         JLabel path = new JLabel("База истории: " + service.databasePath());
@@ -94,12 +119,19 @@ final class PriceChangesPanel extends JPanel {
 
     private void refresh() {
         try {
+            Set<String> selectedRows = new HashSet<>();
+            for (int viewRow : table.getSelectedRows()) {
+                Object value = model.getValueAt(table.convertRowIndexToModel(viewRow), 0);
+                if (value instanceof ChangeRow row) selectedRows.add(row.selectionKey());
+            }
+            table.clearSelection();
             String query = search.getText().trim().toLowerCase(Locale.ROOT);
             String barcodeQuery = BarInput.barcode(query).orElse("").toLowerCase(Locale.ROOT);
             PriceFilter filter = (PriceFilter) priceType.getSelectedItem();
             int selectedNumber = priceNumber.getSelectedIndex();
             List<ChangeRow> visible = new ArrayList<>();
             List<PriceMonitoringTaskService.PriceChange> changes = service.recentChanges(1000);
+            chart.setChanges(changes);
             for (var change : changes) {
                 String searchable = (change.marking() + " " + change.name() + " " + change.barcode()).toLowerCase(Locale.ROOT);
                 if (!query.isEmpty() && !searchable.contains(query)
@@ -109,11 +141,172 @@ final class PriceChangesPanel extends JPanel {
             }
             visible.sort((left, right) -> Double.compare(right.detectedAt(), left.detectedAt()));
             model.setRowCount(0);
-            for (ChangeRow entry : visible) model.addRow(new Object[]{entry, entry.marking(),
-                    entry.name(), entry.barcode(), entry.priceType(), entry.oldValue(), entry.newValue(), entry.delta()});
+            for (int i = 0; i < visible.size(); i++) {
+                ChangeRow entry = visible.get(i);
+                model.addRow(new Object[]{entry, entry.marking(), entry.name(), entry.barcode(), entry.priceType(),
+                        entry.oldValue(), entry.newValue(), entry.delta()});
+                if (selectedRows.contains(entry.selectionKey())) {
+                    int viewRow = table.convertRowIndexToView(i);
+                    if (viewRow >= 0) table.addRowSelectionInterval(viewRow, viewRow);
+                }
+            }
             count.setText("Показано изменений цен: " + visible.size()
                     + (changes.size() >= 1000 ? " · просмотрены последние 1000 событий" : ""));
         } catch (SQLException error) { count.setText("Не удалось загрузить историю: " + error.getMessage()); }
+    }
+
+    private void printSelectedRows() {
+        int[] selected = table.getSelectedRows();
+        if (selected.length == 0) return;
+        List<ChangeRow> rows = new ArrayList<>(selected.length);
+        for (int viewRow : selected) {
+            Object value = model.getValueAt(table.convertRowIndexToModel(viewRow), 0);
+            if (value instanceof ChangeRow row) rows.add(row);
+        }
+        if (rows.isEmpty()) return;
+        rows.sort((left, right) -> Double.compare(right.detectedAt(), left.detectedAt()));
+        PrinterJob job = PrinterJob.getPrinterJob();
+        job.setJobName("Выбранные изменения цен · " + rows.size() + " строк");
+        PageFormat page = job.defaultPage();
+        Paper paper = new Paper();
+        double width = 210 / 25.4 * 72, height = 297 / 25.4 * 72, margin = 12 / 25.4 * 72;
+        paper.setSize(width, height);
+        paper.setImageableArea(margin, margin, width - 2 * margin, height - 2 * margin);
+        page.setPaper(paper);
+        page.setOrientation(PageFormat.LANDSCAPE);
+        job.setPrintable(new SelectedChangesPrintable(rows), page);
+        if (!job.printDialog()) return;
+        try {
+            job.print();
+            count.setText("На печать отправлено выделенных строк: " + rows.size());
+        } catch (Exception error) {
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            count.setText("Не удалось напечатать выбранные изменения: " + cause.getMessage());
+        }
+    }
+
+    private final class ChangeOverviewChart extends JPanel {
+        private List<PriceMonitoringTaskService.PriceChange> changes = List.of();
+
+        private ChangeOverviewChart() {
+            setBorder(BorderFactory.createTitledBorder("Обзор изменений цен · последние 7 дней"));
+            setPreferredSize(new java.awt.Dimension(600, 155));
+            setMinimumSize(new java.awt.Dimension(300, 100));
+        }
+
+        private void setChanges(List<PriceMonitoringTaskService.PriceChange> value) {
+            changes = List.copyOf(value);
+            repaint();
+        }
+
+        @Override protected void paintComponent(Graphics graphics) {
+            super.paintComponent(graphics);
+            Graphics2D g = (Graphics2D) graphics.create();
+            try {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                int left = 45, right = getWidth() - 15, top = 24, bottom = getHeight() - 27;
+                if (right <= left || bottom <= top) return;
+                LocalDate today = LocalDate.now();
+                int[] totals = new int[7];
+                ZoneId zone = ZoneId.systemDefault();
+                for (var change : changes) {
+                    LocalDate day = Instant.ofEpochMilli((long) (change.detectedAt() * 1000)).atZone(zone).toLocalDate();
+                    long offset = java.time.temporal.ChronoUnit.DAYS.between(today.minusDays(6), day);
+                    if (offset >= 0 && offset < totals.length) totals[(int) offset]++;
+                }
+                int max = java.util.Arrays.stream(totals).max().orElse(0);
+                int scale = Math.max(1, max);
+                g.setFont(new Font("DejaVu Sans", Font.PLAIN, 8));
+                for (int tick = 0; tick <= 2; tick++) {
+                    int y = bottom - (bottom - top) * tick / 2;
+                    int value = scale * tick / 2;
+                    g.setColor(new Color(218, 218, 218));
+                    g.drawLine(left, y, right, y);
+                    g.setColor(new Color(65, 65, 65));
+                    g.drawString(Integer.toString(value), 8, y + 3);
+                }
+                int slot = (right - left) / totals.length;
+                for (int i = 0; i < totals.length; i++) {
+                    int barHeight = (int) Math.round((double) totals[i] / scale * (bottom - top));
+                    int barWidth = Math.max(5, Math.min(32, slot - 10));
+                    int x = left + i * slot + (slot - barWidth) / 2;
+                    int y = bottom - barHeight;
+                    g.setColor(Color.BLACK);
+                    g.fillRect(x, y, barWidth, barHeight);
+                    g.setFont(new Font("DejaVu Sans", Font.BOLD, 8));
+                    String number = Integer.toString(totals[i]);
+                    g.drawString(number, x + (barWidth - g.getFontMetrics().stringWidth(number)) / 2, Math.max(top + 9, y - 3));
+                    g.setFont(new Font("DejaVu Sans", Font.PLAIN, 8));
+                    String day = today.minusDays(6L - i).format(DateTimeFormatter.ofPattern("dd.MM"));
+                    g.drawString(day, x + (barWidth - g.getFontMetrics().stringWidth(day)) / 2, getHeight() - 8);
+                }
+                g.setColor(new Color(70, 70, 70));
+                g.drawString("Событий изменения цены", left, 15);
+            } finally { g.dispose(); }
+        }
+    }
+
+    private static final class SelectedChangesPrintable implements Printable {
+        private static final int HEADER = 70, TABLE_HEADER = 22, ROW_HEIGHT = 25, FOOTER = 22;
+        private final List<ChangeRow> rows;
+
+        private SelectedChangesPrintable(List<ChangeRow> rows) { this.rows = List.copyOf(rows); }
+
+        @Override public int print(Graphics graphics, PageFormat page, int pageIndex) {
+            double width = page.getImageableWidth(), height = page.getImageableHeight();
+            int capacity = Math.max(1, (int) ((height - HEADER - TABLE_HEADER - FOOTER) / ROW_HEIGHT));
+            int pages = (rows.size() + capacity - 1) / capacity;
+            if (pageIndex >= pages) return Printable.NO_SUCH_PAGE;
+            Graphics2D g = (Graphics2D) graphics.create();
+            try {
+                g.translate(page.getImageableX(), page.getImageableY());
+                g.setColor(Color.BLACK);
+                g.setFont(new Font("DejaVu Sans", Font.BOLD, 15));
+                g.drawString("ВЫБРАННЫЕ ИЗМЕНЕНИЯ ЦЕН", 0, 18);
+                g.setFont(new Font("DejaVu Sans", Font.PLAIN, 8));
+                g.drawString("Строк: " + rows.size() + " · " + LocalDate.now(), 0, 35);
+                g.setStroke(new java.awt.BasicStroke(1.5f));
+                g.drawLine(0, 47, (int) width, 47);
+                double[] x = {0, width * .12, width * .40, width * .55, width * .70, width * .85};
+                double[] w = {width * .12, width * .28, width * .15, width * .15, width * .15, width * .15};
+                g.setColor(new Color(217, 217, 217));
+                g.fillRect(0, HEADER, (int) width, TABLE_HEADER);
+                g.setColor(Color.BLACK);
+                g.setFont(new Font("DejaVu Sans", Font.BOLD, 8));
+                String[] heads = {"КОГДА", "ТОВАР · АРТИКУЛ", "ПОЗИЦИЯ", "ЦЕНА ДО", "ЦЕНА ПОСЛЕ", "ИЗМЕНЕНИЕ"};
+                for (int col = 0; col < heads.length; col++) g.drawString(heads[col], (int) x[col] + 3, HEADER + 14);
+                int start = pageIndex * capacity, end = Math.min(rows.size(), start + capacity);
+                for (int i = start; i < end; i++) {
+                    ChangeRow row = rows.get(i);
+                    int y = HEADER + TABLE_HEADER + (i - start) * ROW_HEIGHT;
+                    String[] cells = {formatEpoch(row.detectedAt()), row.name() + " · " + row.marking(), row.priceType(),
+                            row.oldValue(), row.newValue(), row.delta()};
+                    g.setColor(Color.BLACK);
+                    g.setFont(new Font("DejaVu Sans", Font.PLAIN, 8));
+                    for (int col = 0; col < cells.length; col++) g.drawString(clip(g, cells[col], w[col] - 6), (int) x[col] + 3, y + 16);
+                    g.setColor(new Color(187, 187, 187));
+                    g.drawLine(0, y + ROW_HEIGHT, (int) width, y + ROW_HEIGHT);
+                }
+                int footerY = (int) height - FOOTER;
+                g.setColor(new Color(187, 187, 187));
+                g.drawLine(0, footerY, (int) width, footerY);
+                g.setColor(new Color(51, 51, 51));
+                g.setFont(new Font("DejaVu Sans", Font.PLAIN, 7));
+                g.drawString("Источник: история изменений цен · Обычная цена — pricesMap · Цена 99 — prices99Map",
+                        0, footerY + 10);
+                String pageLabel = "Лист " + (pageIndex + 1) + " / " + pages;
+                g.drawString(pageLabel, (int) (width - g.getFontMetrics().stringWidth(pageLabel)), footerY + 19);
+                return Printable.PAGE_EXISTS;
+            } finally { g.dispose(); }
+        }
+
+        private static String clip(Graphics2D g, String value, double width) {
+            String text = value == null ? "" : value.replaceAll("[\\r\\n\\t]", " ");
+            if (g.getFontMetrics().stringWidth(text) <= width) return text;
+            while (!text.isEmpty() && g.getFontMetrics().stringWidth(text + "…") > width)
+                text = text.substring(0, text.length() - 1);
+            return text.isEmpty() ? "" : text + "…";
+        }
     }
 
     private static final class ChangeRow {
@@ -134,6 +327,9 @@ final class PriceChangesPanel extends JPanel {
         String newValue() { return newValue; }
         String delta() { return delta; }
         double detectedAt() { return detectedAt; }
+        String selectionKey() {
+            return detectedAt + "\u0000" + marking + "\u0000" + priceType + "\u0000" + oldValue + "\u0000" + newValue;
+        }
         @Override public String toString() { return formatEpoch(detectedAt); }
     }
 
