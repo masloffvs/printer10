@@ -148,6 +148,17 @@ public final class SalesPointRepository {
         return result;
     }
 
+    /** Distinct SetRetailX item/barcode keys stored on all locally configured sales points. */
+    public List<String> productItemOrBarcodes() throws SQLException {
+        List<String> result = new ArrayList<>();
+        try (Connection connection = connect(); Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT DISTINCT TRIM(article) FROM sales_point_items "
+                     + "WHERE article IS NOT NULL AND TRIM(article)<>'' ORDER BY TRIM(article) COLLATE NOCASE")) {
+            while (rows.next()) result.add(rows.getString(1));
+        }
+        return result;
+    }
+
     /** Insert or replace the current shelf label; this intentionally does not keep price history. */
     public void putItem(long pointId, String article, String name, String price) throws SQLException {
         putItem(pointId, article, name, price, "");

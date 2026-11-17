@@ -18,6 +18,7 @@ import com.setretailx.printer.service.setretailx.dto.SimpleProductsByFilterRespo
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Collection;
 import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
@@ -85,6 +86,12 @@ public final class SetRetailXConnector implements AutoCloseable {
 
     /** Lists receipt summaries for a time range; the transport supplies the session token. */
     public CompletableFuture<JsonNode> findChecks(Instant from, Instant to, int limit) {
+        return findChecks(from, to, limit, List.of());
+    }
+
+    /** Lists receipts for a time range and filters them by configured product item/barcode keys. */
+    public CompletableFuture<JsonNode> findChecks(Instant from, Instant to, int limit,
+                                                   Collection<String> productItemOrBarcodes) {
         ArrayNode arguments = JSON.createArrayNode();
         addCheckSearchArgument(arguments, "CheckType",
                 "CHECK,REFUND_CHECK,CANCEL_CHECK,DEFERRED_CHECK,EXPENSE_RECEIPT,RETURN_EXPENSE_RECEIPT");
@@ -95,6 +102,15 @@ public final class SetRetailXConnector implements AutoCloseable {
                 dateFormat.format(from.atZone(zone).toLocalDateTime()));
         addCheckSearchArgument(arguments, "CheckCommitEndDate",
                 dateFormat.format(to.atZone(zone).toLocalDateTime()));
+        if (productItemOrBarcodes != null && !productItemOrBarcodes.isEmpty()) {
+            String items = productItemOrBarcodes.stream()
+                    .filter(java.util.Objects::nonNull)
+                    .map(String::trim)
+                    .filter(value -> !value.isEmpty())
+                    .distinct()
+                    .collect(java.util.stream.Collectors.joining(","));
+            if (!items.isEmpty()) addCheckSearchArgument(arguments, "ProductItemOrBarcode", items);
+        }
         return call(CHECK_ENDPOINT, "findChecks", List.of(arguments, Math.max(1, limit)));
     }
 

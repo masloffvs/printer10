@@ -1,6 +1,7 @@
 package com.setretailx.printer.service;
 
 import com.setretailx.printer.config.AppConfig;
+import com.setretailx.printer.repository.SalesPointRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,12 +17,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.math.BigDecimal;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -29,7 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -45,8 +43,6 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public static final String SALES_TASK_NAME = "История продаж из чеков";
     public static final int SALES_INITIAL_LOOKBACK_DAYS = 6;
     private static final int SALES_CHECK_LIMIT = 40;
-    private static final int SALES_MAX_QUERIES = 512;
-    private static final int SALES_CHECK_FETCH_BATCH_SIZE = 3;
     public static final int DEFAULT_INTERVAL_SECONDS = 3600;
     public static final int CANDIDATE_TTL_SECONDS = 12 * 60 * 60;
     public static final int PRODUCT_BATCH_SIZE = 100;
@@ -55,6 +51,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
 
     private final Path path;
     private final SetRetailXConnector connector;
+    private final SalesPointRepository salesPoints;
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "price-monitor-tasks");
         thread.setDaemon(true);
@@ -70,6 +67,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public PriceMonitoringTaskService(SetRetailXConnector connector, Path path) {
         this.connector = Objects.requireNonNull(connector, "connector");
         this.path = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
+        this.salesPoints = new SalesPointRepository(this.path);
         try {
             migrate();
         } catch (SQLException error) {
@@ -402,42 +400,30 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         // SearchArgumentVO date values have second precision.
         since = Instant.ofEpochSecond(since.getEpochSecond());
         until = Instant.ofEpochSecond(until.getEpochSecond());
-        List<JsonNode> checks = new ArrayList<>();
-        LinkedHashSet<Long> listedIds = new LinkedHashSet<>();
-        ArrayDeque<CheckRange> ranges = new ArrayDeque<>();
-        ranges.add(new CheckRange(since, until));
-        int queryCount = 0;
-        while (!ranges.isEmpty()) {
-            if (++queryCount > SALES_MAX_QUERIES) {
-                throw new IllegalStateException("findChecks превысил безопасный предел запросов; watermark не обновлён.");
+        List<String> productItems;
+        try {
+            productItems = salesPoints.productItemOrBarcodes();
+        } catch (SQLException error) {
+            throw new IllegalStateException("Не удалось прочитать товары торговых точек для поиска чеков.", error);
+        }
+        if (productItems.isEmpty()) {
+            throw new IllegalStateException("В созданных торговых точках нет товаров для фильтра ProductItemOrBarcode; "
+                    + "поиск чеков не выполнялся, watermark не обновлён.");
+        }
+
+        long searchTask = startSubtask(runId, null, "Поиск чеков по " + productItems.size()
+                + " товарам торговых точек: " + since + " — " + until);
+        List<JsonNode> checks;
+        try {
+            checks = checkRows(connector.findChecks(since, until, SALES_CHECK_LIMIT, productItems).join());
+            if (checks.size() >= SALES_CHECK_LIMIT) {
+                throw new IllegalStateException("findChecks вернул лимит " + SALES_CHECK_LIMIT
+                        + "; запрос выполнен одним вызовом, watermark не обновлён во избежание потери чеков.");
             }
-            CheckRange range = ranges.removeFirst();
-            long rangeTask = startSubtask(runId, null, "Поиск чеков: " + range.from() + " — " + range.to());
-            List<JsonNode> page;
-            try {
-                page = checkRows(connector.findChecks(range.from(), range.to(), SALES_CHECK_LIMIT).join());
-                finishSubtask(rangeTask, "Успешно", "Получено записей: " + page.size()
-                        + (page.size() >= SALES_CHECK_LIMIT ? "; интервал будет разделён" : ""));
-            } catch (Throwable error) {
-                finishSubtask(rangeTask, "Ошибка", errorText(error));
-                throw error;
-            }
-            if (page.size() >= SALES_CHECK_LIMIT) {
-                long midpoint = range.from().getEpochSecond()
-                        + Duration.between(range.from(), range.to()).getSeconds() / 2;
-                Instant split = Instant.ofEpochSecond(midpoint);
-                if (!split.isAfter(range.from()) || !split.isBefore(range.to())) {
-                    throw new IllegalStateException("findChecks достиг лимита " + SALES_CHECK_LIMIT
-                            + " для минимального временного интервала; watermark не обновлён.");
-                }
-                // The server accepts whole-second dates and may include both ends; duplicate IDs are deduplicated.
-                ranges.addFirst(new CheckRange(split, range.to()));
-                ranges.addFirst(new CheckRange(range.from(), split));
-                continue;
-            }
-            for (JsonNode summary : page) {
-                if (listedIds.add(checkId(summary))) checks.add(summary);
-            }
+            finishSubtask(searchTask, "Успешно", "Найдено чеков: " + checks.size());
+        } catch (Throwable error) {
+            finishSubtask(searchTask, "Ошибка", errorText(error));
+            throw error;
         }
         List<JsonNode> pendingChecks = new ArrayList<>();
         for (JsonNode summary : checks) {
@@ -446,48 +432,26 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         }
         int loaded = 0;
         int positions = 0;
-        for (int start = 0; start < pendingChecks.size(); start += SALES_CHECK_FETCH_BATCH_SIZE) {
-            List<JsonNode> batch = pendingChecks.subList(start,
-                    Math.min(start + SALES_CHECK_FETCH_BATCH_SIZE, pendingChecks.size()));
-            long batchTask = startSubtask(runId, null, "Загрузка чеков " + (start + 1) + "–" + (start + batch.size())
-                    + " из " + pendingChecks.size());
-            List<Long> checkTasks = new ArrayList<>();
-            List<CompletableFuture<JsonNode>> requests = new ArrayList<>();
-            for (JsonNode summary : batch) {
-                long id = checkId(summary);
-                checkTasks.add(startSubtask(runId, batchTask, "Чек " + id));
-                // findCheck expects the Check DTO, not a numeric ID. Keep the summary returned
-                // by findChecks so the request contains the server-required @class and fields.
-                requests.add(connector.findCheck(summary));
-            }
-            Throwable requestFailure = null;
-            for (int index = 0; index < batch.size(); index++) {
-                try {
-                    JsonNode response = requests.get(index).join();
-                    JsonNode fullCheck = response.path("result");
-                    if (fullCheck.isObject()) {
-                        for (String property : List.of("check", "receipt", "data")) {
-                            if (fullCheck.path(property).isObject()) { fullCheck = fullCheck.path(property); break; }
-                        }
-                    }
-                    long id = checkId(batch.get(index));
-                    if (!fullCheck.isObject()) throw new IllegalStateException("findCheck не вернул чек " + id);
-                    int saved = recordSalesCheck(fullCheck);
-                    positions += saved;
-                    loaded++;
-                    finishSubtask(checkTasks.get(index), "Успешно", "Сохранено позиций: " + saved);
-                } catch (Throwable error) {
-                    finishSubtask(checkTasks.get(index), "Ошибка", errorText(error));
-                    if (requestFailure == null) requestFailure = unwrap(error);
+        for (JsonNode check : pendingChecks) {
+            long id = checkId(check);
+            long checkTask = startSubtask(runId, null, "Сохранение чека " + id);
+            try {
+                JsonNode fullCheck = check;
+                for (String property : List.of("check", "receipt", "data")) {
+                    if (fullCheck.path(property).isObject()) { fullCheck = fullCheck.path(property); break; }
                 }
+                if (!fullCheck.path("positions").isArray()) {
+                    throw new IllegalStateException("findChecks вернул только сводку чека " + id
+                            + " без positions; дополнительный findCheck не выполнялся, watermark не обновлён.");
+                }
+                int saved = recordSalesCheck(fullCheck);
+                positions += saved;
+                loaded++;
+                finishSubtask(checkTask, "Успешно", "Сохранено позиций: " + saved);
+            } catch (Throwable error) {
+                finishSubtask(checkTask, "Ошибка", errorText(error));
+                throw error;
             }
-            // Persist successful responses before failing the run. The next run skips those checks
-            // and retries only the failed ones without advancing the sync watermark.
-            if (requestFailure != null) {
-                finishSubtask(batchTask, "Ошибка", errorText(requestFailure));
-                throw new CompletionException(requestFailure);
-            }
-            finishSubtask(batchTask, "Успешно", "Обработано чеков: " + batch.size());
         }
         long watermarkTask = startSubtask(runId, null, "Сохранение границы синхронизации");
         try {
@@ -500,8 +464,6 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return "Период: " + since + " — " + until + "; найдено чеков: "
                 + checks.size() + "; новых чеков: " + loaded + "; позиций сохранено: " + positions;
     }
-
-    private record CheckRange(Instant from, Instant to) { }
 
     private Instant salesSyncWatermark() {
         try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
