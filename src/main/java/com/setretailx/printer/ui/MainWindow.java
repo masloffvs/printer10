@@ -25,13 +25,20 @@ import javax.swing.BorderFactory;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
 import javax.swing.SwingWorker;
+import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.Graphics2D;
+import java.awt.print.PageFormat;
+import java.awt.print.Paper;
+import java.awt.print.Printable;
+import java.awt.print.PrinterJob;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
-import javax.swing.SwingUtilities;
 
 /** Main application shell; feature screens and MDI window management live in separate classes. */
 @SuppressWarnings("serial")
@@ -50,7 +57,7 @@ public final class MainWindow extends JFrame {
             this::addSelectedSearchResults, this::showProductCard,
             picker -> workspace.addDynamicWindow("Выбор категории", picker, 500, 520));
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
-            this::clearQueue, this::moveSelected, this::printAssigned);
+            this::clearQueue, this::moveSelected, this::printAssigned, this::printQueueList);
     private final ExchangePanel exchange = new ExchangePanel(this::checkNetworkConnection);
     private final PeerMeshService peerMeshService = new PeerMeshService(
             peer -> SwingUtilities.invokeLater(this::refreshPeerMesh), PeerMeshPanel::confirmTrust);
@@ -663,6 +670,36 @@ public final class MainWindow extends JFrame {
         progressDialog.setVisible(true);
     }
 
+    private void printQueueList() {
+        if (entries.isEmpty()) {
+            status.setText("В очереди нет товаров для списка.");
+            return;
+        }
+        List<QueueListRow> rows = entries.stream().map(entry -> new QueueListRow(entry.product.name(),
+                entry.product.marking(), entry.product.barcode(),
+                entry.product.price() == null ? "—" : entry.product.price().format(), entry.quantity)).toList();
+        PrinterJob job = PrinterJob.getPrinterJob();
+        job.setJobName("Список товаров · " + rows.size() + " позиций");
+        PageFormat page = job.defaultPage();
+        Paper paper = new Paper();
+        double width = 210 / 25.4 * 72, height = 297 / 25.4 * 72;
+        double margin = 14 / 25.4 * 72;
+        paper.setSize(width, height);
+        paper.setImageableArea(margin, margin, width - margin * 2, height - margin * 2);
+        page.setPaper(paper);
+        page.setOrientation(PageFormat.PORTRAIT);
+        job.setPrintable(new QueueListPrintable(rows), page);
+        if (!job.printDialog()) return;
+        try {
+            job.print();
+            status.setText("Список товаров отправлен на печать: " + rows.size() + " позиций.");
+        } catch (Exception error) {
+            String message = error.getMessage() == null ? error.toString() : error.getMessage();
+            status.setText("Ошибка печати списка: " + message);
+            JOptionPane.showMessageDialog(this, message, "Печать списка", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
     private void updateSearchSelection() {
         search.setStatus(search.selectedCount() == 0
                 ? "Выберите товары для добавления в очередь."
@@ -753,8 +790,10 @@ public final class MainWindow extends JFrame {
         int assigned = 0;
         for (QueueEntry entry : entries) {
             if (entry.format != null) assigned++;
-            items.add(new QueuePanel.QueueItem(entry.product.name(), entry.product.barcode(),
-                    entry.product.stCode(), entry.format, entry.priceType, entry.amount, entry.quantity));
+            items.add(new QueuePanel.QueueItem(entry.product.name(), entry.product.marking(),
+                    entry.product.barcode(), entry.product.stCode(),
+                    entry.product.price() == null ? "—" : entry.product.price().format(),
+                    entry.format, entry.priceType, entry.amount, entry.quantity));
         }
         queue.showEntries(items);
         queue.setSummary("Всего: " + entries.size() + " · назначено: " + assigned
@@ -811,6 +850,87 @@ public final class MainWindow extends JFrame {
     }
 
     private record PrintGroupKey(AppConfig.PrintFormat format, int amount) { }
+    private record QueueListRow(String name, String article, String barcode, String price, int quantity) { }
     private record PrintProgressUpdate(String message, int completedGroups) { }
     private record PrintOutcome(long batchId, List<Integer> successfulCandidateIndexes, List<String> failures) { }
+
+    private static final class QueueListPrintable implements Printable {
+        private static final double HEADER_HEIGHT = 58;
+        private static final double TABLE_HEADER_HEIGHT = 22;
+        private final List<QueueListRow> rows;
+
+        private QueueListPrintable(List<QueueListRow> rows) { this.rows = List.copyOf(rows); }
+
+        @Override public int print(java.awt.Graphics graphics, PageFormat page, int pageIndex) {
+            if (pageIndex > 0) return NO_SUCH_PAGE;
+            double width = page.getImageableWidth();
+            double height = page.getImageableHeight();
+            double bodyHeight = height - HEADER_HEIGHT - TABLE_HEADER_HEIGHT - 20;
+
+            Graphics2D g = (Graphics2D) graphics.create();
+            try {
+                g.translate(page.getImageableX(), page.getImageableY());
+                g.setColor(Color.BLACK);
+                g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 15));
+                g.drawString("СПИСОК ТОВАРОВ", 0, 18);
+                g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 8));
+                drawQueueListRight(g, "ПОЗИЦИЙ: " + rows.size(), width, 18);
+                g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8));
+                g.drawString("Печать ценников · " + java.time.LocalDate.now().format(
+                        java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy")), 0, 34);
+                g.setStroke(new java.awt.BasicStroke(1.2f));
+                g.drawLine(0, 43, (int) width, 43);
+
+                double tableTop = HEADER_HEIGHT;
+                double[] x = {0, width * .52, width * .68, width * .82, width * .93};
+                double[] w = {width * .52, width * .16, width * .14, width * .11, width * .07};
+                g.setColor(new Color(224, 224, 224));
+                g.fillRect(0, (int) tableTop, (int) width, (int) TABLE_HEADER_HEIGHT);
+                g.setColor(Color.BLACK);
+                g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
+                String[] headers = {"ТОВАР", "АРТИКУЛ", "ШТРИХКОД", "ЦЕНА", "КОЛ."};
+                for (int col = 0; col < headers.length; col++) {
+                    int baseline = (int) (tableTop + 15);
+                    if (col >= 3) drawQueueListRight(g, headers[col], x[col] + w[col] - 3, baseline);
+                    else g.drawString(headers[col], (int) x[col] + 3, baseline);
+                }
+                double lineHeight = bodyHeight / Math.max(1, rows.size());
+                float fontSize = (float) Math.max(1, Math.min(8, lineHeight * .48));
+                g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8).deriveFont(fontSize));
+                for (int i = 0; i < rows.size(); i++) {
+                    QueueListRow row = rows.get(i);
+                    double top = tableTop + TABLE_HEADER_HEIGHT + i * lineHeight;
+                    int baseline = (int) (top + Math.max(1, Math.min(lineHeight - 1, lineHeight * .72)));
+                    g.setColor(Color.BLACK);
+                    g.drawString(clipQueueList(g, row.name(), w[0] - 7), (int) x[0] + 3, baseline);
+                    g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 8).deriveFont(Math.max(1, fontSize - .5f)));
+                    g.drawString(clipQueueList(g, row.article(), w[1] - 7), (int) x[1] + 3, baseline);
+                    g.drawString(clipQueueList(g, row.barcode(), w[2] - 7), (int) x[2] + 3, baseline);
+                    g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8).deriveFont(fontSize));
+                    drawQueueListRight(g, row.price(), x[3] + w[3] - 3, baseline);
+                    g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 8).deriveFont(fontSize));
+                    drawQueueListRight(g, Integer.toString(row.quantity()), x[4] + w[4] - 3, baseline);
+                    g.setColor(new Color(200, 200, 200));
+                    g.drawLine(0, (int) (top + lineHeight), (int) width, (int) (top + lineHeight));
+                    g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8).deriveFont(fontSize));
+                }
+                g.setColor(Color.DARK_GRAY);
+                g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 7));
+                g.drawString("Позиций: " + rows.size(), 0, (int) (height - 3));
+                return PAGE_EXISTS;
+            } finally { g.dispose(); }
+        }
+
+        private static String clipQueueList(Graphics2D g, String value, double maxWidth) {
+            String text = value == null ? "" : value.replaceAll("[\\r\\n\\t]", " ");
+            if (g.getFontMetrics().stringWidth(text) <= maxWidth) return text;
+            while (!text.isEmpty() && g.getFontMetrics().stringWidth(text + "…") > maxWidth)
+                text = text.substring(0, text.length() - 1);
+            return text.isEmpty() ? "" : text + "…";
+        }
+
+        private static void drawQueueListRight(Graphics2D g, String text, double right, int baseline) {
+            g.drawString(text, (int) (right - g.getFontMetrics().stringWidth(text)), baseline);
+        }
+    }
 }

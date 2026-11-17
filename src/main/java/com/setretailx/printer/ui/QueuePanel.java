@@ -51,25 +51,28 @@ final class QueuePanel extends JPanel {
     private final JLabel visibleCount = new JLabel("Показано: 0");
     private final JTextField filterField = new JTextField(24);
     private final JButton printButton = new JButton("Печатать назначенные");
+    private final JButton printListButton = new JButton("Печать списка на листе");
     private final TableRowSorter<DefaultTableModel> sorter = new TableRowSorter<>(tableModel);
     private final QuadConsumer<List<Integer>, AppConfig.PrintFormat, PriceType, Integer> assignSelected;
     private final Consumer<List<Integer>> removeSelected;
     private final Runnable clearQueue;
     private final java.util.function.BiConsumer<List<Integer>, AppConfig.PrintFormat> moveSelected;
     private final Runnable printAssigned;
+    private final Runnable printQueueList;
     private List<QueueItem> entries = List.of();
     private boolean synchronizing;
 
     QueuePanel(QuadConsumer<List<Integer>, AppConfig.PrintFormat, PriceType, Integer> assignSelected,
-               Consumer<List<Integer>> removeSelected, Runnable clearQueue,
-               java.util.function.BiConsumer<List<Integer>, AppConfig.PrintFormat> moveSelected,
-               Runnable printAssigned) {
+                Consumer<List<Integer>> removeSelected, Runnable clearQueue,
+                java.util.function.BiConsumer<List<Integer>, AppConfig.PrintFormat> moveSelected,
+                Runnable printAssigned, Runnable printQueueList) {
         super(new BorderLayout(8, 8));
         this.assignSelected = assignSelected;
         this.removeSelected = removeSelected;
         this.clearQueue = clearQueue;
         this.moveSelected = moveSelected;
         this.printAssigned = printAssigned;
+        this.printQueueList = printQueueList;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
@@ -147,8 +150,13 @@ final class QueuePanel extends JPanel {
         printButton.addActionListener(event -> printAssigned.run());
         printButton.putClientProperty("JButton.buttonType", "default");
         printButton.setToolTipText("Отправить все назначенные ценники на печать");
+        printListButton.addActionListener(event -> printQueueList.run());
+        printListButton.setToolTipText("Напечатать все товары очереди одной строкой на A4-листе");
+        JPanel printButtons = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 0));
+        printButtons.add(printButton);
+        printButtons.add(printListButton);
         JPanel printAction = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 0, 0));
-        printAction.add(printButton);
+        printAction.add(printButtons);
         footer.add(printAction, BorderLayout.WEST);
         actions.add(new JLabel("Выберите товар · правый клик — настройка и другие действия"));
         footer.add(actions, BorderLayout.CENTER);
@@ -208,6 +216,7 @@ final class QueuePanel extends JPanel {
 
     private void updateActionState() {
         printButton.setEnabled(entries.stream().anyMatch(entry -> entry.format() != null));
+        printListButton.setEnabled(!entries.isEmpty());
     }
 
     private void selectTreeRows(List<Integer> rows) {
@@ -362,7 +371,8 @@ final class QueuePanel extends JPanel {
         }
     }
 
-    record QueueItem(String name, String barcode, String stCode, AppConfig.PrintFormat format,
+    record QueueItem(String name, String article, String barcode, String stCode, String price,
+                     AppConfig.PrintFormat format,
                      PriceType priceType, Integer amount, int quantity) { }
     private record QueueItemNode(int index, String name) {
         @Override public String toString() { return name; }
