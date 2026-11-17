@@ -116,6 +116,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("apiExchangeLog", new ApiExchangeLogPanel(), 1000, 620);
         workspace.addWindow("peerMesh", peerMeshPanel, 850, 500);
         workspace.addWindow("history", history, 760, 420);
+        workspace.addWindow("salesHistory", new SalesAnalyticsPanel(taskService), 900, 600);
         workspace.addWindow("priceChangePrintHistory", changedPrintHistoryPanel, 950, 540);
         workspace.addWindow("tasks", taskPanel, 900, 520);
         workspace.addWindow("storage", addressStoragePanel, 900, 560);

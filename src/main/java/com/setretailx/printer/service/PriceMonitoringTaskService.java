@@ -212,6 +212,95 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return result;
     }
 
+    /** Sales-bearing articles, optionally filtered by the article, product name, or barcode. */
+    public List<SalesArticle> searchSalesArticles(String query, Double fromInclusive,
+                                                   Double toExclusive, int limit) throws SQLException {
+        List<SalesArticle> result = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("SELECT item, MAX(name) AS name, MAX(barcode) AS barcode, "
+                + "SUM(quantity) AS units, SUM(cost) AS revenue, COUNT(DISTINCT check_id) AS checks "
+                + "FROM sales_positions WHERE item IS NOT NULL AND TRIM(item)<>'' ");
+        if (fromInclusive != null) sql.append("AND sold_at>=? ");
+        if (toExclusive != null) sql.append("AND sold_at<? ");
+        if (query != null && !query.isBlank()) sql.append("AND (item LIKE ? COLLATE NOCASE OR name LIKE ? COLLATE NOCASE "
+                + "OR barcode LIKE ? COLLATE NOCASE) ");
+        sql.append("GROUP BY item ORDER BY revenue DESC, item COLLATE NOCASE LIMIT ?");
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            if (fromInclusive != null) statement.setDouble(parameter++, fromInclusive);
+            if (toExclusive != null) statement.setDouble(parameter++, toExclusive);
+            if (query != null && !query.isBlank()) {
+                String pattern = "%" + query.trim() + "%";
+                statement.setString(parameter++, pattern);
+                statement.setString(parameter++, pattern);
+                statement.setString(parameter++, pattern);
+            }
+            statement.setInt(parameter, Math.max(1, Math.min(limit, 5000)));
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new SalesArticle(rows.getString("item"), rows.getString("name"),
+                        rows.getString("barcode"), rows.getDouble("units"), rows.getDouble("revenue"),
+                        rows.getInt("checks")));
+            }
+        }
+        return result;
+    }
+
+    /** Daily combined sales totals for a chosen set of articles and optional time bounds. */
+    public List<SalesDay> salesHistory(List<String> markings, Double fromInclusive,
+                                       Double toExclusive) throws SQLException {
+        if (markings == null || markings.isEmpty()) return List.of();
+        StringBuilder sql = new StringBuilder("SELECT CAST(strftime('%s', date(sold_at, 'unixepoch', 'localtime')) AS INTEGER) AS day, "
+                + "SUM(quantity) AS units, SUM(cost) AS revenue, COUNT(DISTINCT check_id) AS checks "
+                + "FROM sales_positions WHERE item IN (");
+        sql.append("?,".repeat(markings.size()));
+        sql.setLength(sql.length() - 1);
+        sql.append(") ");
+        if (fromInclusive != null) sql.append("AND sold_at>=? ");
+        if (toExclusive != null) sql.append("AND sold_at<? ");
+        sql.append("GROUP BY day ORDER BY day DESC");
+        List<SalesDay> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            for (String marking : markings) statement.setString(parameter++, marking);
+            if (fromInclusive != null) statement.setDouble(parameter++, fromInclusive);
+            if (toExclusive != null) statement.setDouble(parameter, toExclusive);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new SalesDay(rows.getLong("day"), rows.getDouble("units"),
+                        rows.getDouble("revenue"), rows.getInt("checks")));
+            }
+        }
+        return result;
+    }
+
+    /** Receipt lines for selected articles; capped to keep the desktop view responsive. */
+    public List<SalesPosition> salesPositions(List<String> markings, Double fromInclusive,
+                                               Double toExclusive, int limit) throws SQLException {
+        if (markings == null || markings.isEmpty()) return List.of();
+        StringBuilder sql = new StringBuilder("SELECT check_id, check_number, sold_at, date_commit, name, item, barcode, "
+                + "quantity, unit, price, cost, discount FROM sales_positions WHERE item IN (");
+        sql.append("?,".repeat(markings.size()));
+        sql.setLength(sql.length() - 1);
+        sql.append(") ");
+        if (fromInclusive != null) sql.append("AND sold_at>=? ");
+        if (toExclusive != null) sql.append("AND sold_at<? ");
+        sql.append("ORDER BY sold_at DESC, position_order DESC LIMIT ?");
+        List<SalesPosition> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            for (String marking : markings) statement.setString(parameter++, marking);
+            if (fromInclusive != null) statement.setDouble(parameter++, fromInclusive);
+            if (toExclusive != null) statement.setDouble(parameter++, toExclusive);
+            statement.setInt(parameter, Math.max(1, Math.min(limit, 20_000)));
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new SalesPosition(rows.getLong("check_id"), rows.getString("check_number"),
+                        rows.getDouble("sold_at"), rows.getDouble("date_commit"), rows.getString("name"),
+                        rows.getString("item"), rows.getString("barcode"), rows.getDouble("quantity"),
+                        rows.getString("unit"), rows.getDouble("price"), rows.getDouble("cost"),
+                        rows.getDouble("discount")));
+            }
+        }
+        return result;
+    }
+
     /** Individual receipt lines for one article, including the receipt and position timestamps. */
     public List<SalesPosition> salesPositions(String marking) throws SQLException {
         List<SalesPosition> result = new ArrayList<>();
@@ -1006,6 +1095,8 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                               String oldPricesJson, String newPricesJson) { }
     public record PriceSnapshot(String name, String barcode, double capturedAt, String pricesJson) { }
     public record SalesDay(long dayEpochSeconds, double units, double revenue, int checks) { }
+    public record SalesArticle(String marking, String name, String barcode, double units,
+                               double revenue, int checks) { }
     public record SalesPosition(long checkId, String checkNumber, double soldAt, double dateCommit, String name, String item,
                                 String barcode, double quantity, String unit, double price, double cost,
                                 double discount) { }

@@ -44,6 +44,7 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("apiExchangeLog", "Журнал обменов SetRetailX", "Логи API"),
             new WindowSpec("peerMesh", "Офисная peer-сеть", "Пиры"),
             new WindowSpec("history", "История печати", "История"),
+            new WindowSpec("salesHistory", "История продаж", "Продажи"),
             new WindowSpec("priceChangePrintHistory", "История изменённых ценников и отчётов", "История изменений · печать"),
             new WindowSpec("tasks", "Долгие задачи", "Задачи"),
             new WindowSpec("storage", "Сканирование единичных коробок", "Единичные коробки"),
@@ -254,7 +255,7 @@ final class MdiWorkspace extends JPanel {
         addNavigationGroup("ТОВАРЫ", "scanner", "comparison", "search", "queue");
         addNavigationGroup("СКЛАД", "storageAddresses", "addressCreate", "palletScanning", "storage", "addressSearch");
         addNavigationGroup("ТОРГОВЫЕ ТОЧКИ", "salesPointMap", "salesPointEditor");
-        addNavigationGroup("ИСТОРИЯ И ЗАДАЧИ", "history", "priceChangePrintHistory", "priceChanges", "tasks");
+        addNavigationGroup("ИСТОРИЯ И ЗАДАЧИ", "history", "salesHistory", "priceChangePrintHistory", "priceChanges", "tasks");
         addNavigationGroup("ОБМЕН И СЕРВИС", "exchange", "peerMesh", "environment");
         dynamicToolbarIndex = toolBar.getComponentCount();
         toolBar.addSeparator();
@@ -507,7 +508,7 @@ final class MdiWorkspace extends JPanel {
                         g.drawLine(x + 6, y + 10, x + 14, y + 10);
                         g.drawLine(x + 6, y + 13, x + 11, y + 13);
                     }
-                    case "history", "priceChangePrintHistory" -> {
+                    case "history", "salesHistory", "priceChangePrintHistory" -> {
                         g.drawOval(x + 3, y + 3, 14, 14);
                         g.drawLine(x + 10, y + 5, x + 10, y + 10);
                         g.drawLine(x + 10, y + 10, x + 14, y + 12);
