@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -44,7 +45,8 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public static final String SALES_TASK_NAME = "История продаж из чеков";
     public static final int SALES_INITIAL_LOOKBACK_DAYS = 6;
     private static final int SALES_CHECK_LIMIT = 40;
-    private static final int SALES_MAX_QUERIES = 10_000;
+    private static final int SALES_MAX_QUERIES = 512;
+    private static final int SALES_CHECK_FETCH_BATCH_SIZE = 3;
     public static final int DEFAULT_INTERVAL_SECONDS = 3600;
     public static final int CANDIDATE_TTL_SECONDS = 12 * 60 * 60;
     public static final int PRODUCT_BATCH_SIZE = 100;
@@ -69,13 +71,15 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         this.connector = Objects.requireNonNull(connector, "connector");
         this.path = Objects.requireNonNull(path, "path").toAbsolutePath().normalize();
         try {
-            initialize();
+            migrate();
         } catch (SQLException error) {
             throw new IllegalStateException("Не удалось открыть хранилище фоновых задач: " + this.path, error);
         }
     }
 
     public Path databasePath() { return path; }
+
+    public void migrate() throws SQLException { initialize(); }
 
     /** Polls due tasks every five seconds. Only one task is run at a time. */
     public void start() {
@@ -255,23 +259,29 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     }
 
     private void executeTask(TaskInfo task) {
-        double startedAt = nowSeconds();
+        long runId = 0;
         try {
+            runId = startRun(task.taskId());
             String result = switch (task.taskId()) {
                 case DISCOVERY_TASK_ID -> runCandidateDiscovery();
-                case SALES_TASK_ID -> runSalesHistory();
+                case SALES_TASK_ID -> runSalesHistory(runId);
                 default -> runPriceSnapshots();
             };
-            finish(task.taskId(), startedAt, "Успешно", result);
+            finish(task.taskId(), runId, "Успешно", result);
         } catch (Throwable error) {
             Throwable cause = unwrap(error);
-            String result = cause.getClass().getSimpleName() + ": "
-                    + (cause.getMessage() == null ? cause.toString() : cause.getMessage());
-            try { finish(task.taskId(), startedAt, "Ошибка", result); }
+            String result = errorText(cause);
+            try { finish(task.taskId(), runId, "Ошибка", result); }
             catch (SQLException finishError) { cause.addSuppressed(finishError); }
         } finally {
             isTaskRunning.set(false);
         }
+    }
+
+    private static String errorText(Throwable error) {
+        Throwable cause = unwrap(error);
+        return cause.getClass().getSimpleName() + ": "
+                + (cause.getMessage() == null ? cause.toString() : cause.getMessage());
     }
 
     private String runCandidateDiscovery() {
@@ -295,7 +305,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                 + "; ответов с неизвестным ProductVO.marking: " + counts.unmatched();
     }
 
-    private String runSalesHistory() {
+    private String runSalesHistory(long runId) {
         Instant until = Instant.now();
         Instant since = salesSyncWatermark();
         if (since == null) since = until.minusSeconds(SALES_INITIAL_LOOKBACK_DAYS * 24L * 60 * 60);
@@ -313,7 +323,16 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                 throw new IllegalStateException("findChecks превысил безопасный предел запросов; watermark не обновлён.");
             }
             CheckRange range = ranges.removeFirst();
-            List<JsonNode> page = checkRows(connector.findChecks(range.from(), range.to(), SALES_CHECK_LIMIT).join());
+            long rangeTask = startSubtask(runId, null, "Поиск чеков: " + range.from() + " — " + range.to());
+            List<JsonNode> page;
+            try {
+                page = checkRows(connector.findChecks(range.from(), range.to(), SALES_CHECK_LIMIT).join());
+                finishSubtask(rangeTask, "Успешно", "Получено записей: " + page.size()
+                        + (page.size() >= SALES_CHECK_LIMIT ? "; интервал будет разделён" : ""));
+            } catch (Throwable error) {
+                finishSubtask(rangeTask, "Ошибка", errorText(error));
+                throw error;
+            }
             if (page.size() >= SALES_CHECK_LIMIT) {
                 long midpoint = range.from().getEpochSecond()
                         + Duration.between(range.from(), range.to()).getSeconds() / 2;
@@ -331,23 +350,62 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                 if (listedIds.add(checkId(summary))) checks.add(summary);
             }
         }
-        int loaded = 0;
-        int positions = 0;
+        List<JsonNode> pendingChecks = new ArrayList<>();
         for (JsonNode summary : checks) {
             long id = checkId(summary);
-            if (id <= 0 || isSalesCheckProcessed(id)) continue;
-            JsonNode response = connector.findCheck(id).join();
-            JsonNode fullCheck = response.path("result");
-            if (fullCheck.isObject()) {
-                for (String property : List.of("check", "receipt", "data")) {
-                    if (fullCheck.path(property).isObject()) { fullCheck = fullCheck.path(property); break; }
+            if (!isSalesCheckProcessed(id)) pendingChecks.add(summary);
+        }
+        int loaded = 0;
+        int positions = 0;
+        for (int start = 0; start < pendingChecks.size(); start += SALES_CHECK_FETCH_BATCH_SIZE) {
+            List<JsonNode> batch = pendingChecks.subList(start,
+                    Math.min(start + SALES_CHECK_FETCH_BATCH_SIZE, pendingChecks.size()));
+            long batchTask = startSubtask(runId, null, "Загрузка чеков " + (start + 1) + "–" + (start + batch.size())
+                    + " из " + pendingChecks.size());
+            List<Long> checkTasks = new ArrayList<>();
+            List<CompletableFuture<JsonNode>> requests = new ArrayList<>();
+            for (JsonNode summary : batch) {
+                long id = checkId(summary);
+                checkTasks.add(startSubtask(runId, batchTask, "Чек " + id));
+                requests.add(connector.findCheck(id));
+            }
+            Throwable requestFailure = null;
+            for (int index = 0; index < batch.size(); index++) {
+                try {
+                    JsonNode response = requests.get(index).join();
+                    JsonNode fullCheck = response.path("result");
+                    if (fullCheck.isObject()) {
+                        for (String property : List.of("check", "receipt", "data")) {
+                            if (fullCheck.path(property).isObject()) { fullCheck = fullCheck.path(property); break; }
+                        }
+                    }
+                    long id = checkId(batch.get(index));
+                    if (!fullCheck.isObject()) throw new IllegalStateException("findCheck не вернул чек " + id);
+                    int saved = recordSalesCheck(fullCheck);
+                    positions += saved;
+                    loaded++;
+                    finishSubtask(checkTasks.get(index), "Успешно", "Сохранено позиций: " + saved);
+                } catch (Throwable error) {
+                    finishSubtask(checkTasks.get(index), "Ошибка", errorText(error));
+                    if (requestFailure == null) requestFailure = unwrap(error);
                 }
             }
-            if (!fullCheck.isObject()) throw new IllegalStateException("findCheck не вернул чек " + id);
-            positions += recordSalesCheck(fullCheck);
-            loaded++;
+            // Persist successful responses before failing the run. The next run skips those checks
+            // and retries only the failed ones without advancing the sync watermark.
+            if (requestFailure != null) {
+                finishSubtask(batchTask, "Ошибка", errorText(requestFailure));
+                throw new CompletionException(requestFailure);
+            }
+            finishSubtask(batchTask, "Успешно", "Обработано чеков: " + batch.size());
         }
-        saveSalesSyncWatermark(until);
+        long watermarkTask = startSubtask(runId, null, "Сохранение границы синхронизации");
+        try {
+            saveSalesSyncWatermark(until);
+            finishSubtask(watermarkTask, "Успешно", "Синхронизировано до: " + until);
+        } catch (Throwable error) {
+            finishSubtask(watermarkTask, "Ошибка", errorText(error));
+            throw error;
+        }
         return "Период: " + since + " — " + until + "; найдено чеков: "
                 + checks.size() + "; новых чеков: " + loaded + "; позиций сохранено: " + positions;
     }
@@ -740,7 +798,63 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         }
     }
 
-    private void finish(String taskId, double startedAt, String status, String result) throws SQLException {
+    public List<SubtaskRun> subtasks(long runId) throws SQLException {
+        List<SubtaskRun> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
+                "SELECT id, parent_id, name, started_at, finished_at, status, result FROM task_subtasks WHERE run_id=? ORDER BY id")) {
+            query.setLong(1, runId);
+            try (ResultSet rows = query.executeQuery()) {
+                while (rows.next()) {
+                    long parent = rows.getLong("parent_id");
+                    Long parentId = rows.wasNull() ? null : parent;
+                    result.add(new SubtaskRun(rows.getLong("id"), parentId, rows.getString("name"),
+                            rows.getDouble("started_at"), nullableDouble(rows, "finished_at"),
+                            rows.getString("status"), rows.getString("result")));
+                }
+            }
+        }
+        return result;
+    }
+
+    private long startRun(String taskId) throws SQLException {
+        try (Connection connection = connect(); PreparedStatement insert = connection.prepareStatement(
+                "INSERT INTO task_runs(task_id, started_at, status, result) VALUES (?, ?, 'Выполняется', '')",
+                Statement.RETURN_GENERATED_KEYS)) {
+            insert.setString(1, taskId);
+            insert.setDouble(2, nowSeconds());
+            insert.executeUpdate();
+            try (ResultSet keys = insert.getGeneratedKeys()) {
+                if (keys.next()) return keys.getLong(1);
+                throw new SQLException("Не удалось получить ID запуска");
+            }
+        }
+    }
+
+    private long startSubtask(long runId, Long parentId, String name) {
+        try (Connection connection = connect(); PreparedStatement insert = connection.prepareStatement(
+                "INSERT INTO task_subtasks(run_id, parent_id, name, started_at, status) VALUES (?, ?, ?, ?, 'Выполняется')",
+                Statement.RETURN_GENERATED_KEYS)) {
+            insert.setLong(1, runId);
+            if (parentId == null) insert.setNull(2, java.sql.Types.INTEGER); else insert.setLong(2, parentId);
+            insert.setString(3, name);
+            insert.setDouble(4, nowSeconds());
+            insert.executeUpdate();
+            try (ResultSet keys = insert.getGeneratedKeys()) {
+                if (keys.next()) return keys.getLong(1);
+                throw new SQLException("Не удалось получить ID подзадачи");
+            }
+        } catch (SQLException error) { throw new IllegalStateException(error); }
+    }
+
+    private void finishSubtask(long id, String status, String result) {
+        try (Connection connection = connect(); PreparedStatement update = connection.prepareStatement(
+                "UPDATE task_subtasks SET finished_at=?, status=?, result=? WHERE id=?")) {
+            update.setDouble(1, nowSeconds()); update.setString(2, status); update.setString(3, result); update.setLong(4, id);
+            update.executeUpdate();
+        } catch (SQLException error) { throw new IllegalStateException(error); }
+    }
+
+    private void finish(String taskId, long runId, String status, String result) throws SQLException {
         double finishedAt = nowSeconds();
         try (Connection connection = connect()) {
             connection.setAutoCommit(false);
@@ -750,9 +864,14 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                 statement.setString(4, taskId); statement.executeUpdate();
             }
             try (PreparedStatement statement = connection.prepareStatement(
-                    "INSERT INTO task_runs (task_id, started_at, finished_at, status, result) VALUES (?, ?, ?, ?, ?)")) {
-                statement.setString(1, taskId); statement.setDouble(2, startedAt); statement.setDouble(3, finishedAt);
-                statement.setString(4, status); statement.setString(5, result); statement.executeUpdate();
+                    "UPDATE task_runs SET finished_at=?, status=?, result=? WHERE id=?")) {
+                statement.setDouble(1, finishedAt); statement.setString(2, status);
+                statement.setString(3, result); statement.setLong(4, runId); statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "UPDATE task_subtasks SET finished_at=?, status=?, result=? WHERE run_id=? AND status='Выполняется'")) {
+                statement.setDouble(1, finishedAt); statement.setString(2, "Прервано");
+                statement.setString(3, result); statement.setLong(4, runId); statement.executeUpdate();
             }
             connection.commit();
         }
@@ -788,6 +907,15 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                     + "task_id TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, status TEXT NOT NULL, "
                     + "result TEXT NOT NULL DEFAULT '')");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_task_runs_task_started ON task_runs(task_id, started_at DESC)");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS task_subtasks (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    + "run_id INTEGER NOT NULL REFERENCES task_runs(id), parent_id INTEGER REFERENCES task_subtasks(id), "
+                    + "name TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, status TEXT NOT NULL, "
+                    + "result TEXT NOT NULL DEFAULT '')");
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_task_subtasks_run ON task_subtasks(run_id, id)");
+            statement.executeUpdate("UPDATE task_subtasks SET finished_at=" + nowSeconds()
+                    + ", status='Прервано', result='Приложение закрыто до завершения.' WHERE status='Выполняется'");
+            statement.executeUpdate("UPDATE task_runs SET finished_at=" + nowSeconds()
+                    + ", status='Прервано', result='Приложение закрыто до завершения.' WHERE status='Выполняется'");
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_price_changes_detected ON price_changes(detected_at DESC)");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_checks (check_id INTEGER PRIMARY KEY, "
                     + "check_number TEXT NOT NULL DEFAULT '', sold_at REAL NOT NULL)");
@@ -883,5 +1011,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                                 double discount) { }
     public record TaskRun(long id, String taskId, double startedAt, Double finishedAt,
                           String status, String result) { }
+    public record SubtaskRun(long id, Long parentId, String name, double startedAt, Double finishedAt,
+                             String status, String result) { }
     private record SnapshotCounts(int snapshots, int changes, int unmatched) { }
 }

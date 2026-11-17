@@ -31,6 +31,8 @@ public final class PriceChangePrintHistoryRepository {
         this.path = path.toAbsolutePath().normalize();
     }
 
+    public void migrate() throws SQLException { ensureSchema(); }
+
     public long addReport(List<PriceChangePrintEntry> entries) throws SQLException {
         ensureSchema();
         ArrayNode rows = JSON.createArrayNode();

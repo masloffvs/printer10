@@ -132,6 +132,7 @@ final class ProductCardDialog extends JPanel {
 
     private void printProductInfo(Product product) {
         JComboBox<PaperSize> paperSize = new JComboBox<>(PaperSize.values());
+        paperSize.setSelectedItem(PaperSize.A4);
         JCheckBox includePhoto = new JCheckBox("Добавить чёрно-белое фото", originalImage != null);
         includePhoto.setEnabled(originalImage != null);
         if (originalImage == null) includePhoto.setToolTipText("Фото ещё не загружено или недоступно");
@@ -195,12 +196,12 @@ final class ProductCardDialog extends JPanel {
         Paper paper = new Paper();
         double width = size.widthMm / 25.4 * 72;
         double height = size.heightMm / 25.4 * 72;
-        double margin = 9 / 25.4 * 72;
+        double margin = 28;
         paper.setSize(width, height);
         paper.setImageableArea(margin, margin, width - margin * 2, height - margin * 2);
         page.setPaper(paper);
         page.setOrientation(PageFormat.PORTRAIT);
-        job.setPrintable(new ProductInfoPrintable(product, photo, prices, priceNote,
+        job.setPrintable(new ProductInfoPrintable(product, photo, prices, priceNote, size,
                 LocalDate.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy"))), page);
         if (!job.printDialog()) return;
         try {
@@ -238,16 +239,26 @@ final class ProductCardDialog extends JPanel {
         Graphics2D graphics = gray.createGraphics();
         try { graphics.drawImage(source, 0, 0, null); }
         finally { graphics.dispose(); }
-        return gray;
+        BufferedImage contrasted = new BufferedImage(gray.getWidth(), gray.getHeight(), BufferedImage.TYPE_BYTE_GRAY);
+        new java.awt.image.RescaleOp(1.15f, -18f, null).filter(gray, contrasted);
+        return contrasted;
     }
 
     private enum PaperSize {
-        A5("A5 · половина A4", 148, 210), A4("A4", 210, 297);
+        A5("A5 · половина A4", 148, 210), A4("A4", 210, 297),
+        COMPACT_TOP_LEFT("Компактный · ¼ A4 · слева сверху", 210, 297, true, false),
+        COMPACT_TOP_RIGHT("Компактный · ¼ A4 · справа сверху", 210, 297, true, true);
         private final String label;
         private final int widthMm;
         private final int heightMm;
+        private final boolean compact;
+        private final boolean rightSide;
         PaperSize(String label, int widthMm, int heightMm) {
+            this(label, widthMm, heightMm, false, false);
+        }
+        PaperSize(String label, int widthMm, int heightMm, boolean compact, boolean rightSide) {
             this.label = label; this.widthMm = widthMm; this.heightMm = heightMm;
+            this.compact = compact; this.rightSide = rightSide;
         }
         @Override public String toString() { return label; }
     }
@@ -559,140 +570,457 @@ final class ProductCardDialog extends JPanel {
     }
 
     private static final class ProductInfoPrintable implements java.awt.print.Printable {
-        private static final Font TITLE = new Font(Font.SANS_SERIF, Font.BOLD, 21);
-        private static final Font SECTION = new Font(Font.SANS_SERIF, Font.BOLD, 12);
-        private static final Font BODY = new Font(Font.SANS_SERIF, Font.PLAIN, 10);
-        private static final Font SMALL = new Font(Font.SANS_SERIF, Font.PLAIN, 8);
+        private static final int CONTENT_WIDTH = 540;
+        private static final Font TITLE = new Font("DejaVu Sans", Font.BOLD, 17);
+        private static final Font SUBTITLE = new Font("DejaVu Sans", Font.PLAIN, 8);
+        private static final Font SECTION = new Font("DejaVu Sans", Font.BOLD, 9);
+        private static final Font BODY = new Font("DejaVu Sans", Font.PLAIN, 9);
+        private static final Font BODY_BOLD = new Font("DejaVu Sans", Font.BOLD, 9);
+        private static final Font SMALL = new Font("DejaVu Sans", Font.PLAIN, 7);
+        private static final Font SERVICE = new Font("DejaVu Sans", Font.PLAIN, 7);
+        private static final Font CODE = new Font("DejaVu Sans Mono", Font.BOLD, 34);
+        private static final Font ARTICLE = new Font("DejaVu Sans", Font.BOLD, 15);
+        private static final Font BARCODE_TEXT = new Font("DejaVu Sans Mono", Font.PLAIN, 13);
+        private static final Color MID_GRAY = new Color(68, 68, 68);
+        private static final Color LIGHT_GRAY = new Color(228, 228, 228);
+        private static final Color RULE = new Color(187, 187, 187);
         private final Product product;
         private final BufferedImage photo;
         private final List<String> prices;
         private final String priceNote;
+        private final PaperSize paperSize;
         private final String date;
         private final BufferedImage qr;
         private final BufferedImage barcode;
+        private final boolean validEan;
 
         private ProductInfoPrintable(Product product, BufferedImage photo, List<String> prices,
-                                     String priceNote, String date) {
+                                     String priceNote, PaperSize paperSize, String date) {
             this.product = product;
             this.photo = photo;
             this.prices = List.copyOf(prices);
             this.priceNote = priceNote;
+            this.paperSize = paperSize;
             this.date = date;
             qr = encode(product.stCode(), BarcodeFormat.QR_CODE, 180, 180);
-            barcode = encode(product.barcode(), BarcodeFormat.CODE_128, 360, 90);
+            validEan = isValidEan13(product.barcode());
+            barcode = validEan ? encode(product.barcode(), BarcodeFormat.EAN_13, 420, 90) : null;
         }
 
         @Override public int print(java.awt.Graphics graphics, PageFormat page, int pageIndex) {
             if (pageIndex > 0) return NO_SUCH_PAGE;
             Graphics2D g = (Graphics2D) graphics.create();
             try {
-                g.translate(page.getImageableX(), page.getImageableY());
+                double slotWidth = paperSize.compact ? page.getImageableWidth() / 2.0 : page.getImageableWidth();
+                double slotHeight = paperSize.compact ? page.getImageableHeight() / 2.0 : page.getImageableHeight();
+                double slotX = page.getImageableX()
+                        + (paperSize.compact && paperSize.rightSide ? slotWidth : 0);
+                g.translate(slotX, page.getImageableY());
                 g.setColor(Color.BLACK);
                 g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
                 g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-                double width = page.getImageableWidth();
-                double height = page.getImageableHeight();
-                double scale = Math.min(width / 540.0, height / 770.0);
-                g.scale(scale, scale);
-                int w = (int) (width / scale);
-                int h = (int) (height / scale);
-                int x = 0;
-                int y = 0;
-
-                g.setFont(TITLE);
-                y = drawWrapped(g, product.name(), x, y + 24, w, 28);
-                g.setFont(SMALL);
-                g.setColor(new Color(65, 65, 65));
-                y += 2;
-                y = drawWrapped(g, "Информация о товаре · " + date, x, y + 12, w, 12);
+                int neededHeight = paperSize.compact ? renderCompact(g, false) : render(g, false);
+                g.dispose();
+                g = (Graphics2D) graphics.create();
+                g.translate(slotX, page.getImageableY());
                 g.setColor(Color.BLACK);
-                g.drawLine(x, y + 3, w, y + 3);
-                y += 14;
-
-                int photoWidth = photo == null ? 0 : Math.min(150, w / 3);
-                int columnGap = photo == null ? 0 : 16;
-                int detailsWidth = w - photoWidth - columnGap;
-                if (photo != null) {
-                    int photoHeight = Math.min(190, (int) ((double) photo.getHeight() / photo.getWidth() * photoWidth));
-                    g.drawImage(photo, x, y, photoWidth, photoHeight, null);
-                    g.setFont(SMALL);
-                    g.drawRect(x, y, photoWidth, photoHeight);
-                }
-                int dx = x + photoWidth + columnGap;
-                int dy = y;
-                g.setFont(SECTION);
-                dy = drawSection(g, "Коды и цены", dx, dy, detailsWidth);
-                g.setFont(BODY);
-                List<String> keyValues = new ArrayList<>();
-            keyValues.add("Код SAP / SetRetailX: " + blankAsDash(product.stCode()));
-                keyValues.add("Артикул SetRetailX: " + blankAsDash(product.marking()));
-                keyValues.add("Штрихкод: " + blankAsDash(product.barcode()));
-                keyValues.addAll(prices);
-                if (prices.isEmpty()) keyValues.add(priceNote);
-                for (String item : keyValues) dy = drawWrapped(g, item, dx, dy + 14, detailsWidth, 13);
-                int codeY = Math.max(dy + 8, photo == null ? dy + 8 : y + 155);
-                if (qr != null) {
-                    g.drawImage(qr, dx, codeY, 72, 72, null);
-                    g.setFont(SMALL);
-                    g.drawString("QR SAP", dx, codeY + 83);
-                }
-                if (barcode != null) {
-                    int bx = dx + (qr == null ? 0 : 88);
-                    int bw = Math.max(100, detailsWidth - (qr == null ? 0 : 88));
-                    g.drawImage(barcode, bx, codeY + 8, bw, 48, null);
-                    g.setFont(SMALL);
-                    g.drawString(product.barcode(), bx, codeY + 68);
-                }
-                y = Math.max(y + (photo == null ? 0 : 190), codeY + 94);
-                y += 14;
-
-                String description = findDetail(product.details(), "description");
-                if (!description.isBlank()) {
-                    g.setFont(SECTION);
-                    y = drawSection(g, "Описание", x, y, w);
-                    g.setFont(BODY);
-                    y = drawWrapped(g, normalizeText(description), x, y + 12, w, 13);
-                    y += 8;
-                }
-
-                List<Map.Entry<String, String>> attributes = product.details().entrySet().stream()
-                        .filter(entry -> !HIDDEN_FIELDS.contains(normalizeKey(entry.getKey())))
-                        .filter(entry -> !entry.getValue().isBlank())
-                        .toList();
-                if (!attributes.isEmpty()) {
-                    g.setFont(SECTION);
-                    y = drawSection(g, "Характеристики", x, y, w);
-                    g.setFont(BODY);
-                    int rowHeight = 18;
-                    int labelWidth = Math.min(180, w / 3);
-                    for (Map.Entry<String, String> attribute : attributes) {
-                        if (y + rowHeight > h - 12) break;
-                        if ((y / rowHeight) % 2 == 0) {
-                            g.setColor(new Color(242, 242, 242));
-                            g.fillRect(x, y, w, rowHeight);
-                            g.setColor(Color.BLACK);
-                        }
-                        String key = LABELS.getOrDefault(normalizeKey(attribute.getKey()), humanize(attribute.getKey()));
-                        g.drawString(clip(g, key, labelWidth - 12), x + 6, y + 13);
-                        g.drawString(clip(g, normalizeText(attribute.getValue()), w - labelWidth - 12), x + labelWidth, y + 13);
-                        g.drawLine(x, y + rowHeight, w, y + rowHeight);
-                        y += rowHeight;
-                    }
-                }
+                g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                double layoutWidth = paperSize.compact ? CONTENT_WIDTH / 2.0 : CONTENT_WIDTH;
+                double fit = Math.min(slotWidth / layoutWidth, slotHeight / Math.max(1, neededHeight));
+                g.scale(fit, fit);
+                if (paperSize.compact) renderCompact(g, true);
+                else render(g, true);
                 return PAGE_EXISTS;
             } finally {
                 g.dispose();
             }
         }
 
-        private static int drawSection(Graphics2D g, String title, int x, int y, int width) {
+        private int render(Graphics2D g, boolean paint) {
+            int x = 0, width = CONTENT_WIDTH, y = 0;
             g.setColor(Color.BLACK);
-            g.drawString(title, x, y + 13);
-            g.drawLine(x, y + 17, x + width, y + 17);
-            return y + 18;
+            g.setFont(TITLE);
+            y = drawWrapped(g, product.name(), x, y + 19, width, 20, paint);
+            g.setFont(SUBTITLE);
+            g.setColor(MID_GRAY);
+            y = drawWrapped(g, "Информация о товаре · " + date, x, y + 2, width, 10, paint);
+            g.setColor(Color.BLACK);
+            if (paint) {
+                g.setStroke(new java.awt.BasicStroke(2f));
+                g.drawLine(x, y + 4, width, y + 4);
+            }
+            y += 12;
+
+            if (photo != null) {
+                int photoWidth = 150;
+                int photoHeight = Math.min(145, Math.max(1, (int) ((double) photo.getHeight() / photo.getWidth() * photoWidth)));
+                if (paint) {
+                    g.drawImage(photo, x, y, photoWidth, photoHeight, null);
+                    g.setStroke(new java.awt.BasicStroke(0.9f));
+                    g.drawRect(x, y, photoWidth, photoHeight);
+                }
+                y += photoHeight + 8;
+            }
+
+            int tagEnd = drawTags(g, y, paint);
+            y = tagEnd == y ? y : tagEnd + 4;
+
+            String description = findDetail(product.details(), "description");
+            if (!description.isBlank()) {
+                y = drawSection(g, "ОПИСАНИЕ", x, y, width, paint);
+                g.setFont(BODY);
+                y = drawWrapped(g, normalizeText(description), x + 2, y + 10, width - 4, 12, paint) + 7;
+            }
+
+            List<Map.Entry<String, String>> main = new ArrayList<>(), service = new ArrayList<>();
+            for (Map.Entry<String, String> entry : product.details().entrySet()) {
+                String key = normalizeKey(entry.getKey());
+                if (HIDDEN_FIELDS.contains(key) || key.equals("catalogattributes") || entry.getValue().isBlank()) continue;
+                (isServiceField(key) ? service : main).add(entry);
+            }
+            if (!main.isEmpty() || !service.isEmpty() || !product.rawJson().isBlank()) {
+                y = drawSection(g, "ХАРАКТЕРИСТИКИ", x, y, width, paint);
+                if (!main.isEmpty()) {
+                    y = drawSubheading(g, "Основные", y, width, paint);
+                    for (Map.Entry<String, String> entry : main) {
+                        String key = normalizeKey(entry.getKey());
+                        String value = key.equals("isadult")
+                                ? (entry.getValue().equals("1") || entry.getValue().equalsIgnoreCase("true") ? "Да" : "Нет")
+                                : normalizeText(entry.getValue());
+                        y = drawAttribute(g, LABELS.getOrDefault(key, humanize(entry.getKey())), value,
+                                y, width, BODY, BODY_BOLD, paint);
+                    }
+                }
+                if (!service.isEmpty() || !product.rawJson().isBlank()) {
+                    y = drawSubheading(g, "Служебные поля", y + 3, width, paint);
+                    for (Map.Entry<String, String> entry : service) {
+                        y = drawAttribute(g, LABELS.getOrDefault(normalizeKey(entry.getKey()), humanize(entry.getKey())),
+                                normalizeText(entry.getValue()), y, width, SERVICE, SERVICE, paint);
+                    }
+                    if (!product.rawJson().isBlank()) {
+                        y = drawAttribute(g, "Raw JSON", normalizeText(product.rawJson()), y, width, SERVICE, SERVICE, paint);
+                    }
+                }
+            }
+
+            y += 4;
+            y = drawSection(g, "КОДЫ", x, y, width, paint);
+            y = drawCodeCells(g, x, y, width, paint) + 4;
+            y += 8;
+            if (paint) {
+                g.setColor(RULE);
+                g.setStroke(new java.awt.BasicStroke(0.5f));
+                g.drawLine(x, y, width, y);
+                g.setColor(Color.BLACK);
+            }
+            y += 10;
+            g.setFont(SMALL);
+            String brand = findDetail(product.details(), "brand");
+            if (brand.isBlank()) brand = findDetail(product.details(), "brandname");
+            String footerLeft = (product.stCode().isBlank() ? "" : "SAP " + product.stCode())
+                    + (brand.isBlank() ? "" : " · " + brand)
+                    + (validEan ? " · Штрихкод: EAN-13" : " · Штрихкод только при верной EAN-13");
+            String footerRight = "QR содержит SAP";
+            if (paint) {
+                g.drawString(footerLeft, x, y);
+                g.drawString(footerRight, Math.max(x, width - g.getFontMetrics().stringWidth(footerRight)), y);
+            }
+            return y + 8;
         }
 
-        private static int drawWrapped(Graphics2D g, String text, int x, int y, int width, int lineHeight) {
+        /** Compact top-quarter layout: keeps only the most useful fields and omits long text/service data. */
+        private int renderCompact(Graphics2D g, boolean paint) {
+            int width = CONTENT_WIDTH / 2;
+            int y = 0;
+            g.setColor(Color.BLACK);
+            g.setFont(new Font("DejaVu Sans", Font.BOLD, 14));
+            String title = fitText(g, normalizeText(product.name()), width - 4);
+            if (paint) g.drawString(title, 0, 24);
+            y = 34;
+            g.setFont(new Font("DejaVu Sans", Font.PLAIN, 7));
+            g.setColor(MID_GRAY);
+            if (paint) g.drawString("Информация о товаре · " + date, 0, y);
+            g.setColor(Color.BLACK);
+            y += 9;
+            if (paint) {
+                g.setStroke(new java.awt.BasicStroke(1.5f));
+                g.drawLine(0, y, width, y);
+            }
+            y += 9;
+
+            int photoWidth = 76;
+            int photoHeight = 76;
+            if (photo != null) {
+                double scale = Math.min((double) photoWidth / photo.getWidth(), (double) photoHeight / photo.getHeight());
+                int drawWidth = Math.max(1, (int) Math.round(photo.getWidth() * scale));
+                int drawHeight = Math.max(1, (int) Math.round(photo.getHeight() * scale));
+                if (paint) {
+                    g.drawImage(photo, 0, y, drawWidth, drawHeight, null);
+                    g.setStroke(new java.awt.BasicStroke(0.7f));
+                    g.drawRect(0, y, drawWidth, drawHeight);
+                }
+            }
+
+            int infoX = photoWidth + 8;
+            int infoWidth = width - infoX;
+            int textWidth = Math.max(1, infoWidth - (qr == null ? 0 : 42));
+            int infoY = y + 3;
+            g.setFont(new Font("DejaVu Sans", Font.BOLD, 9));
+            if (paint) g.drawString(fitText(g, "Цена: " + (product.price() == null ? "—" : product.price().format()), textWidth), infoX, infoY + 10);
+            g.setFont(new Font("DejaVu Sans", Font.PLAIN, 8));
+            infoY += 24;
+            if (paint) g.drawString(fitText(g, "SAP: " + blankAsDash(product.stCode()), textWidth), infoX, infoY);
+            infoY += 17;
+            if (paint) g.drawString(fitText(g, "Артикул: " + blankAsDash(product.marking()), textWidth), infoX, infoY);
+            infoY += 17;
+            if (paint) g.drawString(fitText(g, "Остаток: " + blankAsDash(product.totalQuantity()), textWidth), infoX, infoY);
+            infoY += 14;
+
+            if (barcode != null && paint) {
+                g.drawImage(barcode, infoX, infoY, Math.min(170, textWidth), 33, null);
+            } else if (paint && !product.barcode().isBlank()) {
+                g.setFont(new Font("DejaVu Sans", Font.PLAIN, 7));
+                g.drawString(fitText(g, "Штрихкод: " + product.barcode(), textWidth), infoX, infoY + 10);
+            }
+            if (paint && qr != null) g.drawImage(qr, width - 38, y + 40, 34, 34, null);
+            y += photoHeight + 7;
+
+            List<Map.Entry<String, String>> attributes = product.details().entrySet().stream()
+                    .filter(entry -> {
+                        String key = normalizeKey(entry.getKey());
+                        return !HIDDEN_FIELDS.contains(key) && !key.equals("catalogattributes")
+                                && !isServiceField(key) && !entry.getValue().isBlank();
+                    })
+                    .limit(7)
+                    .toList();
+            if (!attributes.isEmpty()) {
+                y = drawSection(g, "ОСНОВНЫЕ ХАРАКТЕРИСТИКИ", 0, y, width, paint);
+                g.setFont(new Font("DejaVu Sans", Font.PLAIN, 7));
+                for (Map.Entry<String, String> entry : attributes) {
+                    String key = normalizeKey(entry.getKey());
+                    String label = LABELS.getOrDefault(key, humanize(entry.getKey()));
+                    String value = key.equals("isadult")
+                            ? (entry.getValue().equals("1") || entry.getValue().equalsIgnoreCase("true") ? "Да" : "Нет")
+                            : normalizeText(entry.getValue());
+                    if (paint) {
+                        g.setFont(new Font("DejaVu Sans", Font.BOLD, 7));
+                        g.drawString(fitText(g, label, 92), 4, y + 11);
+                        g.setFont(new Font("DejaVu Sans", Font.PLAIN, 7));
+                        g.drawString(fitText(g, value, width - 104), 100, y + 11);
+                        g.setColor(RULE);
+                        g.drawLine(0, y + 13, width, y + 13);
+                        g.setColor(Color.BLACK);
+                    }
+                    y += 16;
+                }
+            }
+
+            String note = !priceNote.isBlank() ? priceNote : String.join(" · ", prices);
+            if (!note.isBlank()) {
+                y += 3;
+                g.setFont(new Font("DejaVu Sans", Font.PLAIN, 7));
+                if (paint) {
+                    g.setColor(LIGHT_GRAY);
+                    g.fillRect(0, y, width, 24);
+                    g.setColor(Color.BLACK);
+                    g.drawString(fitText(g, note, width - 12), 6, y + 15);
+                }
+                y += 29;
+            }
+            return y + 3;
+        }
+
+        private static String fitText(Graphics2D g, String text, int width) {
+            String result = text == null ? "" : text;
+            if (g.getFontMetrics().stringWidth(result) <= width) return result;
+            while (!result.isEmpty() && g.getFontMetrics().stringWidth(result + "…") > width) {
+                result = result.substring(0, result.length() - 1);
+            }
+            return result.isEmpty() ? "…" : result + "…";
+        }
+
+        private int drawTags(Graphics2D g, int y, boolean paint) {
+            List<String> tags = new ArrayList<>();
+            String brand = firstDetail("brand", "brandname");
+            if (!brand.isBlank()) tags.add("БРЕНД: " + brand.toUpperCase(Locale.ROOT));
+            addTag(tags, "РАЗМЕР", firstDetail("size", "sizename"));
+            addTag(tags, "В УПАКОВКЕ", firstDetail("quantityinpack", "packquantity", "quantityperpack", "countinpack"));
+            addTag(tags, "ТИП", firstDetail("type", "producttype"));
+            addTag(tags, "ТИП ГОЛОВКИ", firstDetail("headtype", "head", "headkind"));
+            addTag(tags, "ПОКРЫТИЕ", firstDetail("coating", "covering"));
+            addTag(tags, "МАТЕРИАЛ", firstDetail("material"));
+            if (tags.isEmpty()) return y;
+            int x = 0;
+            for (String tag : tags) {
+                boolean brandTag = tag.startsWith("БРЕНД:");
+                g.setFont(SMALL);
+                int tagWidth = g.getFontMetrics().stringWidth(tag) + 12;
+                if (x > 0 && x + tagWidth > CONTENT_WIDTH) { x = 0; y += 20; }
+                if (paint) {
+                    g.setColor(brandTag ? Color.BLACK : Color.WHITE);
+                    g.fillRoundRect(x, y, tagWidth, 16, 4, 4);
+                    g.setColor(Color.BLACK);
+                    g.drawRoundRect(x, y, tagWidth, 16, 4, 4);
+                    if (brandTag) g.setColor(Color.WHITE);
+                    g.drawString(tag, x + 6, y + 11);
+                    g.setColor(Color.BLACK);
+                }
+                x += tagWidth + 5;
+            }
+            return y + 19;
+        }
+
+        private String firstDetail(String... keys) {
+            for (String key : keys) {
+                String value = findDetail(product.details(), key);
+                if (!value.isBlank()) return value;
+            }
+            return "";
+        }
+
+        private static void addTag(List<String> tags, String label, String value) {
+            if (!value.isBlank()) tags.add(label + ": " + value.toUpperCase(Locale.ROOT));
+        }
+
+        private int drawCodeCells(Graphics2D g, int x, int y, int width, boolean paint) {
+            int gap = 8, left = (width - gap) * 58 / 100, right = width - gap - left;
+            drawCell(g, x, y, left, 78, "SAP", paint);
+            drawCell(g, x + left + gap, y, right, 78, "АРТИКУЛ", paint);
+            if (paint && !product.stCode().isBlank()) {
+                g.setFont(CODE); centered(g, product.stCode(), x, y + 48, left);
+            }
+            if (paint && !product.marking().isBlank()) {
+                g.setFont(ARTICLE); centered(g, product.marking(), x + left + gap, y + 43, right);
+            }
+            if (paint) {
+                g.setFont(SMALL);
+                centered(g, "Код SAP", x, y + 70, left);
+                centered(g, "Артикул товара", x + left + gap, y + 68, right);
+            }
+            y += 86;
+            drawCell(g, x, y, left, 116, "ШТРИХКОД", paint);
+            drawCell(g, x + left + gap, y, right, 116, "QR SAP", paint);
+            if (paint && !product.barcode().isBlank()) {
+                String digits = product.barcode().trim();
+                String suffix = digits.length() > 4 ? digits.substring(digits.length() - 4) : digits;
+                String prefix = digits.length() > 4 ? digits.substring(0, digits.length() - 4) : "";
+                g.setFont(validEan ? BARCODE_TEXT : new Font("DejaVu Sans Mono", Font.BOLD, 13));
+                int suffixWidth = g.getFontMetrics().stringWidth(suffix) + 8;
+                int prefixWidth = g.getFontMetrics().stringWidth(prefix);
+                int start = x + Math.max(8, (left - prefixWidth - suffixWidth - 8) / 2);
+                g.setColor(MID_GRAY); g.drawString(prefix, start, y + 34); g.setColor(Color.BLACK);
+                if (validEan) g.drawRoundRect(start + prefixWidth + 4, y + 18, suffixWidth, 22, 4, 4);
+                g.setFont(new Font("DejaVu Sans Mono", Font.BOLD, 13));
+                g.drawString(suffix, start + prefixWidth + 8, y + 34);
+                if (barcode != null) g.drawImage(barcode, x + 15, y + 42, Math.min(210, left - 30), 30, null);
+                else {
+                    g.setFont(SMALL); g.setColor(MID_GRAY);
+                    g.drawString("EAN-13: неверная контрольная цифра", x + 8, y + 63); g.setColor(Color.BLACK);
+                }
+            }
+            if (paint) {
+                g.setFont(SMALL);
+                String barcodeNote = product.barcode().isBlank() ? "Штрихкод отсутствует"
+                        : validEan ? "Содержимое: EAN-13" : "EAN-13 не сформирован";
+                centered(g, barcodeNote, x, y + 104, left);
+            }
+            if (paint && qr != null) {
+                g.drawImage(qr, x + left + gap + (right - 58) / 2, y + 25, 58, 58, null);
+                g.setFont(SMALL);
+                centered(g, "Содержимое: код SAP", x + left + gap, y + 104, right);
+            }
+            y += 124;
+            String note = !priceNote.isBlank() ? priceNote : String.join(" · ", prices);
+            if (!note.isBlank()) {
+                if (paint) {
+                    g.setColor(LIGHT_GRAY); g.fillRect(x, y, width, 25); g.setColor(Color.BLACK);
+                    g.setFont(BODY_BOLD); centered(g, note, x, y + 17, width);
+                }
+                y += 31;
+            }
+            return y;
+        }
+
+        private static void drawCell(Graphics2D g, int x, int y, int width, int height, String label, boolean paint) {
+            if (!paint) return;
+            g.setColor(Color.BLACK); g.setStroke(new java.awt.BasicStroke(0.9f)); g.drawRect(x, y, width, height);
+            g.setFont(SMALL);
+            g.fillRoundRect(x + 5, y + 4, g.getFontMetrics().stringWidth(label) + 12, 13, 4, 4);
+            g.setFont(new Font("DejaVu Sans", Font.BOLD, 7)); g.setColor(Color.WHITE);
+            g.drawString(label, x + 11, y + 13); g.setColor(Color.BLACK);
+        }
+
+        private static void centered(Graphics2D g, String text, int x, int baseline, int width) {
+            Font original = g.getFont();
+            while (g.getFont().getSize() > 8 && g.getFontMetrics().stringWidth(text) > width - 16) {
+                g.setFont(g.getFont().deriveFont((float) g.getFont().getSize() - 1));
+            }
+            FontMetrics fm = g.getFontMetrics();
+            g.drawString(text, x + Math.max(8, (width - fm.stringWidth(text)) / 2), baseline);
+            g.setFont(original);
+        }
+
+        private static int drawSection(Graphics2D g, String title, int x, int y, int width, boolean paint) {
+            if (paint) {
+                g.setColor(Color.BLACK); g.fillRect(x, y, width, 16); g.setFont(SECTION); g.setColor(Color.WHITE);
+                g.drawString(title, x + 7, y + 11); g.setColor(Color.BLACK);
+            }
+            return y + 21;
+        }
+
+        private static int drawSubheading(Graphics2D g, String title, int y, int width, boolean paint) {
+            if (paint) {
+                g.setColor(new Color(236, 236, 236)); g.fillRect(0, y, width, 16); g.setColor(Color.BLACK);
+                g.setFont(BODY_BOLD); g.drawString(title, 6, y + 11);
+            }
+            return y + 20;
+        }
+
+        private static int drawAttribute(Graphics2D g, String label, String value, int y, int width,
+                                         Font labelFont, Font valueFont, boolean paint) {
+            int labelWidth = 190, valueX = labelWidth + 8, valueWidth = width - valueX - 6;
+            g.setFont(labelFont); int labelLines = wrappedLineCount(g, label, labelWidth - 12);
+            g.setFont(valueFont); int valueLines = wrappedLineCount(g, value, valueWidth);
+            int lineHeight = labelFont.getSize() <= 7 ? 9 : 11, lines = Math.max(labelLines, valueLines);
+            if (paint) {
+                g.setColor(labelFont.getSize() <= 7 ? new Color(51, 51, 51) : Color.BLACK);
+                g.setFont(labelFont); drawWrapped(g, label, 6, y + lineHeight, labelWidth - 12, lineHeight, true);
+                g.setFont(valueFont); drawWrapped(g, value, valueX, y + lineHeight, valueWidth, lineHeight, true);
+                g.setColor(RULE); g.setStroke(new java.awt.BasicStroke(0.5f));
+                g.drawLine(0, y + lines * lineHeight + 2, width, y + lines * lineHeight + 2); g.setColor(Color.BLACK);
+            }
+            return y + lines * lineHeight + 5;
+        }
+
+        private static boolean isServiceField(String key) {
+            return key.equals("id") || key.equals("code") || key.equals("cost") || key.startsWith("is")
+                    || key.contains("flag") || key.contains("raw");
+        }
+
+        private static boolean isValidEan13(String value) {
+            if (value == null || !value.matches("\\d{13}")) return false;
+            int sum = 0;
+            for (int i = 0; i < 12; i++) sum += (value.charAt(i) - '0') * (i % 2 == 0 ? 1 : 3);
+            return (10 - sum % 10) % 10 == value.charAt(12) - '0';
+        }
+
+        private static int wrappedLineCount(Graphics2D g, String text, int width) {
+            FontMetrics fm = g.getFontMetrics(); int lines = 0;
+            for (String paragraph : text.split("\\n", -1)) {
+                StringBuilder line = new StringBuilder();
+                for (String word : paragraph.split("\\s+")) {
+                    if (word.isEmpty()) continue;
+                    String proposed = line.isEmpty() ? word : line + " " + word;
+                    if (fm.stringWidth(proposed) > width && !line.isEmpty()) { lines++; line.setLength(0); line.append(word); }
+                    else if (line.isEmpty()) line.append(word); else line.append(' ').append(word);
+                }
+                if (!line.isEmpty() || paragraph.isEmpty()) lines++;
+            }
+            return Math.max(1, lines);
+        }
+
+        private static int drawWrapped(Graphics2D g, String text, int x, int y, int width, int lineHeight, boolean paint) {
             FontMetrics metrics = g.getFontMetrics();
             for (String paragraph : text.split("\\n")) {
                 StringBuilder line = new StringBuilder();
@@ -700,25 +1028,16 @@ final class ProductCardDialog extends JPanel {
                     if (word.isEmpty()) continue;
                     String proposed = line.isEmpty() ? word : line + " " + word;
                     if (metrics.stringWidth(proposed) > width && !line.isEmpty()) {
-                        g.drawString(line.toString(), x, y);
+                        if (paint) g.drawString(line.toString(), x, y);
                         y += lineHeight;
                         line.setLength(0);
                         line.append(word);
                     } else if (line.isEmpty()) line.append(word);
                     else line.append(' ').append(word);
                 }
-                if (!line.isEmpty()) { g.drawString(line.toString(), x, y); y += lineHeight; }
+                if (!line.isEmpty()) { if (paint) g.drawString(line.toString(), x, y); y += lineHeight; }
             }
             return y;
-        }
-
-        private static String clip(Graphics2D g, String text, int width) {
-            String clean = normalizeText(text);
-            if (g.getFontMetrics().stringWidth(clean) <= width) return clean;
-            while (!clean.isEmpty() && g.getFontMetrics().stringWidth(clean + "…") > width) {
-                clean = clean.substring(0, clean.length() - 1);
-            }
-            return clean + "…";
         }
 
         private static String normalizeText(String text) {

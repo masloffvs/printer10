@@ -56,7 +56,8 @@ public final class MainWindow extends JFrame {
             peer -> SwingUtilities.invokeLater(this::refreshPeerMesh), PeerMeshPanel::confirmTrust);
     private final PeerMeshPanel peerMeshPanel = new PeerMeshPanel(peerMeshService);
     private final PrintHistoryPanel history = new PrintHistoryPanel(this::restoreBatch, this::refreshHistory);
-    private final SetRetailXConnector network = new SetRetailXConnector(event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
+    private final SetRetailXConnector network = SetRetailXConnector.getInstance(
+            event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
     private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService, workspace);
     private final AddressStoragePanel addressStoragePanel = new AddressStoragePanel(addressStorage);

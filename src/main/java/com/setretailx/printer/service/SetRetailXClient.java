@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.setretailx.printer.repository.ApiExchangeLogRepository;
 
 import java.io.IOException;
 import java.io.EOFException;
@@ -31,6 +32,7 @@ import java.util.function.Consumer;
 final class SetRetailXClient implements AutoCloseable {
     private static final Duration HTTP_CONNECT_TIMEOUT = Duration.ofMinutes(6);
     private static final Duration HTTP_REQUEST_TIMEOUT = Duration.ofMinutes(6);
+    private static final Duration CHECK_REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final String REQUEST_CLASS = "ru.crystals.commons.jsonrpc.domain.JsonRpcRequest";
     private static final String LOGIN_ENDPOINT = "java:app/SET-Users/SessionManagerBean!"
             + "ru.crystals.setretailx.users.ejb.interfaces.ISessionManagerLocal";
@@ -55,6 +57,7 @@ final class SetRetailXClient implements AutoCloseable {
             .build();
     private final AtomicLong requestIds = new AtomicLong(1);
     private final Consumer<ExchangeEvent> eventHandler;
+    private final ApiExchangeLogRepository exchangeLog = new ApiExchangeLogRepository();
     private volatile String token;
     private volatile CompletableFuture<Void> loginInFlight;
     private volatile boolean closed;
@@ -144,7 +147,7 @@ final class SetRetailXClient implements AutoCloseable {
                 .header("Origin", baseUrl)
                 .header("Referer", baseUrl + "/login?redirect=/products/search")
                 .build();
-        send(request, "login").thenAccept(response -> {
+        send(request, "login", safeRequestBody(payload)).thenAccept(response -> {
             JsonNode result = response.path("result");
             if (!response.path("error").isMissingNode() && !response.path("error").isNull()) {
                 throw new CompletionException(new IOException("SetRetailX login: "
@@ -204,10 +207,12 @@ final class SetRetailXClient implements AutoCloseable {
             }
             String methodName = requestPayload.path("method").asText("JSON-RPC");
             emit("Отправлен запрос: " + methodName, "URL: " + safeUrl() + "\n" + safeRequestBody(requestPayload));
-            HttpRequest request = requestBuilder(requestPayload, HTTP_REQUEST_TIMEOUT)
+            Duration requestTimeout = "findChecks".equals(method) || "findCheck".equals(method)
+                    ? CHECK_REQUEST_TIMEOUT : HTTP_REQUEST_TIMEOUT;
+            HttpRequest request = requestBuilder(requestPayload, requestTimeout)
                     .header("Referer", refererFor(methodName))
                     .build();
-            return send(request, methodName);
+            return send(request, methodName, safeRequestBody(requestPayload));
         });
     }
 
@@ -219,12 +224,12 @@ final class SetRetailXClient implements AutoCloseable {
         return call(payload);
     }
 
-    private CompletableFuture<JsonNode> send(HttpRequest request, String method) {
-        return send(request, method, 0);
+    private CompletableFuture<JsonNode> send(HttpRequest request, String method, String safeRequest) {
+        return send(request, method, safeRequest, 0);
     }
 
-    private CompletableFuture<JsonNode> send(HttpRequest request, String method, int retryNumber) {
-        return sendOnce(request, method).handle((response, error) -> {
+    private CompletableFuture<JsonNode> send(HttpRequest request, String method, String safeRequest, int retryNumber) {
+        return sendOnce(request, method, safeRequest).handle((response, error) -> {
             if (error == null) return CompletableFuture.completedFuture(response);
             Throwable cause = unwrap(error);
             if (retryNumber >= connectionRetries || !isClosedConnection(cause) || closed) {
@@ -235,15 +240,19 @@ final class SetRetailXClient implements AutoCloseable {
                     "Соединение было закрыто. Повтор " + nextRetry + " из " + connectionRetries + ".", "warning");
             return CompletableFuture.runAsync(() -> { },
                     CompletableFuture.delayedExecutor(200L * nextRetry, TimeUnit.MILLISECONDS, executor))
-                    .thenCompose(ignored -> send(request, method, nextRetry));
+                    .thenCompose(ignored -> send(request, method, safeRequest, nextRetry));
         }).thenCompose(future -> future);
     }
 
-    private CompletableFuture<JsonNode> sendOnce(HttpRequest request, String method) {
+    private CompletableFuture<JsonNode> sendOnce(HttpRequest request, String method, String safeRequest) {
         Instant started = Instant.now();
+        java.util.concurrent.atomic.AtomicReference<Integer> status = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<String> safeResponse = new java.util.concurrent.atomic.AtomicReference<>("");
         return http.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                 .thenApply(response -> {
                     String body = response.body();
+                    status.set(response.statusCode());
+                    safeResponse.set(safeBody(body, method));
                     if (response.statusCode() < 200 || response.statusCode() >= 300) {
                         emit("Ответ SetRetailX: HTTP " + response.statusCode(),
                                 "Метод: " + method + "\nВремя ответа: " + elapsed(started) + " с\n" + safeBody(body, method), "error");
@@ -270,6 +279,11 @@ final class SetRetailXClient implements AutoCloseable {
                         throw new CompletionException(error);
                     }
                 }).whenComplete((result, error) -> {
+                    Throwable failure = error == null ? null : unwrap(error);
+                    exchangeLog.record(method, safeRequest, safeResponse.get(), status.get(),
+                            Duration.between(started, Instant.now()).toMillis(),
+                            failure == null ? "success" : "error",
+                            failure == null ? null : redactSecrets(safeMessage(failure)));
                     if (error != null && unwrap(error) instanceof java.net.http.HttpTimeoutException) {
                         emit("Таймаут запроса: " + method, "Запрос превысил допустимое время ожидания.", "error");
                     } else if (error != null && !(unwrap(error) instanceof IOException
@@ -352,6 +366,11 @@ final class SetRetailXClient implements AutoCloseable {
 
     private String safeRequestBody(ObjectNode payload) {
         ObjectNode safe = (ObjectNode) redactSensitiveFields(payload.deepCopy());
+        if ("login".equals(safe.path("method").asText()) && safe.path("params").isArray()) {
+            ArrayNode params = (ArrayNode) safe.path("params");
+            if (!params.isEmpty()) params.set(0, JSON.getNodeFactory().textNode("[скрыто: имя пользователя]"));
+            if (params.size() > 1) params.set(1, JSON.getNodeFactory().textNode("[скрыто: пароль]"));
+        }
         if (("getSimpleProductsByFilter".equals(safe.path("method").asText())
                 || "findChecks".equals(safe.path("method").asText())
                 || "findCheck".equals(safe.path("method").asText()))
@@ -398,6 +417,7 @@ final class SetRetailXClient implements AutoCloseable {
             if (rawFragment != null) safe = safe.replace(rawFragment, "[скрыто]");
         }
         if (!password.isEmpty()) safe = safe.replace(password, "[скрыто]");
+        if (!username.isEmpty()) safe = safe.replace(username, "[скрыто]");
         if (token != null && !token.isEmpty()) safe = safe.replace(token, "[скрыто]");
         return safe;
     }

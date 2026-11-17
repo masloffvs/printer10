@@ -1,13 +1,18 @@
 package com.setretailx.printer.ui;
 
 import com.setretailx.printer.repository.SalesPointRepository;
+import com.setretailx.printer.repository.SalesPointRepository.MapFixture;
 import com.setretailx.printer.repository.SalesPointRepository.SalesPoint;
 
+import javax.swing.JButton;
+import javax.swing.JColorChooser;
+import javax.swing.JLabel;
 import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
+import javax.swing.JTextField;
 import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.FontMetrics;
@@ -17,6 +22,9 @@ import java.awt.GradientPaint;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
+import java.awt.FlowLayout;
+import java.awt.geom.AffineTransform;
+import java.awt.geom.Point2D;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.List;
@@ -35,6 +43,23 @@ final class SalesPointMapPanel extends JPanel {
         this.repository = repository;
         this.openEditor = openEditor;
         this.pointsChanged = pointsChanged;
+        JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.LEADING, 6, 5));
+        JButton zoomOut = new JButton("−");
+        JButton zoomIn = new JButton("+");
+        JButton rotateLeft = new JButton("⟲ Повернуть");
+        JButton rotateRight = new JButton("⟳ Повернуть");
+        JButton addShelf = new JButton("＋ Стеллаж");
+        JButton addWalkway = new JButton("＋ Дорожка");
+        JLabel hint = new JLabel("Колесо — масштаб · перетаскивание — перемещение · ПКМ — настройки");
+        zoomOut.addActionListener(event -> map.setZoom(map.zoom / 1.15));
+        zoomIn.addActionListener(event -> map.setZoom(map.zoom * 1.15));
+        rotateLeft.addActionListener(event -> map.rotateView(-Math.PI / 12));
+        rotateRight.addActionListener(event -> map.rotateView(Math.PI / 12));
+        addShelf.addActionListener(event -> createFixture("shelf"));
+        addWalkway.addActionListener(event -> createFixture("walkway"));
+        toolbar.add(zoomOut); toolbar.add(zoomIn); toolbar.add(new JLabel("Вид:"));
+        toolbar.add(rotateLeft); toolbar.add(rotateRight); toolbar.add(addShelf); toolbar.add(addWalkway); toolbar.add(hint);
+        add(toolbar, java.awt.BorderLayout.NORTH);
         add(new JScrollPane(map), java.awt.BorderLayout.CENTER);
         refresh();
     }
@@ -42,11 +67,30 @@ final class SalesPointMapPanel extends JPanel {
     void refresh() {
         try {
             map.setPoints(repository.points());
+            map.setFixtures(repository.fixtures());
             pointsChanged.run();
         } catch (Exception error) {
             JOptionPane.showMessageDialog(this, "Не удалось загрузить точки продаж: " + error.getMessage(),
                     "Карта торговых точек", JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    private void createFixture(String kind) {
+        String name = JOptionPane.showInputDialog(this, "Название объекта:",
+                "walkway".equals(kind) ? "Проход" : "Стеллаж");
+        if (name == null || name.isBlank()) return;
+        try {
+            repository.createFixture(kind, name, Math.max(30, map.getWidth() / 2 - 70),
+                    Math.max(30, map.getHeight() / 2 - 25), "walkway".equals(kind) ? 220 : 140,
+                    "walkway".equals(kind) ? 52 : 54, 0,
+                    "walkway".equals(kind) ? "#55B98A" : "#3B82F6");
+            refresh();
+        } catch (Exception error) { showError("Не удалось создать объект карты", error); }
+    }
+
+    private void showError(String title, Exception error) {
+        JOptionPane.showMessageDialog(this, title + ": " + error.getMessage(), "Карта торговых точек",
+                JOptionPane.ERROR_MESSAGE);
     }
 
     private void createPoint(Rectangle bounds) {
@@ -99,10 +143,16 @@ final class SalesPointMapPanel extends JPanel {
 
     private final class MapCanvas extends JPanel {
         private List<SalesPoint> points = List.of();
+        private List<MapFixture> fixtures = List.of();
         private Point press;
         private Point last;
         private SalesPoint moving;
+        private MapFixture movingFixture;
+        private Point pressWorld;
+        private double zoom = 1.0;
+        private double viewRotation;
         private SalesPoint hovered;
+        private MapFixture hoveredFixture;
         private Rectangle draft;
         private boolean contextHandled;
 
@@ -121,8 +171,10 @@ final class SalesPointMapPanel extends JPanel {
                     }
                     if (!javax.swing.SwingUtilities.isLeftMouseButton(event)) return;
                     press = event.getPoint();
-                    last = press;
-                    moving = at(press);
+                    pressWorld = toWorld(press);
+                    last = pressWorld;
+                    moving = at(pressWorld);
+                    movingFixture = moving == null ? fixtureAt(pressWorld) : null;
                     draft = null;
                 }
 
@@ -147,20 +199,35 @@ final class SalesPointMapPanel extends JPanel {
                                     "Карта торговых точек", JOptionPane.ERROR_MESSAGE);
                             refresh();
                         }
+                    } else if (movingFixture != null) {
+                        try {
+                            MapFixture fixture = fixture(movingFixture.id());
+                            if (fixture != null) repository.moveFixture(fixture.id(), fixture.x(), fixture.y());
+                            refresh();
+                        } catch (Exception error) { showError("Не удалось переместить объект", error); refresh(); }
                     }
                     press = null;
                     last = null;
                     moving = null;
+                    movingFixture = null;
+                    pressWorld = null;
                     draft = null;
                     repaint();
                 }
             });
+            addMouseWheelListener(event -> {
+                double factor = event.getWheelRotation() < 0 ? 1.1 : 1 / 1.1;
+                setZoom(zoom * factor);
+            });
             addMouseMotionListener(new MouseAdapter() {
                 @Override public void mouseMoved(MouseEvent event) {
-                    SalesPoint next = at(event.getPoint());
-                    if (hovered != next) {
+                    Point world = toWorld(event.getPoint());
+                    SalesPoint next = at(world);
+                    MapFixture nextFixture = fixtureAt(world);
+                    if (hovered != next || hoveredFixture != nextFixture) {
                         hovered = next;
-                        setCursor(next == null ? java.awt.Cursor.getDefaultCursor()
+                        hoveredFixture = nextFixture;
+                        setCursor(next == null && nextFixture == null ? java.awt.Cursor.getDefaultCursor()
                                 : java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
                         repaint();
                     }
@@ -169,16 +236,28 @@ final class SalesPointMapPanel extends JPanel {
                 @Override public void mouseDragged(MouseEvent event) {
                     if (press == null) return;
                     if (moving != null) {
-                        int dx = event.getX() - last.x;
-                        int dy = event.getY() - last.y;
+                        Point world = toWorld(event.getPoint());
+                        int dx = world.x - last.x;
+                        int dy = world.y - last.y;
                         points = points.stream().map(point -> point.id() == moving.id()
                                 ? new SalesPoint(point.id(), point.name(), Math.max(0, point.x() + dx),
                                 Math.max(0, point.y() + dy), point.width(), point.height()) : point).toList();
-                        last = event.getPoint();
+                        last = world;
+                        repaint();
+                    } else if (movingFixture != null) {
+                        Point world = toWorld(event.getPoint());
+                        int dx = world.x - last.x;
+                        int dy = world.y - last.y;
+                        fixtures = fixtures.stream().map(fixture -> fixture.id() == movingFixture.id()
+                                ? new MapFixture(fixture.id(), fixture.kind(), fixture.name(), fixture.x() + dx,
+                                fixture.y() + dy, fixture.width(), fixture.height(), fixture.rotation(), fixture.color())
+                                : fixture).toList();
+                        last = world;
                         repaint();
                     } else {
-                        draft = new Rectangle(Math.min(press.x, event.getX()), Math.min(press.y, event.getY()),
-                                Math.abs(event.getX() - press.x), Math.abs(event.getY() - press.y));
+                        Point world = toWorld(event.getPoint());
+                        draft = new Rectangle(Math.min(pressWorld.x, world.x), Math.min(pressWorld.y, world.y),
+                                Math.abs(world.x - pressWorld.x), Math.abs(world.y - pressWorld.y));
                         repaint();
                     }
                 }
@@ -190,14 +269,20 @@ final class SalesPointMapPanel extends JPanel {
         }
 
         private void showContextMenu(MouseEvent event) {
-            SalesPoint point = at(event.getPoint());
+            Point world = toWorld(event.getPoint());
+            SalesPoint point = at(world);
             if (point != null) {
                 SalesPointMapPanel.this.showContextMenu(point, event.getPoint());
                 return;
             }
+            MapFixture fixture = fixtureAt(world);
+            if (fixture != null) {
+                showFixtureMenu(fixture, event.getPoint());
+                return;
+            }
             JPopupMenu menu = new JPopupMenu();
             JMenuItem create = new JMenuItem("Создать точку здесь");
-            create.addActionListener(ignored -> createPoint(new Rectangle(event.getX(), event.getY(), 150, 72)));
+            create.addActionListener(ignored -> createPoint(new Rectangle(world.x, world.y, 150, 72)));
             menu.add(create);
             menu.show(MapCanvas.this, event.getX(), event.getY());
         }
@@ -205,6 +290,93 @@ final class SalesPointMapPanel extends JPanel {
         private void setPoints(List<SalesPoint> values) {
             points = List.copyOf(values);
             repaint();
+        }
+
+        private void setFixtures(List<MapFixture> values) { fixtures = List.copyOf(values); repaint(); }
+
+        private void setZoom(double value) { zoom = Math.max(0.4, Math.min(2.6, value)); repaint(); }
+        private void rotateView(double value) { viewRotation += value; repaint(); }
+
+        private Point toWorld(Point screen) {
+            try {
+                AffineTransform transform = viewTransform();
+                transform.invert();
+                Point2D result = transform.transform(screen, null);
+                return new Point((int) Math.round(result.getX()), (int) Math.round(result.getY()));
+            } catch (java.awt.geom.NoninvertibleTransformException ignored) { return new Point(screen); }
+        }
+
+        private AffineTransform viewTransform() {
+            AffineTransform transform = new AffineTransform();
+            transform.translate(getWidth() / 2.0, getHeight() / 2.0);
+            transform.rotate(viewRotation);
+            transform.scale(zoom, zoom);
+            transform.translate(-getWidth() / 2.0, -getHeight() / 2.0);
+            return transform;
+        }
+
+        private MapFixture fixture(long id) {
+            return fixtures.stream().filter(value -> value.id() == id).findFirst().orElse(null);
+        }
+
+        private MapFixture fixtureAt(Point world) {
+            for (int index = fixtures.size() - 1; index >= 0; index--) {
+                MapFixture fixture = fixtures.get(index);
+                Point2D local = fixtureLocal(fixture, world);
+                if (new Rectangle(-fixture.width() / 2, -fixture.height() / 2,
+                        fixture.width(), fixture.height()).contains(local)) return fixture;
+            }
+            return null;
+        }
+
+        private Point2D fixtureLocal(MapFixture fixture, Point world) {
+            AffineTransform transform = new AffineTransform();
+            transform.translate(fixture.x() + fixture.width() / 2.0, fixture.y() + fixture.height() / 2.0);
+            transform.rotate(Math.toRadians(fixture.rotation()));
+            try { return transform.createInverse().transform(world, null); }
+            catch (java.awt.geom.NoninvertibleTransformException ignored) { return new Point2D.Double(); }
+        }
+
+        private void showFixtureMenu(MapFixture fixture, Point location) {
+            JPopupMenu menu = new JPopupMenu();
+            JMenuItem edit = new JMenuItem("Размер, поворот и цвет…");
+            edit.addActionListener(event -> editFixture(fixture));
+            menu.add(edit);
+            JMenuItem delete = new JMenuItem("Удалить объект");
+            delete.addActionListener(event -> {
+                try { repository.deleteFixture(fixture.id()); refresh(); }
+                catch (Exception error) { showError("Не удалось удалить объект", error); }
+            });
+            menu.add(delete);
+            menu.show(MapCanvas.this, location.x, location.y);
+        }
+
+        private void editFixture(MapFixture fixture) {
+            JTextField name = new JTextField(fixture.name());
+            JTextField width = new JTextField(String.valueOf(fixture.width()));
+            JTextField height = new JTextField(String.valueOf(fixture.height()));
+            JTextField rotation = new JTextField(String.valueOf(Math.round(fixture.rotation())));
+            JButton color = new JButton("Выбрать цвет");
+            Color[] selectedColor = {Color.decode(fixture.color())};
+            color.setBackground(selectedColor[0]);
+            color.addActionListener(event -> {
+                Color chosen = JColorChooser.showDialog(this, "Цвет объекта", selectedColor[0]);
+                if (chosen != null) { selectedColor[0] = chosen; color.setBackground(chosen); }
+            });
+            JPanel form = new JPanel(new java.awt.GridLayout(0, 2, 6, 6));
+            form.add(new JLabel("Название")); form.add(name);
+            form.add(new JLabel("Ширина (px)")); form.add(width);
+            form.add(new JLabel("Высота (px)")); form.add(height);
+            form.add(new JLabel("Поворот (°)")); form.add(rotation);
+            form.add(new JLabel("Цвет")); form.add(color);
+            if (JOptionPane.showConfirmDialog(this, form, "Настройки объекта карты",
+                    JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
+            try {
+                String hex = String.format("#%06X", selectedColor[0].getRGB() & 0xFFFFFF);
+                repository.updateFixture(fixture.id(), name.getText(), Integer.parseInt(width.getText().trim()),
+                        Integer.parseInt(height.getText().trim()), Double.parseDouble(rotation.getText().trim()), hex);
+                refresh();
+            } catch (Exception error) { showError("Проверьте параметры объекта", error); }
         }
 
         private SalesPoint point(long id) {
@@ -233,6 +405,7 @@ final class SalesPointMapPanel extends JPanel {
                 if (panel == null) panel = new Color(246, 248, 250);
                 g.setColor(panel);
                 g.fillRect(0, 0, getWidth(), getHeight());
+                g.transform(viewTransform());
 
                 Color grid = blend(panel, javax.swing.UIManager.getColor("Label.foreground"), 0.10f);
                 g.setColor(grid);
@@ -243,6 +416,8 @@ final class SalesPointMapPanel extends JPanel {
                     Rectangle bounds = bounds(point);
                     paintPoint(g, point, bounds, hovered != null && hovered.id() == point.id());
                 }
+                for (MapFixture fixture : fixtures) paintFixture(g, fixture, movingFixture != null
+                        && fixture.id() == movingFixture.id());
                 if (draft != null) {
                     Color accent = accentColor();
                     g.setColor(new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 35));
@@ -255,6 +430,46 @@ final class SalesPointMapPanel extends JPanel {
             } finally {
                 g.dispose();
             }
+        }
+
+        private void paintFixture(Graphics2D g, MapFixture fixture, boolean active) {
+            Graphics2D object = (Graphics2D) g.create();
+            try {
+                object.translate(fixture.x() + fixture.width() / 2.0, fixture.y() + fixture.height() / 2.0);
+                object.rotate(Math.toRadians(fixture.rotation()));
+                Color color = Color.decode(fixture.color());
+                int x = -fixture.width() / 2, y = -fixture.height() / 2;
+                object.setColor(new Color(0, 0, 0, 45));
+                object.fillRoundRect(x + 2, y + 4, fixture.width(), fixture.height(), 12, 12);
+                object.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(),
+                        "walkway".equals(fixture.kind()) ? 105 : 225));
+                object.fillRoundRect(x, y, fixture.width(), fixture.height(), 12, 12);
+                object.setColor(color.darker());
+                object.setStroke(new BasicStroke(active ? 3f : 1.5f, BasicStroke.CAP_ROUND,
+                        BasicStroke.JOIN_ROUND, 10f, "walkway".equals(fixture.kind()) ? new float[]{8f, 6f} : null, 0));
+                object.drawRoundRect(x, y, fixture.width(), fixture.height(), 12, 12);
+                if ("shelf".equals(fixture.kind())) {
+                    object.setColor(new Color(255, 255, 255, 115));
+                    object.setStroke(new BasicStroke(1f));
+                    int rowGap = Math.max(9, fixture.height() / 4);
+                    for (int row = y + rowGap; row < y + fixture.height() - 4; row += rowGap) {
+                        object.drawLine(x + 8, row, x + fixture.width() - 8, row);
+                    }
+                    int columnGap = Math.max(24, fixture.width() / 6);
+                    for (int column = x + columnGap; column < x + fixture.width() - 4; column += columnGap) {
+                        object.drawLine(column, y + 5, column, y + fixture.height() - 5);
+                    }
+                }
+                object.setColor(new Color(255, 255, 255, 225));
+                object.setFont(getFont().deriveFont(java.awt.Font.BOLD, 12f));
+                FontMetrics metrics = object.getFontMetrics();
+                String label = fixture.name().length() > 24 ? fixture.name().substring(0, 23) + "…" : fixture.name();
+                object.setColor(new Color(20, 28, 38, 210));
+                object.fillRoundRect(-metrics.stringWidth(label) / 2 - 5, -9,
+                        metrics.stringWidth(label) + 10, 18, 8, 8);
+                object.setColor(Color.WHITE);
+                object.drawString(label, -metrics.stringWidth(label) / 2, metrics.getAscent() / 2);
+            } finally { object.dispose(); }
         }
 
         private void paintPoint(Graphics2D g, SalesPoint point, Rectangle bounds, boolean active) {

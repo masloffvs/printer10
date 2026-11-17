@@ -40,6 +40,8 @@ public final class PrintHistoryRepository {
         this.path = path;
     }
 
+    public void migrate() throws SQLException { ensureSchema(); }
+
     public long addBatch(List<PrintHistoryEntry> entries) throws SQLException, IOException {
         ensureSchema();
         String createdAt = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS).toString();

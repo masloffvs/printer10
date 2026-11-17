@@ -20,7 +20,13 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /** Settings, manual execution, and run history for one background task. */
 @SuppressWarnings("serial")
@@ -36,9 +42,13 @@ public final class PriceTaskSettingsPanel extends JPanel {
     private final JLabel status = new JLabel("Загрузка состояния задачи…");
     private final DefaultTableModel runsModel = model("Начало", "Завершение", "Статус", "Результат");
     private final JTable runsTable = new JTable(runsModel);
+    private final DefaultTableModel subtasksModel = model("Подзадача", "Начало", "Завершение", "Статус", "Результат");
+    private final JTable subtasksTable = new JTable(subtasksModel);
     private final JTextArea details = new JTextArea();
     private final javax.swing.Timer refreshTimer;
     private List<PriceMonitoringTaskService.TaskRun> runs = List.of();
+    private List<PriceMonitoringTaskService.SubtaskRun> subtasks = List.of();
+    private Long displayedRunId;
     private boolean refreshing;
     private boolean settingsLoaded;
 
@@ -63,9 +73,21 @@ public final class PriceTaskSettingsPanel extends JPanel {
         runsTable.setFillsViewportHeight(true);
         runsTable.setSelectionMode(javax.swing.ListSelectionModel.SINGLE_SELECTION);
         runsTable.getSelectionModel().addListSelectionListener(event -> {
-            if (!event.getValueIsAdjusting()) showSelectedRun();
+            if (!event.getValueIsAdjusting() && !refreshing) loadSelectedRun();
         });
-        add(new JScrollPane(runsTable), BorderLayout.CENTER);
+        JScrollPane runsScroll = new JScrollPane(runsTable);
+        runsScroll.setBorder(BorderFactory.createTitledBorder("Запуски"));
+        subtasksTable.setFillsViewportHeight(true);
+        subtasksTable.setSelectionMode(javax.swing.ListSelectionModel.SINGLE_SELECTION);
+        subtasksTable.getSelectionModel().addListSelectionListener(event -> {
+            if (!event.getValueIsAdjusting() && !refreshing) showDetails();
+        });
+        JScrollPane subtasksScroll = new JScrollPane(subtasksTable);
+        subtasksScroll.setBorder(BorderFactory.createTitledBorder("Подзадачи выбранного запуска"));
+        javax.swing.JSplitPane history = new javax.swing.JSplitPane(
+                javax.swing.JSplitPane.VERTICAL_SPLIT, runsScroll, subtasksScroll);
+        history.setResizeWeight(0.5);
+        add(history, BorderLayout.CENTER);
 
         details.setEditable(false);
         details.setLineWrap(true);
@@ -152,7 +174,7 @@ public final class PriceTaskSettingsPanel extends JPanel {
             }
             if (selectedRow < 0 && !runs.isEmpty()) selectedRow = 0;
             if (selectedRow >= 0) runsTable.setRowSelectionInterval(selectedRow, selectedRow);
-            else details.setText("Для этой задачи ещё нет сохранённых запусков.");
+            updateSubtasks();
         } catch (SQLException error) {
             status.setText("Не удалось загрузить задачу или журнал: " + error.getMessage());
         } finally {
@@ -165,9 +187,91 @@ public final class PriceTaskSettingsPanel extends JPanel {
         return row >= 0 && row < runs.size() ? runs.get(row).id() : null;
     }
 
-    private void showSelectedRun() {
-        int row = runsTable.getSelectedRow();
-        if (row >= 0 && row < runs.size()) details.setText(runs.get(row).result());
+    private void loadSelectedRun() {
+        refreshing = true;
+        try {
+            updateSubtasks();
+        } catch (SQLException error) {
+            status.setText("Не удалось загрузить подзадачи: " + error.getMessage());
+        } finally {
+            refreshing = false;
+        }
+    }
+
+    private void updateSubtasks() throws SQLException {
+        Long runId = selectedRunId();
+        Long selectedSubtaskId = Objects.equals(runId, displayedRunId) ? selectedSubtaskId() : null;
+        List<PriceMonitoringTaskService.SubtaskRun> loaded;
+        try {
+            loaded = runId == null ? List.of() : service.subtasks(runId);
+        } catch (SQLException error) {
+            displayedRunId = null;
+            subtasks = List.of();
+            subtasksModel.setRowCount(0);
+            showDetails();
+            throw error;
+        }
+        Map<Long, List<PriceMonitoringTaskService.SubtaskRun>> children = new HashMap<>();
+        Set<Long> ids = new HashSet<>();
+        for (PriceMonitoringTaskService.SubtaskRun subtask : loaded) ids.add(subtask.id());
+        for (PriceMonitoringTaskService.SubtaskRun subtask : loaded) {
+            Long parentId = subtask.parentId();
+            if (parentId != null && ids.contains(parentId)) {
+                children.computeIfAbsent(parentId, ignored -> new ArrayList<>()).add(subtask);
+            }
+        }
+        List<PriceMonitoringTaskService.SubtaskRun> ordered = new ArrayList<>();
+        List<Integer> depths = new ArrayList<>();
+        Set<Long> visited = new HashSet<>();
+        for (PriceMonitoringTaskService.SubtaskRun subtask : loaded) {
+            if (subtask.parentId() == null || !ids.contains(subtask.parentId())) {
+                appendSubtask(subtask, 0, children, visited, ordered, depths);
+            }
+        }
+        for (PriceMonitoringTaskService.SubtaskRun subtask : loaded) {
+            appendSubtask(subtask, 0, children, visited, ordered, depths);
+        }
+        subtasks = ordered;
+        displayedRunId = runId;
+        subtasksModel.setRowCount(0);
+        int selectedRow = -1;
+        for (int row = 0; row < subtasks.size(); row++) {
+            PriceMonitoringTaskService.SubtaskRun subtask = subtasks.get(row);
+            subtasksModel.addRow(new Object[]{"    ".repeat(depths.get(row)) + subtask.name(),
+                    formatTime(subtask.startedAt(), "—"), formatTime(subtask.finishedAt(), "Выполняется"),
+                    subtask.status(), subtask.result()});
+            if (selectedSubtaskId != null && subtask.id() == selectedSubtaskId) selectedRow = row;
+        }
+        if (selectedRow >= 0) subtasksTable.setRowSelectionInterval(selectedRow, selectedRow);
+        showDetails();
+    }
+
+    private static void appendSubtask(PriceMonitoringTaskService.SubtaskRun subtask, int depth,
+            Map<Long, List<PriceMonitoringTaskService.SubtaskRun>> children, Set<Long> visited,
+            List<PriceMonitoringTaskService.SubtaskRun> ordered, List<Integer> depths) {
+        if (!visited.add(subtask.id())) return;
+        ordered.add(subtask);
+        depths.add(depth);
+        for (PriceMonitoringTaskService.SubtaskRun child : children.getOrDefault(subtask.id(), List.of())) {
+            appendSubtask(child, depth + 1, children, visited, ordered, depths);
+        }
+    }
+
+    private Long selectedSubtaskId() {
+        int row = subtasksTable.getSelectedRow();
+        return row >= 0 && row < subtasks.size() ? subtasks.get(row).id() : null;
+    }
+
+    private void showDetails() {
+        int row = subtasksTable.getSelectedRow();
+        if (row >= 0 && row < subtasks.size()) {
+            details.setText(subtasks.get(row).result());
+        } else {
+            row = runsTable.getSelectedRow();
+            details.setText(row >= 0 && row < runs.size() ? runs.get(row).result()
+                    : "Для этой задачи ещё нет сохранённых запусков.");
+        }
+        details.setCaretPosition(0);
     }
 
     private static DefaultTableModel model(String... columns) {

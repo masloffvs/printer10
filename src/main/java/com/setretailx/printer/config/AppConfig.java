@@ -15,6 +15,7 @@ public final class AppConfig {
     public static final Path DOT_ENV_PATH = APP_DIR.resolve(".env");
     public static final Path DB_PATH = APP_DIR.resolve("all_products.sqlite");
     public static final Path PRINT_HISTORY_PATH = printHistoryPath();
+    public static final Path API_EXCHANGE_LOG_PATH = apiExchangeLogPath();
     public static final List<PrintFormat> PRINT_FORMATS = List.of(
             new PrintFormat("A", "Формат A", 9974664, "22766"),
             new PrintFormat("B", "Формат B", 9974666, "23841"),
@@ -55,6 +56,22 @@ public final class AppConfig {
         return Path.of(System.getenv().getOrDefault("XDG_DATA_HOME",
                         Path.of(System.getProperty("user.home"), ".local", "share").toString()),
                 "SetRetailX", "print_history.sqlite");
+    }
+
+    private static Path apiExchangeLogPath() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.contains("mac") || os.contains("darwin")) {
+            return Path.of(System.getProperty("user.home"), "Library", "Application Support",
+                    "SetRetailX", "api_exchange.sqlite");
+        }
+        if (os.contains("win")) {
+            return Path.of(System.getenv().getOrDefault("LOCALAPPDATA",
+                    Path.of(System.getProperty("user.home"), "AppData", "Local").toString()),
+                    "SetRetailX", "api_exchange.sqlite");
+        }
+        return Path.of(System.getenv().getOrDefault("XDG_DATA_HOME",
+                        Path.of(System.getProperty("user.home"), ".local", "share").toString()),
+                "SetRetailX", "api_exchange.sqlite");
     }
 
     public static Path tasksDatabasePath() {

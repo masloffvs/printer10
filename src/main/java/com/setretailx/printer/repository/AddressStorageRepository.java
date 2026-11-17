@@ -30,11 +30,13 @@ public final class AddressStorageRepository {
         this.databasePath = Objects.requireNonNull(databasePath, "databasePath").toAbsolutePath().normalize();
         try {
             if (this.databasePath.getParent() != null) Files.createDirectories(this.databasePath.getParent());
-            initialize();
+            migrate();
         } catch (Exception error) {
             throw new IllegalStateException("Не удалось открыть адресное хранение: " + this.databasePath, error);
         }
     }
+
+    public void migrate() throws SQLException { initialize(); }
 
     public List<StorageAddress> addresses() throws SQLException {
         List<StorageAddress> result = new ArrayList<>();

@@ -32,6 +32,8 @@ public final class ChangedLabelPrintHistoryRepository {
     public ChangedLabelPrintHistoryRepository() { this(AppConfig.PRINT_HISTORY_PATH); }
     public ChangedLabelPrintHistoryRepository(java.nio.file.Path path) { this.path = path.toAbsolutePath().normalize(); }
 
+    public void migrate() throws SQLException { ensureSchema(); }
+
     public void addSuccessful(List<PrintHistoryEntry> entries) throws SQLException {
         if (entries == null || entries.isEmpty()) return;
         ensureSchema();

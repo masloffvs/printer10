@@ -27,12 +27,29 @@ public final class SetRetailXConnector implements AutoCloseable {
     private static final String CHECK_ENDPOINT = "java:app/SET-OperDay/SET/CheckManager!"
             + "ru.crystals.operday.gui.flexendpoints.check.CheckManagerLocal";
     private static final ObjectMapper JSON = new ObjectMapper();
-    private final Consumer<ExchangeEvent> eventHandler;
+    private volatile Consumer<ExchangeEvent> eventHandler;
     private volatile SetRetailXClient transport;
 
-    public SetRetailXConnector(Consumer<ExchangeEvent> eventHandler) {
+    private static final class InstanceHolder {
+        private static final SetRetailXConnector INSTANCE = new SetRetailXConnector(ignored -> { });
+    }
+
+    /** Returns the application-wide connector, optionally installing its diagnostics listener. */
+    public static SetRetailXConnector getInstance(Consumer<ExchangeEvent> eventHandler) {
+        SetRetailXConnector instance = InstanceHolder.INSTANCE;
+        if (eventHandler != null) instance.setEventHandler(eventHandler);
+        return instance;
+    }
+
+    public static SetRetailXConnector getInstance() { return getInstance(null); }
+
+    public synchronized void setEventHandler(Consumer<ExchangeEvent> eventHandler) {
         this.eventHandler = eventHandler == null ? ignored -> { } : eventHandler;
-        transport = new SetRetailXClient(this.eventHandler);
+    }
+
+    private SetRetailXConnector(Consumer<ExchangeEvent> eventHandler) {
+        this.eventHandler = eventHandler == null ? ignored -> { } : eventHandler;
+        transport = new SetRetailXClient(this::dispatch);
     }
 
     SetRetailXConnector(SetRetailXClient transport) {
@@ -43,8 +60,13 @@ public final class SetRetailXConnector implements AutoCloseable {
     /** Reloads connection settings and starts a fresh transport/session. */
     public synchronized void reloadSettings() {
         SetRetailXClient previous = transport;
-        transport = new SetRetailXClient(eventHandler);
+        transport = new SetRetailXClient(this::dispatch);
         previous.close();
+    }
+
+    private void dispatch(ExchangeEvent event) {
+        try { eventHandler.accept(event); }
+        catch (RuntimeException ignored) { /* Diagnostics must not affect API operations. */ }
     }
 
     public CompletableFuture<Void> connect() {

@@ -31,6 +31,7 @@ public final class PrinterApp {
         new SwingWorker<ProductRepository.StartupSummary, ProductRepository.StartupProgress>() {
             @Override
             protected ProductRepository.StartupSummary doInBackground() throws Exception {
+                DatabaseMigrator.migrateAll();
                 return products.prepareForStartup(progress -> publish(progress));
             }
 
@@ -52,13 +53,12 @@ public final class PrinterApp {
                 } catch (Exception error) {
                     Throwable cause = error;
                     while (cause.getCause() != null) cause = cause.getCause();
-                    int choice = JOptionPane.showConfirmDialog(splash,
-                            "Не удалось подготовить локальный каталог товаров:\n"
+                    JOptionPane.showMessageDialog(splash,
+                            "Не удалось подготовить базы данных или локальный каталог товаров:\n"
                                     + (cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage())
-                                    + "\n\nПродолжить запуск без оптимизации каталога?",
-                            "Проблема при запуске", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                                    + "\n\nПриложение не будет запущено, чтобы не использовать устаревшую схему.",
+                            "Проблема при запуске", JOptionPane.ERROR_MESSAGE);
                     splash.dispose();
-                    if (choice == JOptionPane.YES_OPTION) new MainWindow().setVisible(true);
                 }
             }
         }.execute();
