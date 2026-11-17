@@ -456,7 +456,9 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
             for (JsonNode summary : batch) {
                 long id = checkId(summary);
                 checkTasks.add(startSubtask(runId, batchTask, "Чек " + id));
-                requests.add(connector.findCheck(id));
+                // findCheck expects the Check DTO, not a numeric ID. Keep the summary returned
+                // by findChecks so the request contains the server-required @class and fields.
+                requests.add(connector.findCheck(summary));
             }
             Throwable requestFailure = null;
             for (int index = 0; index < batch.size(); index++) {

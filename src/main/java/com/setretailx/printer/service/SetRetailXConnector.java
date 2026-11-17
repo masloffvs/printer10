@@ -105,9 +105,15 @@ public final class SetRetailXConnector implements AutoCloseable {
         argument.put("@class", "ru.crystals.operday.vo.SearchArgumentVO");
     }
 
-    /** Loads a receipt's complete positions array, not its duplicate discountInPositions list. */
-    public CompletableFuture<JsonNode> findCheck(long checkId) {
-        return call(CHECK_ENDPOINT, "findCheck", List.of(checkId));
+    /** Loads a receipt's complete positions array using the Check DTO expected by SetRetailX. */
+    public CompletableFuture<JsonNode> findCheck(JsonNode checkSummary) {
+        if (checkSummary == null || !checkSummary.isObject()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Для findCheck требуется объект чека из findChecks."));
+        }
+        ObjectNode check = ((ObjectNode) checkSummary).deepCopy();
+        check.put("@class", "ru.crystals.operday.gui.datastructs.check.Check");
+        return call(CHECK_ENDPOINT, "findCheck", List.of(check));
     }
 
     public CompletableFuture<List<String>> getObjectsIds() {
