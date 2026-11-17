@@ -682,13 +682,13 @@ public final class MainWindow extends JFrame {
             status.setText("В очереди нет товаров для списка.");
             return;
         }
-        Object[] choices = {"Один список без группировки", "Сгруппировать и отсортировать по категориям", "Отмена"};
-        int choice = JOptionPane.showOptionDialog(this,
-                "Как напечатать позиции? Можно вывести единый список или сгруппировать товары по категориям.",
-                "Формат списка товаров", JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE,
+        Object[] choices = {"Без группировки", "По категориям"};
+        Object choice = JOptionPane.showInputDialog(this,
+                "Выберите группировку списка товаров:",
+                "Формат списка товаров", JOptionPane.QUESTION_MESSAGE,
                 null, choices, choices[0]);
-        if (choice < 0 || choice == 2) return;
-        boolean groupByCategory = choice == 1;
+        if (choice == null) return;
+        boolean groupByCategory = "По категориям".equals(choice);
         List<QueueListRow> rows = new ArrayList<>();
         for (QueueEntry entry : entries) {
             Product product = entry.product;
