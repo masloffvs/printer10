@@ -20,6 +20,10 @@ import com.setretailx.printer.service.PriceMonitoringTaskService;
 import com.setretailx.printer.service.PeerMeshService;
 import com.setretailx.printer.service.setretailx.dto.PrintGroupItemDto;
 import com.setretailx.printer.service.setretailx.dto.PrintGroupResponseDto;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.EncodeHintType;
+import com.google.zxing.MultiFormatWriter;
+import com.google.zxing.client.j2se.MatrixToImageWriter;
 
 import javax.swing.BorderFactory;
 import javax.swing.JFrame;
@@ -34,10 +38,13 @@ import java.awt.print.PageFormat;
 import java.awt.print.Paper;
 import java.awt.print.Printable;
 import java.awt.print.PrinterJob;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Comparator;
+import java.util.TreeMap;
 import java.util.concurrent.CompletionException;
 
 /** Main application shell; feature screens and MDI window management live in separate classes. */
@@ -675,11 +682,37 @@ public final class MainWindow extends JFrame {
             status.setText("В очереди нет товаров для списка.");
             return;
         }
-        List<QueueListRow> rows = entries.stream().map(entry -> new QueueListRow(entry.product.name(),
-                entry.product.marking(), entry.product.barcode(),
-                entry.product.price() == null ? "—" : entry.product.price().format(), entry.quantity)).toList();
+        Object[] choices = {"Один список без группировки", "Сгруппировать и отсортировать по категориям", "Отмена"};
+        int choice = JOptionPane.showOptionDialog(this,
+                "Как напечатать позиции? Можно вывести единый список или сгруппировать товары по категориям.",
+                "Формат списка товаров", JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE,
+                null, choices, choices[0]);
+        if (choice < 0 || choice == 2) return;
+        boolean groupByCategory = choice == 1;
+        List<QueueListRow> rows = new ArrayList<>();
+        for (QueueEntry entry : entries) {
+            Product product = entry.product;
+            String category = product.details().entrySet().stream()
+                    .filter(detail -> detail.getKey().replaceAll("[^a-zA-Zа-яА-Я0-9]", "")
+                            .equalsIgnoreCase("categorypath"))
+                    .map(Map.Entry::getValue).filter(value -> value != null && !value.isBlank())
+                    .findFirst().orElse("Без категории");
+            rows.add(new QueueListRow(product.name(), category, product.marking(), product.vendorCode(),
+                    product.barcode(), product.price() == null ? "—" : product.price().format(),
+                    product.totalQuantity()));
+        }
+        if (groupByCategory) {
+            Map<String, List<QueueListRow>> grouped = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            for (QueueListRow row : rows) grouped.computeIfAbsent(row.category(), ignored -> new ArrayList<>()).add(row);
+            rows.clear();
+            for (Map.Entry<String, List<QueueListRow>> group : grouped.entrySet()) {
+                rows.add(QueueListRow.categoryHeader(group.getKey()));
+                group.getValue().sort(Comparator.comparing(QueueListRow::name, String.CASE_INSENSITIVE_ORDER));
+                rows.addAll(group.getValue());
+            }
+        }
         PrinterJob job = PrinterJob.getPrinterJob();
-        job.setJobName("Список товаров · " + rows.size() + " позиций");
+        job.setJobName("Список товаров · " + entries.size() + " позиций");
         PageFormat page = job.defaultPage();
         Paper paper = new Paper();
         double width = 210 / 25.4 * 72, height = 297 / 25.4 * 72;
@@ -692,7 +725,7 @@ public final class MainWindow extends JFrame {
         if (!job.printDialog()) return;
         try {
             job.print();
-            status.setText("Список товаров отправлен на печать: " + rows.size() + " позиций.");
+            status.setText("Список товаров отправлен на печать: " + entries.size() + " позиций.");
         } catch (Exception error) {
             String message = error.getMessage() == null ? error.toString() : error.getMessage();
             status.setText("Ошибка печати списка: " + message);
@@ -850,75 +883,145 @@ public final class MainWindow extends JFrame {
     }
 
     private record PrintGroupKey(AppConfig.PrintFormat format, int amount) { }
-    private record QueueListRow(String name, String article, String barcode, String price, int quantity) { }
+    private record QueueListRow(String name, String category, String sapCode, String article,
+                                String barcode, String price, String quantity, boolean categoryHeader) {
+        private QueueListRow(String name, String category, String sapCode, String article,
+                             String barcode, String price, String quantity) {
+            this(name, category, sapCode, article, barcode, price, quantity, false);
+        }
+        private static QueueListRow categoryHeader(String category) {
+            return new QueueListRow(category, category, "", "", "", "", "", true);
+        }
+    }
     private record PrintProgressUpdate(String message, int completedGroups) { }
     private record PrintOutcome(long batchId, List<Integer> successfulCandidateIndexes, List<String> failures) { }
 
     private static final class QueueListPrintable implements Printable {
-        private static final double HEADER_HEIGHT = 58;
-        private static final double TABLE_HEADER_HEIGHT = 22;
+        private static final double HEADER_HEIGHT = 50;
+        private static final double TABLE_HEADER_HEIGHT = 24;
+        private static final double FOOTER_HEIGHT = 104;
+        private static final double ROW_HEIGHT = 19;
+        private static final int SAP_CODES_PER_QR = 20;
+        private static final int QR_SIZE = 68;
         private final List<QueueListRow> rows;
 
         private QueueListPrintable(List<QueueListRow> rows) { this.rows = List.copyOf(rows); }
 
         @Override public int print(java.awt.Graphics graphics, PageFormat page, int pageIndex) {
-            if (pageIndex > 0) return NO_SUCH_PAGE;
             double width = page.getImageableWidth();
             double height = page.getImageableHeight();
-            double bodyHeight = height - HEADER_HEIGHT - TABLE_HEADER_HEIGHT - 20;
+            int rowsPerPage = Math.max(1, (int) ((height - HEADER_HEIGHT - TABLE_HEADER_HEIGHT - FOOTER_HEIGHT - 10)
+                    / ROW_HEIGHT));
+            List<List<QueueListRow>> pages = paginate(rows, rowsPerPage);
+            if (pageIndex < 0 || pageIndex >= pages.size()) return NO_SUCH_PAGE;
+            List<QueueListRow> pageRows = pages.get(pageIndex);
+            List<String> sapCodes = pageRows.stream().filter(row -> !row.categoryHeader())
+                    .map(QueueListRow::sapCode).filter(code -> code != null && !code.isBlank()).toList();
+            List<BufferedImage> qrImages = createQrGroups(sapCodes);
 
             Graphics2D g = (Graphics2D) graphics.create();
             try {
                 g.translate(page.getImageableX(), page.getImageableY());
                 g.setColor(Color.BLACK);
                 g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 15));
-                g.drawString("СПИСОК ТОВАРОВ", 0, 18);
+                g.drawString("СПИСОК ТОВАРОВ", 0, 17);
                 g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 8));
-                drawQueueListRight(g, "ПОЗИЦИЙ: " + rows.size(), width, 18);
+                drawQueueListRight(g, "ПОЗИЦИЙ: " + rows.stream().filter(row -> !row.categoryHeader()).count()
+                        + " · ЛИСТ " + (pageIndex + 1) + "/" + pages.size(), width, 17);
                 g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8));
-                g.drawString("Печать ценников · " + java.time.LocalDate.now().format(
+                g.drawString("Товарный список · " + java.time.LocalDate.now().format(
                         java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy")), 0, 34);
                 g.setStroke(new java.awt.BasicStroke(1.2f));
-                g.drawLine(0, 43, (int) width, 43);
+                g.drawLine(0, 42, (int) width, 42);
 
                 double tableTop = HEADER_HEIGHT;
-                double[] x = {0, width * .52, width * .68, width * .82, width * .93};
-                double[] w = {width * .52, width * .16, width * .14, width * .11, width * .07};
+                double[] x = {0, width * .37, width * .53, width * .63, width * .78, width * .91};
+                double[] w = {width * .37, width * .16, width * .10, width * .15, width * .13, width * .09};
                 g.setColor(new Color(224, 224, 224));
                 g.fillRect(0, (int) tableTop, (int) width, (int) TABLE_HEADER_HEIGHT);
                 g.setColor(Color.BLACK);
                 g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
-                String[] headers = {"ТОВАР", "АРТИКУЛ", "ШТРИХКОД", "ЦЕНА", "КОЛ."};
+                String[] headers = {"ТОВАР", "SAP-КОД", "АРТИКУЛ", "ШТРИХКОД", "ЦЕНА", "ОСТАТОК"};
                 for (int col = 0; col < headers.length; col++) {
                     int baseline = (int) (tableTop + 15);
-                    if (col >= 3) drawQueueListRight(g, headers[col], x[col] + w[col] - 3, baseline);
+                    if (col >= 4) drawQueueListRight(g, headers[col], x[col] + w[col] - 3, baseline);
                     else g.drawString(headers[col], (int) x[col] + 3, baseline);
                 }
-                double lineHeight = bodyHeight / Math.max(1, rows.size());
-                float fontSize = (float) Math.max(1, Math.min(8, lineHeight * .48));
-                g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8).deriveFont(fontSize));
-                for (int i = 0; i < rows.size(); i++) {
-                    QueueListRow row = rows.get(i);
-                    double top = tableTop + TABLE_HEADER_HEIGHT + i * lineHeight;
-                    int baseline = (int) (top + Math.max(1, Math.min(lineHeight - 1, lineHeight * .72)));
+                for (int i = 0; i < pageRows.size(); i++) {
+                    QueueListRow row = pageRows.get(i);
+                    double top = tableTop + TABLE_HEADER_HEIGHT + i * ROW_HEIGHT;
+                    int baseline = (int) (top + ROW_HEIGHT * .69);
+                    if (row.categoryHeader()) {
+                        g.setColor(new Color(232, 236, 241));
+                        g.fillRect(0, (int) top, (int) width, (int) ROW_HEIGHT);
+                        g.setColor(Color.BLACK);
+                        g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 8));
+                        g.drawString("КАТЕГОРИЯ: " + clipQueueList(g, row.category(), width - 8), 4, baseline);
+                        continue;
+                    }
                     g.setColor(Color.BLACK);
+                    g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 7));
                     g.drawString(clipQueueList(g, row.name(), w[0] - 7), (int) x[0] + 3, baseline);
-                    g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 8).deriveFont(Math.max(1, fontSize - .5f)));
-                    g.drawString(clipQueueList(g, row.article(), w[1] - 7), (int) x[1] + 3, baseline);
-                    g.drawString(clipQueueList(g, row.barcode(), w[2] - 7), (int) x[2] + 3, baseline);
-                    g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8).deriveFont(fontSize));
-                    drawQueueListRight(g, row.price(), x[3] + w[3] - 3, baseline);
-                    g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 8).deriveFont(fontSize));
-                    drawQueueListRight(g, Integer.toString(row.quantity()), x[4] + w[4] - 3, baseline);
+                    g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 7));
+                    g.drawString(clipQueueList(g, row.sapCode(), w[1] - 7), (int) x[1] + 3, baseline);
+                    g.drawString(clipQueueList(g, row.article(), w[2] - 7), (int) x[2] + 3, baseline);
+                    g.drawString(clipQueueList(g, row.barcode(), w[3] - 7), (int) x[3] + 3, baseline);
+                    g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 7));
+                    drawQueueListRight(g, row.price(), x[4] + w[4] - 3, baseline);
+                    g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
+                    drawQueueListRight(g, row.quantity(), x[5] + w[5] - 3, baseline);
                     g.setColor(new Color(200, 200, 200));
-                    g.drawLine(0, (int) (top + lineHeight), (int) width, (int) (top + lineHeight));
-                    g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8).deriveFont(fontSize));
+                    g.drawLine(0, (int) (top + ROW_HEIGHT), (int) width, (int) (top + ROW_HEIGHT));
                 }
                 g.setColor(Color.DARK_GRAY);
-                g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 7));
-                g.drawString("Позиций: " + rows.size(), 0, (int) (height - 3));
+                g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
+                int footerY = (int) (height - FOOTER_HEIGHT + 5);
+                g.drawString("SAP-КОДЫ ЭТОГО ЛИСТА · до 20 кодов на QR · всего: " + sapCodes.size(), 0, footerY);
+                int qrX = 0;
+                int qrY = footerY + 7;
+                for (int i = 0; i < qrImages.size(); i++) {
+                    if (qrX + QR_SIZE > width) { qrX = 0; qrY += QR_SIZE + 14; }
+                    if (qrY + QR_SIZE > height) break;
+                    g.drawImage(qrImages.get(i), qrX, qrY, QR_SIZE, QR_SIZE, null);
+                    g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 6));
+                    g.drawString("Коды " + (i * SAP_CODES_PER_QR + 1) + "–"
+                            + Math.min((i + 1) * SAP_CODES_PER_QR, sapCodes.size()), qrX, qrY + QR_SIZE + 8);
+                    qrX += QR_SIZE + 8;
+                }
                 return PAGE_EXISTS;
             } finally { g.dispose(); }
+        }
+
+        private static List<List<QueueListRow>> paginate(List<QueueListRow> rows, int rowsPerPage) {
+            List<List<QueueListRow>> pages = new ArrayList<>();
+            List<QueueListRow> current = new ArrayList<>();
+            for (QueueListRow row : rows) {
+                if (current.size() >= rowsPerPage) {
+                    pages.add(List.copyOf(current));
+                    String category = current.stream().filter(QueueListRow::categoryHeader)
+                            .map(QueueListRow::category).reduce((first, second) -> second).orElse(null);
+                    current = new ArrayList<>();
+                    if (category != null && !row.categoryHeader()) current.add(QueueListRow.categoryHeader(category));
+                }
+                current.add(row);
+            }
+            if (!current.isEmpty()) pages.add(List.copyOf(current));
+            return pages;
+        }
+
+        private static List<BufferedImage> createQrGroups(List<String> codes) {
+            List<BufferedImage> result = new ArrayList<>();
+            for (int start = 0; start < codes.size(); start += SAP_CODES_PER_QR) {
+                String payload = String.join("\n", codes.subList(start,
+                        Math.min(start + SAP_CODES_PER_QR, codes.size())));
+                try {
+                    Map<EncodeHintType, Object> hints = new LinkedHashMap<>();
+                    hints.put(EncodeHintType.MARGIN, 1);
+                    result.add(MatrixToImageWriter.toBufferedImage(new MultiFormatWriter()
+                            .encode(payload, BarcodeFormat.QR_CODE, QR_SIZE, QR_SIZE, hints)));
+                } catch (Exception ignored) { }
+            }
+            return result;
         }
 
         private static String clipQueueList(Graphics2D g, String value, double maxWidth) {
