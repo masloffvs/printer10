@@ -6,6 +6,7 @@ import com.setretailx.printer.repository.ProductRepository.SearchOptions;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
+import javax.swing.JComponent;
 import javax.swing.JInternalFrame;
 import javax.swing.JLabel;
 import javax.swing.JMenuItem;
@@ -18,6 +19,7 @@ import javax.swing.JTextField;
 import javax.swing.JTree;
 import javax.swing.Scrollable;
 import javax.swing.ListSelectionModel;
+import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
@@ -28,12 +30,16 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Rectangle;
+import java.awt.FlowLayout;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.event.KeyEvent;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Local catalog search with results on the left and explicit filters on the right. */
 @SuppressWarnings("serial")
@@ -50,6 +56,9 @@ final class SearchPanel extends JPanel {
     private final JLabel minimumPriceLabel = new JLabel("Без ограничения");
     private final JLabel maximumPriceLabel = new JLabel("Без ограничения");
     private final JLabel status = new JLabel("Задайте запрос или фильтры и выполните поиск.");
+    private final JTextField resultSearchInput = new JTextField(22);
+    private final JLabel resultSearchCount = new JLabel(" ");
+    private final JPanel resultSearchBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
     private final DefaultTableModel model = readOnlyModel("Товар", "Артикул", "Штрихкод", "Цена", "Остаток");
     private final JTable table = new JTable(model);
     private final JPanel filters = new FilterPanel();
@@ -57,6 +66,7 @@ final class SearchPanel extends JPanel {
     private final JButton clear = new JButton("Сбросить");
     private final Consumer<JPanel> openCategoryPicker;
     private List<Product> results = List.of();
+    private List<Product> unrankedResults = List.of();
     private List<String> categories = List.of();
     private String categoryPath = "";
     private Map<String, List<String>> attributeOptions = Map.of();
@@ -78,11 +88,26 @@ final class SearchPanel extends JPanel {
         table.setAutoCreateRowSorter(true);
         table.setFillsViewportHeight(true);
         table.setRowHeight(25);
+        table.setDefaultRenderer(Object.class, new HighlightRenderer());
+        installResultSearch();
         table.getSelectionModel().addListSelectionListener(event -> {
             if (!event.getValueIsAdjusting()) selectionChanged.run();
         });
         addContextMenu(addSelected, openProduct);
-        resultPane.add(new JScrollPane(table), BorderLayout.CENTER);
+        JPanel tableArea = new JPanel(new BorderLayout(0, 6));
+        resultSearchBar.setOpaque(false);
+        JLabel resultSearchLabel = new JLabel("Найти в результатах:");
+        JButton closeResultSearch = new JButton("Закрыть");
+        closeResultSearch.setFocusable(false);
+        closeResultSearch.addActionListener(event -> closeResultSearch());
+        resultSearchBar.add(resultSearchLabel);
+        resultSearchBar.add(resultSearchInput);
+        resultSearchBar.add(resultSearchCount);
+        resultSearchBar.add(closeResultSearch);
+        resultSearchBar.setVisible(false);
+        tableArea.add(resultSearchBar, BorderLayout.NORTH);
+        tableArea.add(new JScrollPane(table), BorderLayout.CENTER);
+        resultPane.add(tableArea, BorderLayout.CENTER);
         resultPane.add(status, BorderLayout.SOUTH);
         add(resultPane, BorderLayout.CENTER);
 
@@ -430,13 +455,72 @@ final class SearchPanel extends JPanel {
     }
 
     void showResults(List<Product> products) {
-        results = List.copyOf(products);
+        unrankedResults = List.copyOf(products);
+        updateResultSearch();
+    }
+
+    private void installResultSearch() {
+        getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+                .put(javax.swing.KeyStroke.getKeyStroke(KeyEvent.VK_F, java.awt.event.InputEvent.CTRL_DOWN_MASK),
+                        "openResultSearch");
+        getActionMap().put("openResultSearch", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent event) {
+                resultSearchBar.setVisible(true);
+                resultSearchInput.requestFocusInWindow();
+                resultSearchInput.selectAll();
+            }
+        });
+        resultSearchInput.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent event) { updateResultSearch(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent event) { updateResultSearch(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent event) { updateResultSearch(); }
+        });
+        resultSearchInput.getInputMap().put(javax.swing.KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "close");
+        resultSearchInput.getActionMap().put("close", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent event) { closeResultSearch(); }
+        });
+    }
+
+    private void closeResultSearch() {
+        resultSearchInput.setText("");
+        resultSearchBar.setVisible(false);
+        table.requestFocusInWindow();
+        revalidate();
+        repaint();
+    }
+
+    private void updateResultSearch() {
+        String query = resultSearchInput.getText().trim();
+        if (query.isEmpty()) {
+            results = unrankedResults;
+        } else {
+            String normalized = query.toLowerCase(Locale.ROOT);
+            results = unrankedResults.stream()
+                    .sorted((left, right) -> Boolean.compare(matches(right, normalized), matches(left, normalized)))
+                    .toList();
+        }
         model.setRowCount(0);
         for (Product product : results) {
             model.addRow(new Object[]{product.name(), product.marking(), product.barcode(),
                     product.price() == null ? "—" : product.price().format(),
                     product.totalQuantity().isEmpty() ? "—" : product.totalQuantity()});
         }
+        int count = query.isEmpty() ? 0 : (int) results.stream()
+                .filter(product -> matches(product, query.toLowerCase(Locale.ROOT))).count();
+        resultSearchCount.setText(query.isEmpty() ? " " : count + " совпад.");
+        if (table.getRowSorter() instanceof javax.swing.table.TableRowSorter<?> sorter) sorter.setSortKeys(null);
+    }
+
+    private static boolean matches(Product product, String normalizedQuery) {
+        return contains(product.name(), normalizedQuery)
+                || contains(product.marking(), normalizedQuery)
+                || contains(product.barcode(), normalizedQuery)
+                || contains(product.price() == null ? "—" : product.price().format(), normalizedQuery)
+                || contains(product.totalQuantity(), normalizedQuery);
+    }
+
+    private static boolean contains(String value, String normalizedQuery) {
+        return value != null && value.toLowerCase(Locale.ROOT).contains(normalizedQuery);
     }
 
     private Product productAt(int row) {
@@ -456,6 +540,38 @@ final class SearchPanel extends JPanel {
             Dimension preferred = super.getPreferredSize();
             preferred.width = Math.min(preferred.width, MAX_PREFERRED_WIDTH);
             return preferred;
+        }
+    }
+
+    private final class HighlightRenderer extends DefaultTableCellRenderer {
+        @Override public java.awt.Component getTableCellRendererComponent(JTable source, Object value,
+                boolean selected, boolean focused, int row, int column) {
+            super.getTableCellRendererComponent(source, value, selected, focused, row, column);
+            String text = value == null ? "" : value.toString();
+            String query = resultSearchInput.getText().trim();
+            setText(query.isEmpty() ? text : highlight(text, query));
+            return this;
+        }
+
+        private String highlight(String text, String query) {
+            Pattern pattern = Pattern.compile(Pattern.quote(query), Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+            Matcher matcher = pattern.matcher(text);
+            StringBuilder html = new StringBuilder("<html>");
+            int previous = 0;
+            while (matcher.find()) {
+                html.append(escapeHtml(text.substring(previous, matcher.start())))
+                        .append("<span style='background-color:#fff176;color:#111;font-weight:bold'>")
+                        .append(escapeHtml(text.substring(matcher.start(), matcher.end())))
+                        .append("</span>");
+                previous = matcher.end();
+            }
+            if (previous == 0) return "<html>" + escapeHtml(text) + "</html>";
+            return html.append(escapeHtml(text.substring(previous))).append("</html>").toString();
+        }
+
+        private String escapeHtml(String text) {
+            return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    .replace("\"", "&quot;").replace("'", "&#39;");
         }
     }
 

@@ -1,11 +1,15 @@
 package com.setretailx.printer.ui;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.setretailx.printer.model.PrintBatch;
 import com.setretailx.printer.model.PrintHistoryEntry;
 import com.setretailx.printer.config.AppConfig;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
+import javax.swing.JComponent;
+import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -13,8 +17,15 @@ import javax.swing.JTable;
 import javax.swing.JSplitPane;
 import javax.swing.ListSelectionModel;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BorderLayout;
 import java.awt.FlowLayout;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -24,6 +35,7 @@ import java.util.function.Consumer;
 /** Local archive view with refresh and queue restoration actions. */
 @SuppressWarnings("serial")
 final class PrintHistoryPanel extends JPanel {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final DateTimeFormatter DISPLAY_DATE = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private final DefaultTableModel model = new DefaultTableModel(
             new Object[]{"№", "Дата", "Статус", "Товаров"}, 0) {
@@ -37,6 +49,7 @@ final class PrintHistoryPanel extends JPanel {
     private final JTable detailsTable = new JTable(detailsModel);
     private final JLabel info = new JLabel("Партии печати сохраняются локально.");
     private final JButton restore = new JButton("Восстановить в очередь");
+    private final JButton save = new JButton("Сохранить очередь в файл");
     private List<PrintBatch> batches = List.of();
 
     PrintHistoryPanel(Consumer<PrintBatch> restoreAction, Runnable refreshAction) {
@@ -65,7 +78,14 @@ final class PrintHistoryPanel extends JPanel {
             if (row >= 0 && row < batches.size()) restoreAction.accept(batches.get(row));
             else info.setText("Выберите партию для восстановления.");
         });
+        save.addActionListener(event -> saveSelectedQueue());
+        getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(
+                javax.swing.KeyStroke.getKeyStroke(KeyEvent.VK_S, InputEvent.CTRL_DOWN_MASK), "savePrintQueue");
+        getActionMap().put("savePrintQueue", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent event) { saveSelectedQueue(); }
+        });
         buttons.add(refresh);
+        buttons.add(save);
         buttons.add(restore);
         footer.add(buttons, BorderLayout.EAST);
         add(footer, BorderLayout.SOUTH);
@@ -79,6 +99,7 @@ final class PrintHistoryPanel extends JPanel {
         }
         info.setText("Сохранено партий: " + this.batches.size());
         restore.setEnabled(!this.batches.isEmpty());
+        save.setEnabled(!this.batches.isEmpty());
         if (!this.batches.isEmpty()) {
             table.setRowSelectionInterval(0, 0);
         } else {
@@ -88,6 +109,43 @@ final class PrintHistoryPanel extends JPanel {
 
     void setMessage(String message) {
         info.setText(message);
+    }
+
+    private void saveSelectedQueue() {
+        int row = table.getSelectedRow();
+        if (row < 0 || row >= batches.size()) {
+            info.setText("Выберите партию печати для сохранения.");
+            return;
+        }
+        PrintBatch batch = batches.get(table.convertRowIndexToModel(row));
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Сохранить очередь печати");
+        chooser.setFileFilter(new FileNameExtensionFilter("Очередь печати (*.json)", "json"));
+        chooser.setSelectedFile(new File("print_queue_" + batch.id() + ".json"));
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+
+        File selected = chooser.getSelectedFile();
+        if (!selected.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".json")) {
+            selected = new File(selected.getParentFile(), selected.getName() + ".json");
+        }
+        Path path = selected.toPath();
+        if (Files.exists(path) && javax.swing.JOptionPane.showConfirmDialog(this,
+                "Файл уже существует. Перезаписать его?", "Сохранение очереди",
+                javax.swing.JOptionPane.YES_NO_OPTION, javax.swing.JOptionPane.WARNING_MESSAGE)
+                != javax.swing.JOptionPane.YES_OPTION) return;
+
+        ObjectNode document = JSON.createObjectNode();
+        document.put("format", "setretailx-print-queue");
+        document.put("version", 1);
+        document.set("entries", JSON.valueToTree(batch.entries()));
+        try {
+            JSON.writerWithDefaultPrettyPrinter().writeValue(path.toFile(), document);
+            info.setText("Очередь сохранена: " + path.getFileName());
+        } catch (IOException error) {
+            javax.swing.JOptionPane.showMessageDialog(this,
+                    "Не удалось сохранить очередь: " + error.getMessage(),
+                    "Сохранение очереди", javax.swing.JOptionPane.ERROR_MESSAGE);
+        }
     }
 
     private static String formatDate(String value) {
