@@ -41,6 +41,7 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("search", "Поиск товаров", "Поиск"),
             new WindowSpec("queue", "Печать ценников", "Печать ценников"),
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
+            new WindowSpec("apiExchangeLog", "Журнал обменов SetRetailX", "Логи API"),
             new WindowSpec("peerMesh", "Офисная peer-сеть", "Пиры"),
             new WindowSpec("history", "История печати", "История"),
             new WindowSpec("priceChangePrintHistory", "История изменённых ценников и отчётов", "История изменений · печать"),

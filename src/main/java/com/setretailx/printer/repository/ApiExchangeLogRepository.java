@@ -10,6 +10,8 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Keeps a bounded local audit trail of completed SetRetailX HTTP exchanges. */
 public final class ApiExchangeLogRepository {
@@ -72,6 +74,31 @@ public final class ApiExchangeLogRepository {
             // Logging must not affect SetRetailX availability or the caller's result.
         }
     }
+
+    /** Returns recent completed HTTP attempts, newest first. */
+    public List<ExchangeLogEntry> recent(int limit) throws SQLException {
+        List<ExchangeLogEntry> entries = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
+                "SELECT id, occurred_at, method, request_body, response_body, http_status, "
+                        + "duration_ms, outcome, error FROM api_exchange_log ORDER BY id DESC LIMIT ?")) {
+            query.setInt(1, Math.max(1, Math.min(limit, MAX_EXCHANGES)));
+            try (java.sql.ResultSet rows = query.executeQuery()) {
+                while (rows.next()) {
+                    int status = rows.getInt("http_status");
+                    Integer httpStatus = rows.wasNull() ? null : status;
+                    entries.add(new ExchangeLogEntry(rows.getLong("id"), rows.getString("occurred_at"),
+                            rows.getString("method"), rows.getString("request_body"),
+                            rows.getString("response_body"), httpStatus, rows.getLong("duration_ms"),
+                            rows.getString("outcome"), rows.getString("error")));
+                }
+            }
+        }
+        return entries;
+    }
+
+    public record ExchangeLogEntry(long id, String occurredAt, String method, String requestBody,
+                                   String responseBody, Integer httpStatus, long durationMs,
+                                   String outcome, String error) { }
 
     private static void trim(Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement()) {
