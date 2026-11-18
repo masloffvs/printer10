@@ -263,11 +263,26 @@ public final class MainWindow extends JFrame {
                 status.setText("Штрихкод " + probe.barcode() + " не найден.");
                 return;
             }
+            QueueEntry queued = findQueuedByBarcode(probe.barcode());
+            if (queued != null) {
+                int currentAmount = queued.amount == null ? 1 : queued.amount;
+                if (currentAmount >= 999) {
+                    status.setText("Товар уже в очереди; максимальный тираж ценника — 999: "
+                            + scanned.product().name());
+                    return;
+                }
+                queued.amount = currentAmount + 1;
+                refreshQueue();
+                status.setText("Товар уже в очереди: тираж увеличен до " + queued.amount + " — "
+                        + scanned.product().name());
+                return;
+            }
             QueueEntry entry = new QueueEntry(scanned.product());
+            entry.amount = scanned.previousPrint() == null || scanned.previousPrint().amount() == null
+                    ? 1 : Math.max(1, Math.min(999, scanned.previousPrint().amount()));
             if (scanned.previousPrint() != null) {
                 PrintHistoryEntry previous = scanned.previousPrint();
                 entry.format = AppConfig.formatByKey(previous.formatKey());
-                entry.amount = previous.amount();
                 entry.quantity = previous.quantity();
                 entry.priceType = previous.priceType();
             }
@@ -276,6 +291,15 @@ public final class MainWindow extends JFrame {
             status.setText("Добавлен товар (" + scanned.product().source() + "): " + scanned.product().name()
                     + (scanned.previousPrint() == null ? "" : " · настройки взяты из истории печати"));
         }, error -> status.setText("Ошибка поиска товара: " + error));
+    }
+
+    private QueueEntry findQueuedByBarcode(String barcode) {
+        if (barcode == null || barcode.isBlank()) return null;
+        String normalized = barcode.trim();
+        return entries.stream()
+                .filter(entry -> !entry.product.barcode().isBlank())
+                .filter(entry -> normalized.equals(entry.product.barcode().trim()))
+                .findFirst().orElse(null);
     }
 
     private void receiveStorageScan(ScannedProbe probe) {
