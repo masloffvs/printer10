@@ -166,6 +166,31 @@ final class SalesPointEditorPanel extends JPanel {
         }
     }
 
+    void acceptBarcodeItem(long expectedPointId, Product product,
+                           com.setretailx.printer.service.PriceMonitoringTaskService.ShelfPrice price) {
+        if (selectedPointId < 0 || selectedPointId != expectedPointId) {
+            heading.setText("Выбор точки изменился во время поиска. Повторите добавление по штрихкоду.");
+            return;
+        }
+        if (product == null || product.marking().isBlank()) {
+            heading.setText("В найденном товаре нет артикула; ценник не добавлен.");
+            return;
+        }
+        if (price == null || (price.regularPrice().isBlank() && price.discountPrice().isBlank())) {
+            heading.setText("В истории цен нет обычной или скидочной цены для этого товара.");
+            return;
+        }
+        try {
+            repository.putItem(expectedPointId, product.marking(), product.name(),
+                    price.regularPrice(), price.discountPrice());
+            refreshItems();
+            heading.setText("Добавлен ценник «" + product.marking() + "» из последней истории цен: обычная "
+                    + displayPrice(price.regularPrice()) + ", скидочная " + displayPrice(price.discountPrice()) + ".");
+        } catch (Exception error) {
+            showError(error);
+        }
+    }
+
     private void addItem() {
         if (selectedPointId < 0) {
             heading.setText("Сначала выберите или создайте точку на карте.");

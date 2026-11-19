@@ -55,7 +55,8 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("salesPointEditor", "Редактор торговой точки", "Редактор точки"),
             new WindowSpec("palletScanning", "Сканирование паллет", "Паллеты"),
             new WindowSpec("priceChanges", "История изменения цен", "История цен"),
-            new WindowSpec("environment", "Обслуживание и администрирование", "Администрирование")
+            new WindowSpec("environment", "Обслуживание и администрирование", "Администрирование"),
+            new WindowSpec("accounts", "Учётные записи", "Аккаунты")
     };
 
     private final JDesktopPane desktop = new JDesktopPane();
@@ -113,6 +114,12 @@ final class MdiWorkspace extends JPanel {
         });
         desktop.add(frame);
         frames.put(key, frame);
+        if ("accounts".equals(key)) {
+            for (AbstractButton button : toolbarButtons.values()) {
+                String label = button.getToolTipText();
+                if (label != null && label.contains("Учётные записи")) button.setVisible(true);
+            }
+        }
     }
 
     void addProductCard(String title, JPanel content) {
@@ -256,7 +263,7 @@ final class MdiWorkspace extends JPanel {
         addNavigationGroup("СКЛАД", "storageAddresses", "addressCreate", "palletScanning", "storage", "addressSearch");
         addNavigationGroup("ТОРГОВЫЕ ТОЧКИ", "salesPointMap", "salesPointEditor");
         addNavigationGroup("ИСТОРИЯ И ЗАДАЧИ", "history", "salesHistory", "priceChangePrintHistory", "priceChanges", "tasks");
-        addNavigationGroup("ОБМЕН И СЕРВИС", "exchange", "peerMesh", "environment");
+        addNavigationGroup("ОБМЕН И СЕРВИС", "exchange", "peerMesh", "environment", "accounts");
         dynamicToolbarIndex = toolBar.getComponentCount();
         toolBar.addSeparator();
         JButton cascade = new JButton("Каскад");
@@ -295,6 +302,7 @@ final class MdiWorkspace extends JPanel {
             button.setMaximumSize(new java.awt.Dimension(220, 40));
             button.addActionListener(event -> showWindow(spec.key));
             toolbarButtons.put(spec.key, button);
+            if ("accounts".equals(spec.key)) button.setVisible(false);
             group.add(button);
         }
         group.setMaximumSize(new java.awt.Dimension(204, group.getPreferredSize().height));

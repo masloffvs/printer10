@@ -45,9 +45,10 @@ public final class SalesPointRepository {
     public SalesPoint createPoint(String name, int x, int y, int width, int height) throws SQLException {
         String title = required(name, "Введите название точки.");
         try (Connection connection = connect(); PreparedStatement insert = connection.prepareStatement(
-                "INSERT INTO sales_points(name, x, y, width, height) VALUES(?, ?, ?, ?, ?)", Statement.RETURN_GENERATED_KEYS)) {
-            insert.setString(1, title); insert.setInt(2, x); insert.setInt(3, y);
-            insert.setInt(4, Math.max(80, width)); insert.setInt(5, Math.max(48, height));
+                "INSERT INTO sales_points(sync_key,name,x,y,width,height) VALUES(?,?,?,?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
+            insert.setString(1, java.util.UUID.randomUUID().toString());
+            insert.setString(2, title); insert.setInt(3, x); insert.setInt(4, y);
+            insert.setInt(5, Math.max(80, width)); insert.setInt(6, Math.max(48, height));
             insert.executeUpdate();
             try (ResultSet keys = insert.getGeneratedKeys()) {
                 if (keys.next()) return new SalesPoint(keys.getLong(1), title, x, y, Math.max(80, width), Math.max(48, height));
@@ -90,10 +91,11 @@ public final class SalesPointRepository {
         int safeHeight = Math.max(28, height);
         String safeColor = validColor(color);
         try (Connection connection = connect(); PreparedStatement insert = connection.prepareStatement(
-                "INSERT INTO sales_point_fixtures(kind,name,x,y,width,height,rotation,color) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO sales_point_fixtures(sync_key,kind,name,x,y,width,height,rotation,color) VALUES(?,?,?,?,?,?,?,?,?)",
                 Statement.RETURN_GENERATED_KEYS)) {
-            insert.setString(1, safeKind); insert.setString(2, title); insert.setInt(3, x); insert.setInt(4, y);
-            insert.setInt(5, safeWidth); insert.setInt(6, safeHeight); insert.setDouble(7, rotation); insert.setString(8, safeColor);
+            insert.setString(1, java.util.UUID.randomUUID().toString());
+            insert.setString(2, safeKind); insert.setString(3, title); insert.setInt(4, x); insert.setInt(5, y);
+            insert.setInt(6, safeWidth); insert.setInt(7, safeHeight); insert.setDouble(8, rotation); insert.setString(9, safeColor);
             insert.executeUpdate();
             try (ResultSet keys = insert.getGeneratedKeys()) {
                 if (keys.next()) return new MapFixture(keys.getLong(1), safeKind, title, x, y,
@@ -199,14 +201,48 @@ public final class SalesPointRepository {
         try (Connection connection = connect(); Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA foreign_keys=ON");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_points (point_id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                    + "name TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL)");
+                    + "sync_key TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL)");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_point_items (point_id INTEGER NOT NULL "
                     + "REFERENCES sales_points(point_id) ON DELETE CASCADE, article TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', "
                     + "price TEXT NOT NULL DEFAULT '', discount_price TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, PRIMARY KEY(point_id, article))");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_point_fixtures (fixture_id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                    + "kind TEXT NOT NULL DEFAULT 'shelf', name TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, "
+                    + "sync_key TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'shelf', name TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, "
                     + "width INTEGER NOT NULL DEFAULT 120, height INTEGER NOT NULL DEFAULT 48, rotation REAL NOT NULL DEFAULT 0, "
                     + "color TEXT NOT NULL DEFAULT '#3B82F6')");
+            boolean hasPointSyncKey = false;
+            try (ResultSet columns = statement.executeQuery("PRAGMA table_info(sales_points)")) {
+                while (columns.next()) if ("sync_key".equalsIgnoreCase(columns.getString("name"))) hasPointSyncKey = true;
+            }
+            if (!hasPointSyncKey) statement.executeUpdate("ALTER TABLE sales_points ADD COLUMN sync_key TEXT NOT NULL DEFAULT ''");
+            java.util.List<Long> pointIds = new java.util.ArrayList<>();
+            try (Statement rows = connection.createStatement(); ResultSet points = rows.executeQuery("SELECT point_id FROM sales_points WHERE sync_key=''")) {
+                while (points.next()) pointIds.add(points.getLong(1));
+            }
+            try (PreparedStatement update = connection.prepareStatement("UPDATE sales_points SET sync_key=? WHERE point_id=? AND sync_key=''")) {
+                for (long pointId : pointIds) {
+                    update.setString(1, java.util.UUID.randomUUID().toString()); update.setLong(2, pointId); update.executeUpdate();
+                }
+            }
+            boolean hasSyncKey = false;
+            try (ResultSet columns = statement.executeQuery("PRAGMA table_info(sales_point_fixtures)")) {
+                while (columns.next()) if ("sync_key".equalsIgnoreCase(columns.getString("name"))) hasSyncKey = true;
+            }
+            if (!hasSyncKey) statement.executeUpdate("ALTER TABLE sales_point_fixtures ADD COLUMN sync_key TEXT NOT NULL DEFAULT ''");
+            java.util.List<Long> fixtureIds = new java.util.ArrayList<>();
+            try (Statement rows = connection.createStatement(); ResultSet fixtures = rows.executeQuery(
+                    "SELECT fixture_id FROM sales_point_fixtures WHERE sync_key=''")) {
+                while (fixtures.next()) fixtureIds.add(fixtures.getLong(1));
+            }
+            try (PreparedStatement update = connection.prepareStatement(
+                    "UPDATE sales_point_fixtures SET sync_key=? WHERE fixture_id=? AND sync_key=''")) {
+                for (long fixtureId : fixtureIds) {
+                    update.setString(1, java.util.UUID.randomUUID().toString());
+                    update.setLong(2, fixtureId);
+                    update.executeUpdate();
+                }
+            }
+            statement.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_points_sync_key ON sales_points(sync_key)");
+            statement.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_point_fixtures_sync_key ON sales_point_fixtures(sync_key)");
             boolean hasDiscountPrice = false;
             try (ResultSet columns = statement.executeQuery("PRAGMA table_info(sales_point_items)")) {
                 while (columns.next()) if ("discount_price".equalsIgnoreCase(columns.getString("name"))) hasDiscountPrice = true;

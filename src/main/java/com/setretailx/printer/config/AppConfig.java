@@ -104,6 +104,45 @@ public final class AppConfig {
         return path.toAbsolutePath().normalize();
     }
 
+    /** The intended network topology role for this installation. */
+    public static NodeRole nodeRole() {
+        String configured = setting("SETRETAILX_NODE_ROLE").toLowerCase(Locale.ROOT);
+        return switch (configured) {
+            case "child", "дочерний", "дочерний узел" -> NodeRole.CHILD;
+            case "", "parent", "родитель", "родительский" -> NodeRole.PARENT;
+            default -> throw new IllegalStateException(
+                    "SETRETAILX_NODE_ROLE должен быть parent или child (сейчас: " + configured + ").");
+        };
+    }
+
+    private static String setting(String key) {
+        String value = System.getenv(key);
+        if (value == null || value.isBlank()) value = System.getProperty(key, "");
+        return value == null ? "" : value.trim();
+    }
+
+    public enum NodeRole {
+        PARENT("Родительский ПК", "parent"),
+        CHILD("Дочерний узел", "child");
+
+        private final String displayName;
+        private final String wireName;
+
+        NodeRole(String displayName, String wireName) {
+            this.displayName = displayName;
+            this.wireName = wireName;
+        }
+
+        public String displayName() { return displayName; }
+        public String wireName() { return wireName; }
+        public NodeRole opposite() { return this == PARENT ? CHILD : PARENT; }
+
+        public static NodeRole fromWire(String value) {
+            return "child".equalsIgnoreCase(value) ? CHILD
+                    : "parent".equalsIgnoreCase(value) ? PARENT : null;
+        }
+    }
+
     public static synchronized String readDotEnv() throws IOException {
         if (Files.isRegularFile(DOT_ENV_PATH)) {
             return Files.readString(DOT_ENV_PATH, StandardCharsets.UTF_8);
@@ -112,6 +151,8 @@ public final class AppConfig {
                 + "SETRETAILX_RPC_URL=http://localhost:8090/SetXRMI/json-rpc/\n"
                 + "SETRETAILX_USERNAME=\n"
                 + "SETRETAILX_PASSWORD=\n"
+                + "# Роль узла: parent — родительский ПК; child — подключаемый узел.\n"
+                + "SETRETAILX_NODE_ROLE=parent\n"
                 + "SETRETAILX_CONNECTION_RETRIES=5\n"
                 + "# SQLite: история изменения цен и фоновых задач (путь можно изменить)\n"
                 + "SETRETAILX_TASKS_DB_PATH=" + tasksDatabasePath() + "\n";

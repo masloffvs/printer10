@@ -37,6 +37,9 @@ public final class SetRetailXConnector implements AutoCloseable {
 
     /** Returns the application-wide connector, optionally installing its diagnostics listener. */
     public static SetRetailXConnector getInstance(Consumer<ExchangeEvent> eventHandler) {
+        if (AppConfig.nodeRole() != AppConfig.NodeRole.PARENT) {
+            throw new IllegalStateException("Учётные данные и подключения SetRetailX доступны только на родительском ПК.");
+        }
         SetRetailXConnector instance = InstanceHolder.INSTANCE;
         if (eventHandler != null) instance.setEventHandler(eventHandler);
         return instance;
@@ -58,8 +61,24 @@ public final class SetRetailXConnector implements AutoCloseable {
         this.transport = transport;
     }
 
+    private SetRetailXConnector() {
+        this.eventHandler = ignored -> { };
+        this.transport = null;
+    }
+
+    /** A local-only connector for child nodes; it never reads or creates SetRetailX credentials. */
+    public static SetRetailXConnector unavailableOnChild() {
+        if (AppConfig.nodeRole() != AppConfig.NodeRole.CHILD) {
+            throw new IllegalStateException("Отключённый коннектор предназначен только для дочернего узла.");
+        }
+        return new SetRetailXConnector();
+    }
+
     /** Reloads connection settings and starts a fresh transport/session. */
     public synchronized void reloadSettings() {
+        if (transport == null) {
+            throw new IllegalStateException("Подключение SetRetailX на дочернем узле отключено.");
+        }
         SetRetailXClient previous = transport;
         transport = new SetRetailXClient(this::dispatch);
         previous.close();
@@ -71,17 +90,22 @@ public final class SetRetailXConnector implements AutoCloseable {
     }
 
     public CompletableFuture<Void> connect() {
-        return transport.connect();
+        return transport == null ? unavailable() : transport.connect();
     }
 
     /** Low-level JSON-RPC call for operation classes; UI code should use typed operations. */
     public CompletableFuture<JsonNode> call(String endpoint, String method, List<?> params) {
-        return transport.call(endpoint, method, params);
+        return transport == null ? unavailable() : transport.call(endpoint, method, params);
     }
 
     /** Sends a pre-built JSON-RPC payload for operation classes that need custom request fields. */
     public CompletableFuture<JsonNode> call(ObjectNode payload) {
-        return transport.call(payload);
+        return transport == null ? unavailable() : transport.call(payload);
+    }
+
+    private static <T> CompletableFuture<T> unavailable() {
+        return CompletableFuture.failedFuture(new IllegalStateException(
+                "SetRetailX доступен только через родительский ПК; локальное подключение на дочернем узле отключено."));
     }
 
     /** Lists receipt summaries for a time range; the transport supplies the session token. */
@@ -168,6 +192,6 @@ public final class SetRetailXConnector implements AutoCloseable {
     }
 
     @Override public void close() {
-        transport.close();
+        if (transport != null) transport.close();
     }
 }

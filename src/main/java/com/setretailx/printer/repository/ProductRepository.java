@@ -18,12 +18,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.function.Consumer;
 import org.sqlite.Function;
 
 /** Exact barcode lookup and local catalog search against all_products.sqlite. */
 public final class ProductRepository {
     private static final int MAX_CACHED_PRODUCTS = 12_000;
+    private static final Pattern ADVANCED_SIZE = Pattern.compile("(?iu)(\\d+)\\s*[/xх×]\\s*(\\d+)");
+    private static final Pattern ADVANCED_TERM = Pattern.compile("(?iu)\\d+\\s*[/xх×]\\s*\\d+|[\\p{L}\\p{N}_]+");
+    private static final Pattern SIZE_TERM = Pattern.compile("^(\\d+)/(\\d+)$");
     private static volatile CatalogCache catalogCache;
 
     /** Checks the catalog's hot-path indexes and warms a heap-sized, bounded lookup cache. */
@@ -169,7 +174,6 @@ public final class ProductRepository {
     public List<Product> search(SearchCriteria criteria) throws SQLException {
         SearchCriteria filters = criteria == null ? SearchCriteria.empty() : criteria;
         String text = filters.query().trim();
-        String pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
         try (Connection connection = connect()) {
             Function.create(connection, "unicode_lower", new Function() {
                 @Override protected void xFunc() throws SQLException {
@@ -188,10 +192,26 @@ public final class ProductRepository {
             List<String> conditions = new ArrayList<>();
             List<Object> parameters = new ArrayList<>();
             if (!text.isEmpty()) {
-                conditions.add("(" + String.join(" OR ", searchable.stream()
-                        .map(column -> "unicode_lower(CAST(\"" + column + "\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\'")
-                        .toList()) + ")");
-                for (int i = 0; i < searchable.size(); i++) parameters.add(pattern);
+                if (filters.advancedSearch()) {
+                    for (String term : advancedTerms(text)) {
+                        List<String> alternatives = new ArrayList<>();
+                        for (String variant : termVariants(term)) {
+                            String pattern = likePattern(variant);
+                            for (String column : searchable) {
+                                alternatives.add("unicode_lower(CAST(\"" + column
+                                        + "\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\'");
+                                parameters.add(pattern);
+                            }
+                        }
+                        if (!alternatives.isEmpty()) conditions.add("(" + String.join(" OR ", alternatives) + ")");
+                    }
+                } else {
+                    conditions.add("(" + String.join(" OR ", searchable.stream()
+                            .map(column -> "unicode_lower(CAST(\"" + column + "\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\'")
+                            .toList()) + ")");
+                    String pattern = likePattern(text);
+                    for (int i = 0; i < searchable.size(); i++) parameters.add(pattern);
+                }
             }
             if (!filters.category().isBlank() && hasTable(connection, "product_categories_path")) {
                 String categoryExpression = "unicode_lower((SELECT group_concat(name, ' › ') "
@@ -239,6 +259,29 @@ public final class ProductRepository {
                 }
             }
         }
+    }
+
+    private static List<String> advancedTerms(String text) {
+        Matcher matcher = ADVANCED_TERM.matcher(text);
+        List<String> terms = new ArrayList<>();
+        while (matcher.find()) {
+            String term = ADVANCED_SIZE.matcher(matcher.group()).replaceAll("$1/$2");
+            terms.add(term);
+        }
+        return terms.isEmpty() ? List.of(text) : terms;
+    }
+
+    private static List<String> termVariants(String term) {
+        Matcher size = SIZE_TERM.matcher(term);
+        if (!size.matches()) return List.of(term);
+        String first = size.group(1);
+        String second = size.group(2);
+        return List.of(first + "/" + second, first + "x" + second, first + "х" + second,
+                first + "×" + second);
+    }
+
+    private static String likePattern(String value) {
+        return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
     }
 
     private static String relevanceOrder(Set<String> columns, String text, List<Object> parameters) {
@@ -506,7 +549,12 @@ public final class ProductRepository {
     }
 
     public record SearchCriteria(String query, String category, String attributeName, String attributeValue,
-                                 Long minimumPrice, Long maximumPrice) {
+                                 Long minimumPrice, Long maximumPrice, boolean advancedSearch) {
+        public SearchCriteria(String query, String category, String attributeName, String attributeValue,
+                              Long minimumPrice, Long maximumPrice) {
+            this(query, category, attributeName, attributeValue, minimumPrice, maximumPrice, false);
+        }
+
         public SearchCriteria {
             query = query == null ? "" : query.trim();
             category = category == null ? "" : category;

@@ -5,6 +5,7 @@ import com.setretailx.printer.repository.ProductRepository.SearchOptions;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JInternalFrame;
@@ -47,6 +48,7 @@ final class SearchPanel extends JPanel {
     private static final int PRICE_SLIDER_STEPS = 1000;
 
     private final JTextField input = new JTextField();
+    private final JCheckBox advancedSearch = new JCheckBox("Расширенный поиск");
     private final JButton category = new JButton("Выбрать категорию…");
     private final JLabel selectedCategory = new JLabel("Все категории");
     private final JComboBox<String> attributeName = new CompactComboBox();
@@ -152,8 +154,10 @@ final class SearchPanel extends JPanel {
         input.setToolTipText("Название, артикул или штрихкод");
         input.setPreferredSize(new Dimension(240, input.getPreferredSize().height));
         filters.add(input, at(c, 1));
+        advancedSearch.setToolTipText("Ищет каждое слово отдельно и учитывает варианты размеров: 1/2, 1x2, 1х2");
+        filters.add(advancedSearch, at(c, 2));
 
-        addSectionLabel("Категория товара", c, 2);
+        addSectionLabel("Категория товара", c, 3);
         category.addActionListener(event -> chooseCategory());
         JPanel categoryChoice = new JPanel(new BorderLayout(0, 5));
         categoryChoice.setOpaque(false);
@@ -161,30 +165,30 @@ final class SearchPanel extends JPanel {
         selectedCategory.setPreferredSize(new Dimension(240, selectedCategory.getPreferredSize().height));
         categoryChoice.add(category, BorderLayout.NORTH);
         categoryChoice.add(selectedCategory, BorderLayout.CENTER);
-        filters.add(categoryChoice, at(c, 3));
+        filters.add(categoryChoice, at(c, 4));
 
-        addSectionLabel("Цена от", c, 4);
+        addSectionLabel("Цена от", c, 5);
         minimumPrice.setFocusable(false);
         minimumPrice.setPaintTicks(true);
         minimumPrice.setMajorTickSpacing(250);
-        filters.add(minimumPrice, at(c, 5));
-        filters.add(minimumPriceLabel, at(c, 6));
+        filters.add(minimumPrice, at(c, 6));
+        filters.add(minimumPriceLabel, at(c, 7));
 
-        addSectionLabel("Цена до", c, 7);
+        addSectionLabel("Цена до", c, 8);
         maximumPrice.setFocusable(false);
         maximumPrice.setPaintTicks(true);
         maximumPrice.setMajorTickSpacing(250);
-        filters.add(maximumPrice, at(c, 8));
-        filters.add(maximumPriceLabel, at(c, 9));
+        filters.add(maximumPrice, at(c, 9));
+        filters.add(maximumPriceLabel, at(c, 10));
 
-        addSectionLabel("Характеристика", c, 10);
+        addSectionLabel("Характеристика", c, 11);
         attributeName.addItem("Не выбрана");
         attributeName.addActionListener(event -> updateAttributeValues());
-        filters.add(attributeName, at(c, 11));
+        filters.add(attributeName, at(c, 12));
 
-        addSectionLabel("Значение", c, 12);
+        addSectionLabel("Значение", c, 13);
         attributeValue.addItem("Любое значение");
-        filters.add(attributeValue, at(c, 13));
+        filters.add(attributeValue, at(c, 14));
 
         minimumPrice.addChangeListener(event -> {
             if (minimumPrice.getValue() > maximumPrice.getValue()) maximumPrice.setValue(minimumPrice.getValue());
@@ -194,7 +198,7 @@ final class SearchPanel extends JPanel {
             if (maximumPrice.getValue() < minimumPrice.getValue()) minimumPrice.setValue(maximumPrice.getValue());
             updatePriceLabels();
         });
-        c.gridy = 14;
+        c.gridy = 15;
         c.weighty = 1;
         filters.add(new JPanel(), c);
     }
@@ -287,6 +291,7 @@ final class SearchPanel extends JPanel {
     }
 
     String query() { return input.getText().trim(); }
+    boolean advancedSearch() { return advancedSearch.isSelected(); }
     void setQuery(String query) { input.setText(query); }
     int[] selectedRows() {
         return java.util.Arrays.stream(table.getSelectedRows())

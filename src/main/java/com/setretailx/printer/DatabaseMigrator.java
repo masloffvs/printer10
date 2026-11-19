@@ -2,6 +2,7 @@ package com.setretailx.printer;
 
 import com.setretailx.printer.config.AppConfig;
 import com.setretailx.printer.repository.AddressStorageRepository;
+import com.setretailx.printer.repository.AccountRepository;
 import com.setretailx.printer.repository.ApiExchangeLogRepository;
 import com.setretailx.printer.repository.ChangedLabelPrintHistoryRepository;
 import com.setretailx.printer.repository.PrintHistoryRepository;
@@ -17,12 +18,22 @@ public final class DatabaseMigrator {
     private DatabaseMigrator() { }
 
     public static void migrateAll() throws SQLException {
+        if (AppConfig.nodeRole() == AppConfig.NodeRole.PARENT) {
+            AccountRepository accounts = new AccountRepository();
+            accounts.migrate();
+            if (accounts.countAccounts() == 0) {
+                System.err.println("Родительское хранилище аккаунтов пока пусто. До выдачи доступа продажам "
+                        + "нужно создать административную учётную запись локальным мастером настройки.");
+            }
+        }
         new AddressStorageRepository();
         new ApiExchangeLogRepository().migrate();
         new SalesPointRepository();
         new PrintHistoryRepository().migrate();
         new PriceChangePrintHistoryRepository().migrate();
         new ChangedLabelPrintHistoryRepository().migrate();
-        new PriceMonitoringTaskService(SetRetailXConnector.getInstance(), AppConfig.tasksDatabasePath());
+        SetRetailXConnector connector = AppConfig.nodeRole() == AppConfig.NodeRole.PARENT
+                ? SetRetailXConnector.getInstance() : SetRetailXConnector.unavailableOnChild();
+        new PriceMonitoringTaskService(connector, AppConfig.tasksDatabasePath());
     }
 }

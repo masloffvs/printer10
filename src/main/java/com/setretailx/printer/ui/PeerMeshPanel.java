@@ -1,6 +1,7 @@
 package com.setretailx.printer.ui;
 
 import com.setretailx.printer.service.PeerMeshService;
+import com.setretailx.printer.config.AppConfig;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -63,6 +64,12 @@ final class PeerMeshPanel extends JPanel {
         JPanel outer = new JPanel(new BorderLayout(8, 8));
         outer.setBorder(BorderFactory.createTitledBorder("Этот пир"));
         JPanel fields = new JPanel(new GridLayout(0, 1, 2, 2));
+        fields.add(new JLabel("Роль: " + service.nodeRole().displayName()));
+        if (service.nodeRole() == AppConfig.NodeRole.CHILD) {
+            fields.add(new JLabel(service.parentNodeId().isBlank()
+                    ? "Родительский ПК: ещё не выбран"
+                    : "Привязан к родителю: " + service.parentNodeId()));
+        }
         fields.add(new JLabel("Имя в сети и порт TCP/UDP: " + service.peerName() + " · " + service.port()));
         fields.add(new JLabel("ID: " + service.nodeId()));
         fields.add(new JLabel("Fingerprint Ed25519: " + service.fingerprint()));
@@ -73,6 +80,12 @@ final class PeerMeshPanel extends JPanel {
             try {
                 service.setPeerName(name.getText());
                 fields.removeAll();
+                fields.add(new JLabel("Роль: " + service.nodeRole().displayName()));
+                if (service.nodeRole() == AppConfig.NodeRole.CHILD) {
+                    fields.add(new JLabel(service.parentNodeId().isBlank()
+                            ? "Родительский ПК: ещё не выбран"
+                            : "Привязан к родителю: " + service.parentNodeId()));
+                }
                 fields.add(new JLabel("Имя в сети и порт TCP/UDP: " + service.peerName() + " · " + service.port()));
                 fields.add(new JLabel("ID: " + service.nodeId()));
                 fields.add(new JLabel("Fingerprint Ed25519: " + service.fingerprint()));
@@ -90,8 +103,10 @@ final class PeerMeshPanel extends JPanel {
                 .sorted(Comparator.comparing(PeerMeshService.Peer::name, String.CASE_INSENSITIVE_ORDER)
                         .thenComparing(PeerMeshService.Peer::address)).toList();
         model.setPeers(peers);
-        sync.setEnabled(!peers.isEmpty());
-        if (peers.isEmpty()) status.setText("Пиры пока не найдены. Проверьте, что ПК в одной подсети и UDP/TCP-порт 45873 разрешён в firewall.");
+        boolean child = service.nodeRole() == AppConfig.NodeRole.CHILD;
+        sync.setEnabled(child && peers.stream().anyMatch(peer -> peer.role().equals("parent")));
+        if (peers.isEmpty()) status.setText("Узлы пока не найдены. Проверьте, что ПК в одной подсети и UDP/TCP-порт 45873 разрешён в firewall.");
+        else if (!child) status.setText("Родительский ПК принимает дочерние узлы; синхронизацию запускают на дочернем ПК.");
     }
 
     private void synchronizeSelected() {
@@ -99,6 +114,10 @@ final class PeerMeshPanel extends JPanel {
         if (viewRow < 0) { status.setText("Выберите пир в списке."); return; }
         int row = table.convertRowIndexToModel(viewRow);
         PeerMeshService.Peer peer = model.peerAt(row);
+        if (service.nodeRole() != AppConfig.NodeRole.CHILD || !"parent".equals(peer.role())) {
+            status.setText("На дочернем узле выберите родительский ПК для синхронизации.");
+            return;
+        }
         if (!peer.trusted()) {
             status.setText("При подключении появится запрос подтверждения fingerprint.");
         }
@@ -111,7 +130,9 @@ final class PeerMeshPanel extends JPanel {
                 status.setText("Синхронизация не завершена.");
             } else {
                 status.setText("Готово. Добавлено товаров: " + result.productsAdded()
-                        + "; записей точек/адресного хранения: " + result.workspaceRowsAdded() + ".");
+                        + "; записей начальной настройки: " + result.workspaceRowsAdded()
+                        + "; доменных изменений: " + result.changesApplied()
+                        + (result.conflicts() == 0 ? "." : "; конфликтов, оставленных локально: " + result.conflicts() + "."));
             }
             refreshPeers();
         }));
@@ -157,7 +178,8 @@ final class PeerMeshPanel extends JPanel {
             return switch (column) {
                 case 0 -> peer.name();
                 case 1 -> peer.address() + ":" + peer.port();
-                case 2 -> service.isTrusted(peer.id()) ? "Доверенный" : "Не подтверждён";
+                case 2 -> ("parent".equals(peer.role()) ? "Родитель · " : "Дочерний · ")
+                        + (service.isTrusted(peer.id()) ? "доверенный" : "не подтверждён");
                 default -> peer.status().isBlank() ? (peer.online() ? "В сети" : "Не в сети") : peer.status();
             };
         }

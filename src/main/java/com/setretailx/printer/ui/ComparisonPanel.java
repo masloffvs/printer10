@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.setretailx.printer.model.Product;
 import com.setretailx.printer.model.ScannedProbe;
 import com.setretailx.printer.repository.ProductRepository;
-import com.setretailx.printer.service.SetRetailXConnector;
+import com.setretailx.printer.service.ParentApiClient;
 import com.setretailx.printer.service.setretailx.dto.ProductDto;
 
 import javax.swing.BorderFactory;
@@ -39,13 +39,14 @@ final class ComparisonPanel extends JPanel {
     private final JLabel status = new JLabel("Ожидаю сканирование ценников.");
     private final ProductRepository repository;
     private final List<ScanRecord> pending = new ArrayList<>();
-    private SetRetailXConnector connector;
+    private final ParentApiClient service;
     private Consumer<Product> mismatchHandler = product -> { };
     private boolean workerRunning;
 
-    ComparisonPanel(ProductRepository repository) {
+    ComparisonPanel(ProductRepository repository, ParentApiClient service) {
         super(new BorderLayout(8, 8));
         this.repository = repository;
+        this.service = service;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         table.setAutoResizeMode(JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS);
         table.setRowHeight(46);
@@ -71,11 +72,6 @@ final class ComparisonPanel extends JPanel {
         add(footer, BorderLayout.SOUTH);
     }
 
-    void setConnector(SetRetailXConnector connector) {
-        this.connector = connector;
-        if (connector != null) processPending();
-    }
-
     void setMismatchHandler(Consumer<Product> handler) {
         mismatchHandler = handler == null ? product -> { } : handler;
     }
@@ -96,11 +92,7 @@ final class ComparisonPanel extends JPanel {
             return;
         }
         pending.add(scan);
-        if (connector == null) {
-            setStatus("Ценник принят; ожидание подключения к SetRetailX.");
-        } else {
-            processPending();
-        }
+        processPending();
     }
 
     void setStatus(String message) { status.setText(message); }
@@ -112,16 +104,15 @@ final class ComparisonPanel extends JPanel {
     }
 
     private void processPending() {
-        if (workerRunning || connector == null || pending.isEmpty()) return;
+        if (workerRunning || pending.isEmpty()) return;
         List<ScanRecord> batch = new ArrayList<>(pending.subList(0, Math.min(BATCH_SIZE, pending.size())));
         pending.subList(0, batch.size()).clear();
         batch.forEach(scan -> updateRow(scan, row(scan, "Проверка…", null, null, null, null)));
         workerRunning = true;
         setStatus("Проверяем ценники: " + batch.size() + "…");
-        SetRetailXConnector activeConnector = connector;
         new SwingWorker<List<ComparisonResult>, Void>() {
             @Override protected List<ComparisonResult> doInBackground() {
-                return compare(batch, activeConnector);
+                return compare(batch);
             }
 
             @Override protected void done() {
@@ -150,13 +141,13 @@ final class ComparisonPanel extends JPanel {
                     setStatus("Ошибка сверки: " + message);
                 } finally {
                     workerRunning = false;
-                    if (!pending.isEmpty() && connector != null) processPending();
+                    if (!pending.isEmpty()) processPending();
                 }
             }
         }.execute();
     }
 
-    private List<ComparisonResult> compare(List<ScanRecord> scans, SetRetailXConnector activeConnector) {
+    private List<ComparisonResult> compare(List<ScanRecord> scans) {
         Map<ScanRecord, Product> local = new LinkedHashMap<>();
         List<ComparisonResult> results = new ArrayList<>();
         Set<String> markings = new LinkedHashSet<>();
@@ -164,7 +155,7 @@ final class ComparisonPanel extends JPanel {
             try {
                 Product product = repository.findByBarcode(scan.probe.barcode());
                 if (product == null) {
-                    product = activeConnector.searchOnlineProduct(scan.probe.barcode()).join().orElse(null);
+                    product = service.searchOnlineProduct(scan.probe.barcode()).orElse(null);
                     if (product == null) {
                         results.add(ComparisonResult.error(scan,
                                 "Штрихкод не найден в локальной базе и SetRetailX"));
@@ -187,8 +178,7 @@ final class ComparisonPanel extends JPanel {
             List<ProductDto> remoteProducts = new ArrayList<>();
             List<String> ids = new ArrayList<>(markings);
             for (int start = 0; start < ids.size(); start += 100) {
-                remoteProducts.addAll(activeConnector.getProducts(
-                        ids.subList(start, Math.min(start + 100, ids.size())), 12).join());
+                remoteProducts.addAll(service.getProducts(ids.subList(start, Math.min(start + 100, ids.size())), 12));
             }
             Map<String, ProductDto> byMarking = new LinkedHashMap<>();
             Map<String, ProductDto> byBarcode = new LinkedHashMap<>();

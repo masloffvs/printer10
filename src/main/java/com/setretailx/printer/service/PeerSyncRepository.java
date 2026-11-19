@@ -23,15 +23,37 @@ final class PeerSyncRepository {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final java.nio.file.Path catalogPath = AppConfig.DB_PATH.toAbsolutePath().normalize();
     private final java.nio.file.Path tasksPath = AppConfig.tasksDatabasePath();
+    private final DomainChangeRepository domainChanges = new DomainChangeRepository();
+
+    long domainCursor(String parentId) throws SQLException { return domainChanges.cursor(parentId); }
+    long domainHighWater() throws SQLException { return domainChanges.highWater(); }
+    ObjectNode exportChangesAfter(long cursor) throws SQLException {
+        ObjectNode changes = domainChanges.exportAfter(cursor);
+        changes.put("changeFeedVersion", 1);
+        return changes;
+    }
+    ChangeApplySummary applyDomainChanges(String parentId, JsonNode events, long nextCursor) throws SQLException {
+        int conflicts = domainChanges.apply(parentId, events, nextCursor);
+        return new ChangeApplySummary(events.size() - conflicts, conflicts);
+    }
+    void markDomainBootstrap(String parentId, long cursor) throws SQLException {
+        domainChanges.markBootstrap(parentId, cursor);
+    }
 
     ObjectNode exportSnapshot() throws Exception {
         ObjectNode snapshot = JSON.createObjectNode();
+        snapshot.put("protocolVersion", 2);
+        snapshot.put("snapshotVersion", 2);
         snapshot.set("catalog", exportCatalog());
         snapshot.set("workspace", exportWorkspace());
         return snapshot;
     }
 
     MergeSummary importSnapshot(JsonNode snapshot) throws Exception {
+        if (snapshot == null || !snapshot.isObject() || snapshot.path("protocolVersion").asInt(-1) != 2)
+            throw new SQLException("Snapshot синхронизации имеет неизвестную версию.");
+        if (snapshot.path("snapshotVersion").asInt(-1) != 2)
+            throw new SQLException("Snapshot синхронизации не содержит стабильные идентификаторы доменных объектов.");
         int products = importCatalog(snapshot.path("catalog"));
         int workspace = importWorkspace(snapshot.path("workspace"));
         return new MergeSummary(products, workspace);
@@ -233,10 +255,12 @@ final class PeerSyncRepository {
     private ObjectNode exportWorkspace() throws SQLException {
         ObjectNode result = JSON.createObjectNode();
         try (Connection connection = connect(tasksPath)) {
-            result.set("points", queryRows(connection, "SELECT point_id,name,x,y,width,height FROM sales_points"));
+            result.set("points", queryRows(connection, "SELECT sync_key,name,x,y,width,height FROM sales_points"));
             result.set("pointItems", queryRows(connection,
-                    "SELECT p.name AS point_name,i.article,i.name,i.price,i.discount_price,i.updated_at "
+                    "SELECT p.sync_key AS point_sync_key,p.name AS point_name,i.article,i.name,i.price,i.discount_price,i.updated_at "
                             + "FROM sales_point_items i JOIN sales_points p ON p.point_id=i.point_id"));
+            result.set("fixtures", queryRows(connection,
+                    "SELECT sync_key,kind,name,x,y,width,height,rotation,color FROM sales_point_fixtures"));
             result.set("addresses", queryRows(connection, "SELECT address_id,name,created_at FROM storage_addresses"));
             result.set("boxes", queryRows(connection,
                     "SELECT b.box_code,a.address_id,b.created_at FROM storage_boxes b "
@@ -254,28 +278,55 @@ final class PeerSyncRepository {
         try (Connection connection = connect(tasksPath)) {
             connection.setAutoCommit(false);
             try {
+                // Snapshot rows are a bootstrap copy, not local edits. Flip the trigger guard
+                // inside the same SQLite write transaction so concurrent UI writes wait rather
+                // than being accidentally hidden from the local change journal.
+                try (Statement guard = connection.createStatement()) {
+                    guard.executeUpdate("UPDATE peer_domain_sync_control SET suppress=1 WHERE singleton=1");
+                }
                 Map<String, Long> pointIds = new LinkedHashMap<>();
                 for (JsonNode point : source.path("points")) {
+                    String syncKey = text(point, "sync_key");
                     String name = text(point, "name");
-                    if (name.isBlank()) continue;
+                    if (syncKey.isBlank() || name.isBlank()) continue;
                     try (PreparedStatement find = connection.prepareStatement(
-                            "SELECT point_id FROM sales_points WHERE name=? COLLATE NOCASE LIMIT 1")) {
-                        find.setString(1, name);
+                            "SELECT point_id FROM sales_points WHERE sync_key=? LIMIT 1")) {
+                        find.setString(1, syncKey);
                         try (ResultSet row = find.executeQuery()) {
-                            if (row.next()) { pointIds.put(name.toLowerCase(java.util.Locale.ROOT), row.getLong(1)); continue; }
+                            if (row.next()) { pointIds.put(syncKey, row.getLong(1)); continue; }
                         }
                     }
+                    // Upgrade nodes may already have additive name-based snapshot rows. Adopt
+                    // their stable identity only when the name is unambiguous; retain all local data.
+                    Long legacyPointId = null;
+                    try (PreparedStatement find = connection.prepareStatement(
+                            "SELECT point_id FROM sales_points WHERE name=? COLLATE NOCASE LIMIT 2")) {
+                        find.setString(1, name);
+                        try (ResultSet row = find.executeQuery()) {
+                            if (row.next()) {
+                                long candidate = row.getLong(1);
+                                if (!row.next()) legacyPointId = candidate;
+                            }
+                        }
+                    }
+                    if (legacyPointId != null) {
+                        try (PreparedStatement adopt = connection.prepareStatement("UPDATE sales_points SET sync_key=? WHERE point_id=?")) {
+                            adopt.setString(1, syncKey); adopt.setLong(2, legacyPointId); adopt.executeUpdate();
+                        }
+                        pointIds.put(syncKey, legacyPointId);
+                        continue;
+                    }
                     try (PreparedStatement insert = connection.prepareStatement(
-                            "INSERT INTO sales_points(name,x,y,width,height) VALUES(?,?,?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
-                        insert.setString(1, name); insert.setInt(2, point.path("x").asInt());
-                        insert.setInt(3, point.path("y").asInt()); insert.setInt(4, point.path("width").asInt(160));
-                        insert.setInt(5, point.path("height").asInt(100)); insert.executeUpdate();
-                        try (ResultSet key = insert.getGeneratedKeys()) { if (key.next()) pointIds.put(name.toLowerCase(java.util.Locale.ROOT), key.getLong(1)); }
+                            "INSERT INTO sales_points(sync_key,name,x,y,width,height) VALUES(?,?,?,?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
+                        insert.setString(1, syncKey); insert.setString(2, name); insert.setInt(3, point.path("x").asInt());
+                        insert.setInt(4, point.path("y").asInt()); insert.setInt(5, point.path("width").asInt(160));
+                        insert.setInt(6, point.path("height").asInt(100)); insert.executeUpdate();
+                        try (ResultSet key = insert.getGeneratedKeys()) { if (key.next()) pointIds.put(syncKey, key.getLong(1)); }
                     }
                     added++;
                 }
                 for (JsonNode item : source.path("pointItems")) {
-                    Long pointId = pointIds.get(text(item, "point_name").toLowerCase(java.util.Locale.ROOT));
+                    Long pointId = pointIds.get(text(item, "point_sync_key"));
                     if (pointId == null) continue;
                     try (PreparedStatement insert = connection.prepareStatement(
                             "INSERT OR IGNORE INTO sales_point_items(point_id,article,name,price,discount_price,updated_at) VALUES(?,?,?,?,?,?)")) {
@@ -283,6 +334,19 @@ final class PeerSyncRepository {
                         insert.setString(3, text(item, "name")); insert.setString(4, text(item, "price"));
                         insert.setString(5, text(item, "discount_price")); insert.setLong(6, item.path("updated_at").asLong());
                         added += insert.executeUpdate();
+                    }
+                }
+
+                for (JsonNode fixture : source.path("fixtures")) {
+                    String syncKey = text(fixture, "sync_key");
+                    if (syncKey.isBlank()) continue;
+                    try (PreparedStatement insert = connection.prepareStatement("INSERT OR IGNORE INTO sales_point_fixtures"
+                            + "(sync_key,kind,name,x,y,width,height,rotation,color) VALUES(?,?,?,?,?,?,?,?,?)")) {
+                        insert.setString(1, syncKey); insert.setString(2, text(fixture, "kind"));
+                        insert.setString(3, text(fixture, "name")); insert.setInt(4, fixture.path("x").asInt());
+                        insert.setInt(5, fixture.path("y").asInt()); insert.setInt(6, fixture.path("width").asInt(120));
+                        insert.setInt(7, fixture.path("height").asInt(48)); insert.setDouble(8, fixture.path("rotation").asDouble());
+                        insert.setString(9, text(fixture, "color")); added += insert.executeUpdate();
                     }
                 }
 
@@ -325,6 +389,9 @@ final class PeerSyncRepository {
                         insert.setInt(7, product.path("quantity").asInt(1)); insert.setLong(8, product.path("updated_at").asLong());
                         added += insert.executeUpdate();
                     }
+                }
+                try (Statement guard = connection.createStatement()) {
+                    guard.executeUpdate("UPDATE peer_domain_sync_control SET suppress=0 WHERE singleton=1");
                 }
                 connection.commit();
             } catch (SQLException error) {
@@ -379,4 +446,5 @@ final class PeerSyncRepository {
     }
 
     record MergeSummary(int products, int workspaceRows) { }
+    record ChangeApplySummary(int applied, int conflicts) { }
 }

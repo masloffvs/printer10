@@ -10,7 +10,7 @@ import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.repository.AddressStorageRepository.LocationResult;
 import com.setretailx.printer.service.ProductImageService;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
-import com.setretailx.printer.service.SetRetailXConnector;
+import com.setretailx.printer.service.ParentApiClient;
 import com.setretailx.printer.service.setretailx.dto.ProductDto;
 
 import javax.imageio.ImageIO;
@@ -58,7 +58,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Readable product details dialog with asynchronously loaded catalog photography.
@@ -92,11 +91,11 @@ final class ProductCardDialog extends JPanel {
     private final JButton openPhotoButton = new JButton("Открыть в новом окне");
     private final JButton printInfoButton = new JButton("Печать информационного листа…");
     private final AddressStorageRepository addressStorage;
-    private final SetRetailXConnector connector;
+    private final ParentApiClient connector;
     private BufferedImage originalImage;
 
     ProductCardDialog(Product product, AddressStorageRepository addressStorage,
-                      PriceMonitoringTaskService priceHistoryService, SetRetailXConnector connector) {
+                      PriceMonitoringTaskService priceHistoryService, ParentApiClient connector) {
         super(new BorderLayout());
         this.addressStorage = addressStorage;
         this.connector = connector;
@@ -158,8 +157,7 @@ final class ProductCardDialog extends JPanel {
         new SwingWorker<List<String>, Void>() {
             @Override protected List<String> doInBackground() {
                 try {
-                    List<ProductDto> results = connector.getProducts(List.of(product.marking()))
-                            .get(12, TimeUnit.SECONDS);
+                    List<ProductDto> results = connector.getProducts(List.of(product.marking()));
                     ProductDto match = results.stream()
                             .filter(item -> item.marking() != null && item.marking().equalsIgnoreCase(product.marking()))
                             .findFirst().orElse(results.size() == 1 ? results.get(0) : null);
@@ -679,7 +677,7 @@ final class ProductCardDialog extends JPanel {
                 if (HIDDEN_FIELDS.contains(key) || key.equals("catalogattributes") || entry.getValue().isBlank()) continue;
                 (isServiceField(key) ? service : main).add(entry);
             }
-            if (!main.isEmpty() || !service.isEmpty() || !product.rawJson().isBlank()) {
+            if (!main.isEmpty() || !service.isEmpty()) {
                 y = drawSection(g, "ХАРАКТЕРИСТИКИ", x, y, width, paint);
                 if (!main.isEmpty()) {
                     y = drawSubheading(g, "Основные", y, width, paint);
@@ -692,14 +690,11 @@ final class ProductCardDialog extends JPanel {
                                 y, width, BODY, BODY_BOLD, paint);
                     }
                 }
-                if (!service.isEmpty() || !product.rawJson().isBlank()) {
+                if (!service.isEmpty()) {
                     y = drawSubheading(g, "Служебные поля", y + 3, width, paint);
                     for (Map.Entry<String, String> entry : service) {
                         y = drawAttribute(g, LABELS.getOrDefault(normalizeKey(entry.getKey()), humanize(entry.getKey())),
                                 normalizeText(entry.getValue()), y, width, SERVICE, SERVICE, paint);
-                    }
-                    if (!product.rawJson().isBlank()) {
-                        y = drawAttribute(g, "Raw JSON", normalizeText(product.rawJson()), y, width, SERVICE, SERVICE, paint);
                     }
                 }
             }

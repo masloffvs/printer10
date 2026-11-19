@@ -13,6 +13,10 @@ import com.setretailx.printer.repository.ProductRepository;
 import com.setretailx.printer.repository.PrintHistoryRepository;
 import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.repository.SalesPointRepository;
+import com.setretailx.printer.repository.AccountRepository;
+import com.setretailx.printer.service.ParentAccessService;
+import com.setretailx.printer.service.ParentApiService;
+import com.setretailx.printer.service.ParentApiClient;
 import com.setretailx.printer.repository.SalesPointRepository.ShelfItem;
 import com.setretailx.printer.service.SetRetailXConnector;
 import com.setretailx.printer.service.ExchangeEvent;
@@ -59,7 +63,7 @@ public final class MainWindow extends JFrame {
     private final MdiWorkspace workspace = new MdiWorkspace();
     private final List<QueueEntry> entries = new ArrayList<>();
     private final ScannerPanel scanner = new ScannerPanel(this::submitScan);
-    private final ComparisonPanel comparison = new ComparisonPanel(products);
+    private final ComparisonPanel comparison;
     private final SearchPanel search = new SearchPanel(this::search, this::updateSearchSelection,
             this::addSelectedSearchResults, this::showProductCard,
             picker -> workspace.addDynamicWindow("Выбор категории", picker, 500, 520));
@@ -69,10 +73,18 @@ public final class MainWindow extends JFrame {
     private final PeerMeshService peerMeshService = new PeerMeshService(
             peer -> SwingUtilities.invokeLater(this::refreshPeerMesh), PeerMeshPanel::confirmTrust);
     private final PeerMeshPanel peerMeshPanel = new PeerMeshPanel(peerMeshService);
+    private final AccountRepository accountRepository = AppConfig.nodeRole() == AppConfig.NodeRole.PARENT
+            ? new AccountRepository() : null;
+    private final ParentAccessService parentAccess = accountRepository == null ? null
+            : new ParentAccessService(accountRepository);
     private final PrintHistoryPanel history = new PrintHistoryPanel(this::restoreBatch, this::refreshHistory);
-    private final SetRetailXConnector network = SetRetailXConnector.getInstance(
-            event -> SwingUtilities.invokeLater(() -> exchange.append(event)));
+    private final SetRetailXConnector network = AppConfig.nodeRole() == AppConfig.NodeRole.PARENT
+            ? SetRetailXConnector.getInstance(event -> SwingUtilities.invokeLater(() -> exchange.append(event)))
+            : SetRetailXConnector.unavailableOnChild();
     private final PriceMonitoringTaskService taskService = new PriceMonitoringTaskService(network);
+    private final ParentApiService parentApi = parentAccess == null ? null
+            : new ParentApiService(parentAccess, taskService);
+    private final ParentApiClient parentApiClient = new ParentApiClient(parentApi, peerMeshService);
     private final PriceMonitoringPanel taskPanel = new PriceMonitoringPanel(taskService, workspace);
     private final AddressStoragePanel addressStoragePanel = new AddressStoragePanel(addressStorage);
     private final PalletScanningPanel palletScanningPanel = new PalletScanningPanel(addressStorage);
@@ -109,12 +121,13 @@ public final class MainWindow extends JFrame {
 
     public MainWindow() {
         super("SetRetailX — Печать ценников (Java)");
+        comparison = new ComparisonPanel(products, parentApiClient);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setSize(1120, 720);
         setMinimumSize(new java.awt.Dimension(850, 560));
         setLocationRelativeTo(null);
         setJMenuBar(workspace.createMenuBar(this::dispose, this::showAbout));
-        comparison.setConnector(network);
+        if (parentApi != null) peerMeshService.configureParentApi(parentApi);
         comparison.setMismatchHandler(this::enqueueMismatchedProduct);
         salesPointEditorPanel.setHistoryCheckHandler(this::checkSalesPointPriceHistory);
         salesPointEditorPanel.setForcedCheckHandler(this::forceSalesPointPriceCheck);
@@ -130,7 +143,8 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("apiExchangeLog", new ApiExchangeLogPanel(), 1000, 620);
         workspace.addWindow("peerMesh", peerMeshPanel, 850, 500);
         workspace.addWindow("history", history, 760, 420);
-        workspace.addWindow("salesHistory", new SalesAnalyticsPanel(taskService), 900, 600);
+        workspace.addWindow("salesHistory", new SalesAnalyticsPanel(parentApiClient,
+                this::openSalesArticleCard, this::enqueueSalesArticle), 900, 600);
         workspace.addWindow("priceChangePrintHistory", changedPrintHistoryPanel, 950, 540);
         workspace.addWindow("tasks", taskPanel, 900, 520);
         workspace.addWindow("storage", addressStoragePanel, 900, 560);
@@ -141,11 +155,16 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("salesPointEditor", salesPointEditorPanel, 760, 520);
         workspace.addWindow("palletScanning", palletScanningPanel, 900, 600);
         workspace.addWindow("priceChanges", priceChanges, 900, 520);
-        workspace.addWindow("environment", new EnvironmentPanel(() -> {
-            network.reloadSettings();
-            log("Параметры обслуживания и администрирования сохранены и применены. При необходимости нажмите «Проверить подключение».");
-            status.setText("Параметры администрирования обновлены.");
-        }), 760, 520);
+        if (AppConfig.nodeRole() == AppConfig.NodeRole.PARENT) {
+            workspace.addWindow("environment", new EnvironmentPanel(() -> {
+                network.reloadSettings();
+                log("Параметры обслуживания и администрирования сохранены и применены. При необходимости нажмите «Проверить подключение».");
+                status.setText("Параметры администрирования обновлены.");
+            }), 760, 520);
+        }
+        if (AppConfig.nodeRole() == AppConfig.NodeRole.PARENT) {
+            workspace.addWindow("accounts", new AccountManagementPanel(accountRepository, parentAccess), 780, 500);
+        }
         scanner.registerRecipient("comparison", "Сверка ценников");
         scanner.registerRecipient("search", "Поиск товаров");
         scanner.registerRecipient("queue", "Печать ценников");
@@ -176,6 +195,10 @@ public final class MainWindow extends JFrame {
     }
 
     private void checkNetworkConnection() {
+        if (AppConfig.nodeRole() != AppConfig.NodeRole.PARENT) {
+            exchange.setStatus("Прямое подключение SetRetailX отключено на дочернем узле. Используйте родительский ПК.");
+            return;
+        }
         exchange.setBusy(true);
         exchange.setStatus("Проверка соединения…");
         network.checkConnection().whenComplete((response, error) -> SwingUtilities.invokeLater(() -> {
@@ -202,6 +225,15 @@ public final class MainWindow extends JFrame {
         String raw = scanner.inputText().trim();
         if (raw.isEmpty()) return;
         scanner.clearInput();
+        if (raw.startsWith("username=") || raw.contains("&password=")) {
+            try (com.setretailx.printer.service.ScannedCredentials.Credentials ignored =
+                         com.setretailx.printer.service.ScannedCredentials.parse(raw)) {
+                status.setText("Формат сканируемых данных проверен, но вход в аккаунт ещё не подключён.");
+            } catch (IllegalArgumentException invalid) {
+                status.setText(invalid.getMessage());
+            }
+            return;
+        }
         if (scanner.sendsTo("palletScanning")) {
             submitPalletScan(raw);
             scanner.focusInput();
@@ -237,6 +269,10 @@ public final class MainWindow extends JFrame {
             receivers++;
             receiveSalesPointPriceScan(probe);
         }
+        if (scanner.sendsTo("salesPointEditor") && !probe.hasPriceData() && !probe.barcode().isBlank()) {
+            receivers++;
+            addSalesPointItemByBarcode(probe.barcode());
+        }
         if (scanner.sendsTo("search") && !probe.hasPriceData() && !probe.barcode().isEmpty()) {
             receivers++;
             search.setQuery(probe.barcode());
@@ -255,7 +291,7 @@ public final class MainWindow extends JFrame {
         status.setText("Ищем " + probe.barcode() + " в локальной базе…");
         runBackground(() -> {
             Product local = products.findByBarcode(probe.barcode());
-            Product product = local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+            Product product = local != null ? local : parentApiClient.searchOnlineProduct(probe.barcode()).orElse(null);
             if (product == null) return null;
             return new ScannedPrintProduct(product, printHistory.latestSuccessfulEntry(product).orElse(null));
         }, scanned -> {
@@ -314,7 +350,7 @@ public final class MainWindow extends JFrame {
         status.setText("Ищем товар " + probe.barcode() + " для адресного хранения…");
         runBackground(() -> {
             Product local = products.findByBarcode(probe.barcode());
-            return local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+            return local != null ? local : parentApiClient.searchOnlineProduct(probe.barcode()).orElse(null);
         }, product -> {
             if (product == null) {
                 status.setText("Штрихкод " + probe.barcode() + " не найден; товар не добавлен.");
@@ -336,7 +372,7 @@ public final class MainWindow extends JFrame {
         status.setText("Ищем товар " + probe.barcode() + " для паллеты…");
         runBackground(() -> {
             Product local = products.findByBarcodeForPallet(probe.barcode());
-            return local != null ? local : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+            return local != null ? local : parentApiClient.searchOnlineProduct(probe.barcode()).orElse(null);
         }, product -> {
             if (product == null) {
                 palletScanningPanel.scanFailed("Штрихкод " + probe.barcode() + " не найден; товар не добавлен.");
@@ -415,7 +451,7 @@ public final class MainWindow extends JFrame {
         }
         runBackground(() -> {
             Product product = products.findByBarcode(probe.barcode());
-            return product != null ? product : network.searchOnlineProduct(probe.barcode()).join().orElse(null);
+            return product != null ? product : parentApiClient.searchOnlineProduct(probe.barcode()).orElse(null);
         }, product -> {
             if (product == null) {
                 status.setText("Товар " + probe.barcode() + " не найден; ценник точки не обновлён.");
@@ -427,6 +463,29 @@ public final class MainWindow extends JFrame {
             status.setText("Не удалось найти товар для точки продаж: " + error);
             scanner.focusInput();
         });
+    }
+
+    private void addSalesPointItemByBarcode(String barcode) {
+        long targetPointId = salesPointEditorPanel.selectedPointId();
+        if (targetPointId < 0) {
+            status.setText("Сначала выберите торговую точку.");
+            return;
+        }
+        status.setText("Ищем товар и последний ценник по штрихкоду " + barcode + "…");
+        runBackground(() -> {
+            Product product = products.findByBarcode(barcode);
+            if (product == null) product = parentApiClient.searchOnlineProduct(barcode).orElse(null);
+            if (product == null) return null;
+            PriceMonitoringTaskService.ShelfPrice price = taskService.latestShelfPrice(product.marking());
+            return new SalesPointBarcodeItem(product, price);
+        }, item -> {
+            if (item == null) {
+                status.setText("Товар " + barcode + " не найден; ценник точки не добавлен.");
+                return;
+            }
+            salesPointEditorPanel.acceptBarcodeItem(targetPointId, item.product(), item.price());
+            scanner.focusInput();
+        }, error -> status.setText("Не удалось добавить ценник по штрихкоду: " + error));
     }
 
     private void enqueueMismatchedProduct(Product product) {
@@ -444,7 +503,7 @@ public final class MainWindow extends JFrame {
                 Product product = candidate.marking().isBlank() ? null : products.findByMarking(candidate.marking());
                 if (product == null && !candidate.barcode().isBlank()) product = products.findByBarcode(candidate.barcode());
                 if (product == null && !candidate.barcode().isBlank()) {
-                    product = network.searchOnlineProduct(candidate.barcode()).join().orElse(null);
+                    product = parentApiClient.searchOnlineProduct(candidate.barcode()).orElse(null);
                 }
                 if (product != null) found.add(product);
             }
@@ -470,7 +529,7 @@ public final class MainWindow extends JFrame {
                 if (changes.isEmpty()) continue;
                 Product product = products.findByMarking(item.article());
                 if (product == null && !changes.get(0).barcode().isBlank()) {
-                    product = network.searchOnlineProduct(changes.get(0).barcode()).join().orElse(null);
+                    product = parentApiClient.searchOnlineProduct(changes.get(0).barcode()).orElse(null);
                 }
                 changed.add(new ChangedShelfProduct(item, changes.size(), product));
             }
@@ -545,6 +604,7 @@ public final class MainWindow extends JFrame {
 
     private record ChangedShelfProduct(ShelfItem shelfItem, int changeCount, Product product) { }
     private record ForcedShelfScan(ShelfItem shelfItem, Product product) { }
+    private record SalesPointBarcodeItem(Product product, PriceMonitoringTaskService.ShelfPrice price) { }
     private record ScannedPrintProduct(Product product, PrintHistoryEntry previousPrint) { }
 
     private void search() {
@@ -552,7 +612,7 @@ public final class MainWindow extends JFrame {
         String lookup = query.isEmpty() ? "" : BarInput.barcode(query).orElse(query);
         ProductRepository.SearchCriteria criteria = new ProductRepository.SearchCriteria(lookup,
                 search.categoryFilter(), search.attributeNameFilter(), search.attributeValueFilter(),
-                search.minimumPriceFilter(), search.maximumPriceFilter());
+                search.minimumPriceFilter(), search.maximumPriceFilter(), search.advancedSearch());
         if (query.isEmpty() && !criteria.hasFilters()) {
             search.setStatus("Введите запрос или выберите категорию, цену либо характеристику.");
             return;
@@ -563,7 +623,7 @@ public final class MainWindow extends JFrame {
             List<Product> local = products.search(criteria);
             if (!local.isEmpty() || criteria.hasFilters() || lookup.isEmpty()) return local;
             SwingUtilities.invokeLater(() -> search.setStatus("Локально не найдено; ищем в SetRetailX…"));
-            return network.searchOnlineProduct(lookup).join().map(List::of).orElseGet(List::of);
+            return parentApiClient.searchOnlineProduct(lookup).map(List::of).orElseGet(List::of);
         }, results -> {
             search.setSearchEnabled(true);
             searchResults = new ArrayList<>(results);
@@ -623,7 +683,7 @@ public final class MainWindow extends JFrame {
                                     snapshotsByQueueIndex.get(index).quantity()))
                             .toList();
                     try {
-                        PrintGroupResponseDto result = network.printGroup(key.format(), key.amount(), items).join();
+                        PrintGroupResponseDto result = parentApiClient.printGroup(key.format(), key.amount(), items);
                         if (!result.started()) {
                             failures.add("Задание для " + key.format().name() + " не было запущено.");
                             continue;
@@ -775,7 +835,48 @@ public final class MainWindow extends JFrame {
     private void showProductCard(Product product) {
         if (product == null) return;
         workspace.addProductCard("Карточка — " + product.name(),
-                new ProductCardDialog(product, addressStorage, taskService, network));
+                new ProductCardDialog(product, addressStorage, taskService, parentApiClient));
+    }
+
+    private void openSalesArticleCard(PriceMonitoringTaskService.SalesArticle article) {
+        resolveSalesArticle(article, product -> {
+            if (product == null) {
+                status.setText("Товар не найден в каталоге: " + article.marking());
+                return;
+            }
+            showProductCard(product);
+        });
+    }
+
+    private void enqueueSalesArticle(PriceMonitoringTaskService.SalesArticle article) {
+        resolveSalesArticle(article, product -> {
+            if (product == null) {
+                status.setText("Товар не найден в каталоге для очереди: " + article.marking());
+                return;
+            }
+            entries.add(new QueueEntry(product));
+            refreshQueue();
+            workspace.showWindow("queue");
+            status.setText("Добавлен в очередь печати: " + product.name());
+        });
+    }
+
+    private void resolveSalesArticle(PriceMonitoringTaskService.SalesArticle article,
+                                     java.util.function.Consumer<Product> done) {
+        status.setText("Ищем товар в каталоге: " + article.marking());
+        runBackground(() -> {
+            Product product = article.marking().isBlank() ? null : products.findByMarking(article.marking());
+            if (product == null && !article.barcode().isBlank()) product = products.findByBarcode(article.barcode());
+            if (product == null && !article.barcode().isBlank()) {
+                product = parentApiClient.searchOnlineProduct(article.barcode()).orElse(null);
+            }
+            if (product == null && !article.name().isBlank()) {
+                List<Product> matches = products.search(article.name());
+                product = matches.stream().filter(match -> match.name().equalsIgnoreCase(article.name()))
+                        .findFirst().orElse(null);
+            }
+            return product;
+        }, product -> done.accept(product), error -> status.setText("Не удалось найти товар: " + error));
     }
 
     private void assignSelected(List<Integer> rows, AppConfig.PrintFormat format,

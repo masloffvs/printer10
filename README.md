@@ -17,11 +17,19 @@ java -jar target/printer-1.0.0-SNAPSHOT.jar
 
 On first launch the dark FlatLaf theme is installed before Swing components are created. SetRetailX credentials can be supplied through environment variables or a root `.env` file (same variable names as `.env.example`). `SETRETAILX_CONNECTION_RETRIES` configures how many times requests are retried after a detected closed-connection failure (default `5`; use `0` to disable retries).
 
-## Office peer mesh
+## License verification
 
-The **Пиры** window discovers SetRetailX Printer instances on the local IPv4 broadcast domain and listens on TCP/UDP port `45873`. Allow that port in the office firewall on trusted private networks. The first encrypted synchronization displays the remote Ed25519 SHA-256 fingerprint and requires explicit approval; compare it with the other computer through a separate trusted channel. Identity and trust records are stored under `~/.setretailx/peer-mesh` (or the equivalent user home directory).
+Before opening application databases, the app validates its license with the licensing server and binds first activation to the installation key and a machine fingerprint. Server leases are signed with Ed25519 and encrypted for the client using X25519/HKDF-SHA256/AES-256-GCM. Binary framing alone is not security; the cryptographic layer provides confidentiality, integrity, and server authentication. If the server is unavailable, the latest signed lease is accepted for at most four hours. The lease is renewed in the background; if it expires, the app closes without deleting local data.
 
-Synchronization is additive: it imports missing product rows, sales-point definitions and shelf items, storage addresses, boxes, and stored-product rows. Existing rows are not overwritten. Sales, receipts, print history, application settings, and credentials are not included.
+For local development, see `license-server-local/README.md`. The `license-server-local/` directory is Git-ignored; its keys and no-TLS HTTP server are for local testing only and must not be exposed to a network. Configure the production URL and pinned public keys in `.env` using `SETRETAILX_LICENSE_URL`, `SETRETAILX_LICENSE_ENCRYPTION_KEY_FILE`, `SETRETAILX_LICENSE_VERIFY_KEY_FILE`, and `SETRETAILX_LICENSE_KEY`.
+
+## Parent and child nodes
+
+Set `SETRETAILX_NODE_ROLE=parent` on the single parent PC and `SETRETAILX_NODE_ROLE=child` on each child in `.env` (or the process environment). The parent is the intended source of truth; children initiate synchronization and can bind to only one parent identity. Discovery and encrypted peer transport use TCP/UDP port `45873`; allow it only on trusted private networks. The first encrypted connection displays the remote Ed25519 SHA-256 fingerprint and requires explicit approval; compare it with the other computer through a separate trusted channel. Identity, parent binding, and trust records are stored under `~/.setretailx/peer-mesh` (or the equivalent user home directory).
+
+Synchronization uses a version-2 parent snapshot for initial additive bootstrap, followed by a separate version-1 domain change feed. The bootstrap imports missing catalog rows/references, sales-point definitions and shelf items, map fixtures, addresses, boxes, and stored-product rows; stable UUID keys identify sales points and map fixtures across databases. The change feed propagates inserts, updates, and deletions for addresses, boxes, stored products, sales points, shelf items, and map fixtures. A conflicting local edit is retained and recorded rather than overwritten. Catalog/reference edits and deletions are not yet included in the change feed. Synchronization never replaces SQLite files. Sales, receipts, print history, application settings, and credentials are excluded from snapshots.
+
+Accounts are stored only on the parent in a separate per-user `~/.setretailx/accounts.sqlite` database with salted PBKDF2 password hashes. The first parent administrator is bootstrapped locally on first launch; account management is available on the parent. The versioned Parent API is shared by local and remote calls over the encrypted peer channel. Catalog lookup and price reads are available without login by default (and may be restricted when a session is supplied); sales and receipt queries require `SALES_READ`, and sending print jobs requires `SHARED_DATA_WRITE`. Account administration requires `ACCOUNT_ADMIN`. Parent-only SetRetailX credentials and scheduled price monitoring are not used on children. Peer connections require matching protocol version 2 and reject oversized frames and inflated payloads. Scanner credential payloads are strictly validated but are not an authentication mechanism and are not connected to login.
 
 ## UI layout rule
 
@@ -47,5 +55,5 @@ Both packages include a Java runtime. The workflow stages only the application J
 ## Migration status
 
 - Implemented: Swing/FlatLaf MDI workspace with independently movable internal windows and separate Java classes for the workspace and scanner, comparison, search, queue, and exchange screens; shared scanner routing, `ScannedProbe` parsing and price validation, asynchronous local catalog search, barcode lookup, queue, format and print-run assignment.
-- In progress: server authentication and JSON-RPC client, actual price comparison and printing, print history, product cards, and persistent scheduled tasks.
+- Verified locally with a JSON-RPC stub: receipt monitoring fetches the full check and validates its ID before saving; missing or mismatched checks fail the task without saving a receipt or advancing the watermark. The live SetRetailX `findCheck` response shape and a networked parent/child end-to-end run have not yet been verified. Catalog/reference edits and deletions are not yet part of the domain change feed.
 - Python source is intentionally retained until the remaining behavior has been ported and verified.

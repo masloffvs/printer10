@@ -1,5 +1,7 @@
 package com.setretailx.printer.service;
 
+import com.setretailx.printer.config.AppConfig;
+import com.setretailx.printer.repository.AccountRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -44,23 +46,29 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-/** LAN discovery and authenticated, encrypted peer-to-peer additive synchronization. */
+/** LAN discovery and authenticated, encrypted parent-child domain synchronization. */
 public final class PeerMeshService implements AutoCloseable {
     public static final int PORT = 45873;
-    private static final int MAX_LINE = 256 * 1024 * 1024;
+    private static final int MAX_LINE = 16 * 1024 * 1024;
+    private static final int MAX_DECOMPRESSED_MESSAGE = 24 * 1024 * 1024;
+    private static final int PROTOCOL_VERSION = 2;
+    private static final int DOMAIN_CHANGE_VERSION = 1;
     private static final ObjectMapper JSON = new ObjectMapper();
     private final Path stateDir = Path.of(System.getProperty("user.home"), ".setretailx", "peer-mesh");
     private final PeerSyncRepository repository = new PeerSyncRepository();
+    private volatile ParentApiService parentApi;
     private final ScheduledExecutorService workers = Executors.newScheduledThreadPool(4, runnable -> {
         Thread thread = new Thread(runnable, "peer-mesh"); thread.setDaemon(true); return thread;
     });
     private final Map<String, Peer> peers = new ConcurrentHashMap<>();
     private final Map<String, String> trustedKeys = new ConcurrentHashMap<>();
     private final Map<String, Long> lastSeen = new ConcurrentHashMap<>();
+    private volatile String parentNodeId = "";
     private final Consumer<Peer> changed;
     private final TrustPrompt trustPrompt;
     private final KeyPair identity;
     private final String nodeId;
+    private final AppConfig.NodeRole nodeRole;
     private volatile String peerName;
     private volatile boolean closed;
     private ServerSocket server;
@@ -71,10 +79,13 @@ public final class PeerMeshService implements AutoCloseable {
         this.trustPrompt = trustPrompt;
         try {
             Files.createDirectories(stateDir);
+            nodeRole = AppConfig.nodeRole();
+            parentApi = null;
             identity = loadOrCreateIdentity();
             nodeId = digest(identity.getPublic().getEncoded()).substring(0, 24);
             peerName = loadName();
             loadTrustedPeers();
+            parentNodeId = loadParentNodeId();
             startNetwork();
         } catch (Exception error) {
             throw new IllegalStateException("Не удалось запустить локальную peer-сеть: " + error.getMessage(), error);
@@ -83,12 +94,20 @@ public final class PeerMeshService implements AutoCloseable {
 
     public String peerName() { return peerName; }
     public String nodeId() { return nodeId; }
+    public AppConfig.NodeRole nodeRole() { return nodeRole; }
     public String fingerprint() {
         try { return fingerprint(identity.getPublic()); }
         catch (Exception error) { throw new IllegalStateException("Не удалось вычислить fingerprint ключа.", error); }
     }
     public int port() { return PORT; }
     public Map<String, Peer> peers() { return Map.copyOf(peers); }
+    public String parentNodeId() { return parentNodeId; }
+
+    public void configureParentApi(ParentApiService service) {
+        if (nodeRole != AppConfig.NodeRole.PARENT)
+            throw new IllegalStateException("Parent API настраивается только на родительском узле.");
+        parentApi = java.util.Objects.requireNonNull(service);
+    }
 
     public synchronized void setPeerName(String name) throws IOException {
         if (name == null || name.isBlank()) throw new IllegalArgumentException("Введите имя этого пира.");
@@ -98,9 +117,36 @@ public final class PeerMeshService implements AutoCloseable {
     }
 
     public CompletableFuture<SyncResult> synchronize(Peer peer) {
+        if (nodeRole != AppConfig.NodeRole.CHILD) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "Синхронизацию с родительским ПК запускает дочерний узел."));
+        }
+        if (AppConfig.NodeRole.fromWire(peer.role()) != AppConfig.NodeRole.PARENT) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException(
+                    "Выберите родительский ПК для подключения."));
+        }
         return CompletableFuture.supplyAsync(() -> {
             try { return synchronizeNow(peer); }
             catch (Exception error) { throw new java.util.concurrent.CompletionException(error); }
+        }, workers);
+    }
+
+    /** Sends an authenticated application API request over the trusted encrypted parent channel. */
+    public CompletableFuture<JsonNode> apiCall(Peer peer, JsonNode request) {
+        if (nodeRole != AppConfig.NodeRole.CHILD || AppConfig.NodeRole.fromWire(peer.role()) != AppConfig.NodeRole.PARENT)
+            return CompletableFuture.failedFuture(new IllegalStateException("Parent API вызывается только с дочернего узла."));
+        if (request == null || !request.isObject() || request.toString().length() > 256 * 1024)
+            return CompletableFuture.failedFuture(new IllegalArgumentException("Некорректный или слишком большой API-запрос."));
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                ObjectNode envelope = JSON.createObjectNode();
+                envelope.put("protocolVersion", PROTOCOL_VERSION);
+                envelope.put("operation", "api.call");
+                envelope.set("request", request);
+                return exchange(peer, envelope).path("response");
+            } catch (Exception error) {
+                throw new java.util.concurrent.CompletionException(error);
+            }
         }, workers);
     }
 
@@ -124,8 +170,10 @@ public final class PeerMeshService implements AutoCloseable {
         try (DatagramSocket socket = new DatagramSocket()) {
             socket.setBroadcast(true);
             ObjectNode message = JSON.createObjectNode();
-            message.put("type", "setretailx-peer-v1"); message.put("id", nodeId);
+            message.put("type", "setretailx-peer-v2"); message.put("protocolVersion", PROTOCOL_VERSION);
+            message.put("id", nodeId);
             message.put("name", peerName); message.put("port", PORT);
+            message.put("role", nodeRole.wireName());
             byte[] bytes = JSON.writeValueAsBytes(message);
             socket.send(new DatagramPacket(bytes, bytes.length, InetAddress.getByName("255.255.255.255"), PORT));
         } catch (Exception ignored) { }
@@ -138,14 +186,19 @@ public final class PeerMeshService implements AutoCloseable {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 discoverySocket.receive(packet);
                 JsonNode message = JSON.readTree(packet.getData(), packet.getOffset(), packet.getLength());
-                if (!"setretailx-peer-v1".equals(message.path("type").asText())) continue;
+                if (!"setretailx-peer-v2".equals(message.path("type").asText())
+                        || message.path("protocolVersion").asInt(-1) != PROTOCOL_VERSION) continue;
                 String id = message.path("id").asText();
                 if (id.isBlank() || id.equals(nodeId)) continue;
                 lastSeen.put(id, System.currentTimeMillis());
+                String role = message.path("role").asText("");
+                AppConfig.NodeRole remoteRole = AppConfig.NodeRole.fromWire(role);
+                if (remoteRole == null || remoteRole == nodeRole) continue;
                 Peer peer = new Peer(id, message.path("name").asText("Офисный пир"),
                         packet.getAddress().getHostAddress(), message.path("port").asInt(PORT),
                         trustedKeys.containsKey(id),
-                        true, peers.getOrDefault(id, new Peer(id, "", "", PORT, false, false, "")).status());
+                        true, peers.getOrDefault(id, new Peer(id, "", "", PORT, false, false, "")).status(),
+                        role);
                 peers.put(id, peer);
                 changed.accept(peer);
             } catch (SocketException closedSocket) { if (!closed) markNetworkError(closedSocket); }
@@ -167,9 +220,16 @@ public final class PeerMeshService implements AutoCloseable {
         try (socket; BufferedReader input = reader(socket); BufferedWriter output = writer(socket)) {
             String helloLine = readLine(input);
             JsonNode hello = JSON.readTree(helloLine);
-            if (!"hello".equals(hello.path("type").asText()) || !verifyHello(hello)) return;
+            if (!"hello".equals(hello.path("type").asText())
+                    || hello.path("protocolVersion").asInt(-1) != PROTOCOL_VERSION || !verifyHello(hello)) return;
             String id = hello.path("id").asText();
             if (id.isBlank() || id.equals(nodeId)) return;
+            AppConfig.NodeRole remoteRole = AppConfig.NodeRole.fromWire(hello.path("role").asText());
+            if (nodeRole != AppConfig.NodeRole.PARENT || remoteRole != AppConfig.NodeRole.CHILD) {
+                touchPeer(id, hello.path("name").asText(), socket.getInetAddress().getHostAddress(),
+                        false, "Отклонено: синхронизацию запускает дочерний узел к родителю");
+                return;
+            }
             PublicKey peerKey = decodePublic("Ed25519", hello.path("identityKey").asText());
             String fingerprint = fingerprint(peerKey);
             if (!acceptKey(id, hello.path("name").asText(), socket.getInetAddress().getHostAddress(), fingerprint)) return;
@@ -178,6 +238,8 @@ public final class PeerMeshService implements AutoCloseable {
             String nonce = randomToken(24);
             ObjectNode response = JSON.createObjectNode();
             response.put("type", "hello"); response.put("id", nodeId); response.put("name", peerName);
+            response.put("protocolVersion", PROTOCOL_VERSION);
+            response.put("role", nodeRole.wireName());
             response.put("identityKey", b64(identity.getPublic().getEncoded()));
             response.put("ephemeralKey", b64(ephemeral.getPublic().getEncoded())); response.put("nonce", nonce);
             response.put("signature", sign(identity.getPrivate(), (helloLine + canonical(unsigned(response))).getBytes(StandardCharsets.UTF_8)));
@@ -190,18 +252,108 @@ public final class PeerMeshService implements AutoCloseable {
             byte[] key = sharedKey(ephemeral.getPrivate(), decodePublic("X25519", hello.path("ephemeralKey").asText()),
                     helloLine + canonical(unsigned(response)));
             JsonNode incoming = decrypt(readLine(input), key);
-            PeerSyncRepository.MergeSummary merged = repository.importSnapshot(incoming.path("snapshot"));
+            if (incoming.path("protocolVersion").asInt(-1) != PROTOCOL_VERSION)
+                throw new IOException("Неизвестная или несовместимая операция peer API.");
             ObjectNode result = JSON.createObjectNode();
-            result.set("snapshot", repository.exportSnapshot());
-            ObjectNode counts = result.putObject("counts"); counts.put("products", merged.products()); counts.put("workspaceRows", merged.workspaceRows());
+            result.put("protocolVersion", PROTOCOL_VERSION);
+            switch (incoming.path("operation").asText()) {
+                case "sync.pull" -> {
+                    // Only the child initiates pulls. Snapshot is a one-time additive bootstrap;
+                    // subsequent synchronization consists of versioned parent change events.
+                    if (incoming.path("changeFeedVersion").asInt(-1) != DOMAIN_CHANGE_VERSION)
+                        throw new IOException("Несовместимая версия журнала доменных изменений.");
+                    long since = incoming.path("since").asLong(-1);
+                    if (since < 0) {
+                        long bootstrapCursor = repository.domainHighWater();
+                        ObjectNode authoritative = repository.exportSnapshot();
+                        result.set("snapshot", authoritative);
+                        result.put("bootstrapCursor", bootstrapCursor);
+                    } else {
+                        result.set("changes", repository.exportChangesAfter(since));
+                    }
+                }
+                case "api.call" -> {
+                    ParentApiService api = parentApi;
+                    if (api == null) throw new IOException("Parent API не настроен.");
+                    result.set("response", api.dispatch(incoming.path("request")));
+                }
+                default -> throw new IOException("Неизвестная операция peer API.");
+            }
             writeLine(output, encrypt(result, key));
-            touchPeer(id, hello.path("name").asText(), socket.getInetAddress().getHostAddress(), true, "Подключен");
+            touchPeer(id, hello.path("name").asText(), socket.getInetAddress().getHostAddress(), true,
+                    "Подключен", AppConfig.NodeRole.CHILD.wireName());
         } catch (Exception error) {
             try { touchPeerFromSocket(socket, false, error.getMessage()); } catch (Exception ignored) { }
         }
     }
 
     private SyncResult synchronizeNow(Peer peer) throws Exception {
+        long cursor = repository.domainCursor(peer.id());
+        long productsAdded = 0;
+        long bootstrapRows = 0;
+        long changesApplied = 0;
+        long conflicts = 0;
+        if (cursor < 0) {
+            ObjectNode bootstrapRequest = syncRequest(-1);
+            JsonNode bootstrap = exchange(peer, bootstrapRequest);
+            validateSyncResponse(bootstrap);
+            if (!bootstrap.path("snapshot").isObject() || !bootstrap.path("bootstrapCursor").canConvertToLong())
+                throw new IOException("Родитель вернул некорректный начальный пакет синхронизации.");
+            PeerSyncRepository.MergeSummary summary = repository.importSnapshot(bootstrap.path("snapshot"));
+            productsAdded += summary.products(); bootstrapRows += summary.workspaceRows();
+            cursor = bootstrap.path("bootstrapCursor").asLong();
+            repository.markDomainBootstrap(peer.id(), cursor);
+        }
+        while (true) {
+            JsonNode result = exchange(peer, syncRequest(cursor));
+            validateSyncResponse(result);
+            JsonNode changes = result.path("changes");
+            if (!changes.isObject() || changes.path("changeFeedVersion").asInt(-1) != DOMAIN_CHANGE_VERSION
+                    || !changes.path("events").isArray() || !changes.path("nextCursor").canConvertToLong())
+                throw new IOException("Родитель вернул некорректный пакет доменных изменений.");
+            JsonNode events = changes.path("events");
+            if (events.size() > 500) throw new IOException("Пакет доменных изменений превышает установленный лимит.");
+            long nextCursor = changes.path("nextCursor").asLong(cursor);
+            if (nextCursor < cursor || (!events.isEmpty() && nextCursor <= cursor))
+                throw new IOException("Указатель доменной синхронизации некорректен.");
+            long expectedCursor = cursor;
+            for (JsonNode event : events) {
+                long eventId = event.path("changeId").asLong(-1);
+                if (eventId <= expectedCursor || eventId > nextCursor)
+                    throw new IOException("Последовательность доменных изменений некорректна.");
+                expectedCursor = eventId;
+            }
+            if (!events.isEmpty() && expectedCursor != nextCursor)
+                throw new IOException("Указатель пакета не совпадает с последним доменным изменением.");
+            PeerSyncRepository.ChangeApplySummary applied = repository.applyDomainChanges(peer.id(), events, nextCursor);
+            changesApplied += applied.applied(); conflicts += applied.conflicts();
+            cursor = nextCursor;
+            if (!changes.path("more").asBoolean(false)) break;
+            if (events.isEmpty()) throw new IOException("Родитель сообщил о продолжении без доменных изменений.");
+        }
+        bindParent(peer.id());
+        touchPeer(peer.id(), peer.name(), peer.address(), true, "Синхронизировано", AppConfig.NodeRole.PARENT.wireName());
+        return new SyncResult(productsAdded, bootstrapRows, changesApplied, conflicts);
+    }
+
+    private static ObjectNode syncRequest(long since) {
+        ObjectNode request = JSON.createObjectNode();
+        request.put("protocolVersion", PROTOCOL_VERSION);
+        request.put("operation", "sync.pull");
+        request.put("changeFeedVersion", DOMAIN_CHANGE_VERSION);
+        request.put("since", since);
+        return request;
+    }
+
+    private static void validateSyncResponse(JsonNode response) throws IOException {
+        if (response.path("protocolVersion").asInt(-1) != PROTOCOL_VERSION)
+            throw new IOException("Родитель вернул несовместимый ответ синхронизации.");
+    }
+
+    private JsonNode exchange(Peer peer, ObjectNode request) throws Exception {
+        if (!parentNodeId.isBlank() && !parentNodeId.equals(peer.id())) {
+            throw new IOException("Этот дочерний узел уже привязан к родительскому ПК " + parentNodeId + ".");
+        }
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(peer.address(), peer.port()), 5000);
             socket.setSoTimeout(60_000);
@@ -209,14 +361,21 @@ public final class PeerMeshService implements AutoCloseable {
                 KeyPair ephemeral = KeyPairGenerator.getInstance("X25519").generateKeyPair();
                 ObjectNode hello = JSON.createObjectNode();
                 hello.put("type", "hello"); hello.put("id", nodeId); hello.put("name", peerName);
+                hello.put("protocolVersion", PROTOCOL_VERSION);
+                hello.put("role", nodeRole.wireName());
                 hello.put("identityKey", b64(identity.getPublic().getEncoded()));
                 hello.put("ephemeralKey", b64(ephemeral.getPublic().getEncoded())); hello.put("nonce", randomToken(24));
                 hello.put("signature", sign(identity.getPrivate(), canonical(unsigned(hello)).getBytes(StandardCharsets.UTF_8)));
                 String helloLine = JSON.writeValueAsString(hello); writeLine(output, helloLine);
                 String responseLine = readLine(input); JsonNode response = JSON.readTree(responseLine);
-                if (!"hello".equals(response.path("type").asText())) throw new IOException("Пир прислал некорректное рукопожатие.");
+                if (!"hello".equals(response.path("type").asText())
+                        || response.path("protocolVersion").asInt(-1) != PROTOCOL_VERSION)
+                    throw new IOException("Пир использует несовместимую версию протокола.");
                 if (!peer.id().equals(response.path("id").asText()))
                     throw new IOException("Ответ пришёл от другого пира, чем выбранный в списке.");
+                AppConfig.NodeRole remoteRole = AppConfig.NodeRole.fromWire(response.path("role").asText());
+                if (remoteRole == null || remoteRole == nodeRole)
+                    throw new IOException("Подключение разрешено только между родительским и дочерним узлами.");
                 PublicKey peerKey = decodePublic("Ed25519", response.path("identityKey").asText());
                 if (!digest(peerKey.getEncoded()).startsWith(response.path("id").asText()))
                     throw new IOException("ID пира не соответствует его публичному ключу.");
@@ -231,14 +390,14 @@ public final class PeerMeshService implements AutoCloseable {
                 writeLine(output, JSON.writeValueAsString(ack));
                 byte[] key = sharedKey(ephemeral.getPrivate(), decodePublic("X25519", response.path("ephemeralKey").asText()),
                         helloLine + canonical(unsigned(response)));
-                ObjectNode request = JSON.createObjectNode(); request.set("snapshot", repository.exportSnapshot());
                 writeLine(output, encrypt(request, key));
                 JsonNode result = decrypt(readLine(input), key);
-                PeerSyncRepository.MergeSummary summary = repository.importSnapshot(result.path("snapshot"));
-                long addedProducts = summary.products() + result.path("counts").path("products").asLong();
-                long addedWorkspace = summary.workspaceRows() + result.path("counts").path("workspaceRows").asLong();
-                touchPeer(response.path("id").asText(), response.path("name").asText(), peer.address(), true, "Синхронизировано");
-                return new SyncResult(addedProducts, addedWorkspace);
+                if (result.path("protocolVersion").asInt(-1) != PROTOCOL_VERSION)
+                    throw new IOException("Родитель вернул несовместимый ответ синхронизации.");
+                bindParent(response.path("id").asText());
+                touchPeer(response.path("id").asText(), response.path("name").asText(), peer.address(), true,
+                        "Подключено", remoteRole.wireName());
+                return result;
             }
         }
     }
@@ -268,8 +427,12 @@ public final class PeerMeshService implements AutoCloseable {
     }
 
     private void touchPeer(String id, String name, String address, boolean trusted, String status) {
+        touchPeer(id, name, address, trusted, status, peers.containsKey(id) ? peers.get(id).role() : "");
+    }
+
+    private void touchPeer(String id, String name, String address, boolean trusted, String status, String role) {
         lastSeen.put(id, System.currentTimeMillis());
-        Peer peer = new Peer(id, name, address, PORT, trusted || trustedKeys.containsKey(id), true, status);
+        Peer peer = new Peer(id, name, address, PORT, trusted || trustedKeys.containsKey(id), true, status, role);
         peers.put(id, peer); changed.accept(peer);
     }
 
@@ -280,7 +443,7 @@ public final class PeerMeshService implements AutoCloseable {
             Peer current = peers.get(id);
             if (current != null && current.online()) {
                 Peer offline = new Peer(current.id(), current.name(), current.address(), current.port(),
-                        current.trusted(), false, "Не в сети");
+                        current.trusted(), false, "Не в сети", current.role());
                 peers.put(id, offline); changed.accept(offline);
             }
         });
@@ -291,7 +454,7 @@ public final class PeerMeshService implements AutoCloseable {
         peers.values().stream().filter(peer -> peer.address().equals(address)).findFirst()
                 .ifPresent(peer -> {
                     Peer failed = new Peer(peer.id(), peer.name(), address, peer.port(),
-                            trusted || peer.trusted(), true, status == null ? "Ошибка обмена" : status);
+                            trusted || peer.trusted(), true, status == null ? "Ошибка обмена" : status, peer.role());
                     peers.put(peer.id(), failed); changed.accept(failed);
                 });
     }
@@ -321,6 +484,25 @@ public final class PeerMeshService implements AutoCloseable {
         return host == null || host.isBlank() ? "Офисный пир" : host;
     }
 
+    private String loadParentNodeId() throws IOException {
+        Path path = stateDir.resolve("parent-node-id.txt");
+        if (!Files.isRegularFile(path)) return "";
+        return Files.readString(path, StandardCharsets.UTF_8).trim();
+    }
+
+    private synchronized void bindParent(String id) throws IOException {
+        if (nodeRole != AppConfig.NodeRole.CHILD || id == null || id.isBlank()) {
+            throw new IOException("Некорректная привязка родительского ПК.");
+        }
+        if (!parentNodeId.isBlank() && !parentNodeId.equals(id)) {
+            throw new IOException("Этот дочерний узел уже привязан к другому родительскому ПК.");
+        }
+        if (parentNodeId.isBlank()) {
+            Files.writeString(stateDir.resolve("parent-node-id.txt"), id, StandardCharsets.UTF_8);
+            parentNodeId = id;
+        }
+    }
+
     private void loadTrustedPeers() throws IOException {
         Path path = stateDir.resolve("trusted-peers.json"); if (!Files.isRegularFile(path)) return;
         JsonNode json = JSON.readTree(path.toFile()); json.fields().forEachRemaining(entry -> trustedKeys.put(entry.getKey(), entry.getValue().asText()));
@@ -339,6 +521,9 @@ public final class PeerMeshService implements AutoCloseable {
         byte[] serialized = JSON.writeValueAsBytes(payload);
         ByteArrayOutputStream compressed = new ByteArrayOutputStream();
         try (GZIPOutputStream gzip = new GZIPOutputStream(compressed)) { gzip.write(serialized); }
+        if (serialized.length > MAX_DECOMPRESSED_MESSAGE || compressed.size() > MAX_LINE) {
+            throw new IOException("Сообщение peer-сети превышает установленный лимит.");
+        }
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE,
                 new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
         byte[] encrypted = cipher.doFinal(compressed.toByteArray());
@@ -353,8 +538,19 @@ public final class PeerMeshService implements AutoCloseable {
                 new GCMParameterSpec(128, Base64.getDecoder().decode(packet.path("nonce").asText())));
         byte[] decrypted = cipher.doFinal(Base64.getDecoder().decode(packet.path("data").asText()));
         if (!packet.path("compressed").asBoolean()) return JSON.readTree(decrypted);
-        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(decrypted))) {
-            return JSON.readTree(gzip);
+        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(decrypted));
+             ByteArrayOutputStream expanded = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int total = 0;
+            int count;
+            while ((count = gzip.read(buffer)) != -1) {
+                total += count;
+                if (total > MAX_DECOMPRESSED_MESSAGE) {
+                    throw new IOException("Распакованное сообщение peer-сети превышает лимит.");
+                }
+                expanded.write(buffer, 0, count);
+            }
+            return JSON.readTree(expanded.toByteArray());
         }
     }
 
@@ -383,11 +579,22 @@ public final class PeerMeshService implements AutoCloseable {
     private static BufferedReader reader(Socket socket) throws IOException { return new BufferedReader(new java.io.InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8)); }
     private static BufferedWriter writer(Socket socket) throws IOException { return new BufferedWriter(new java.io.OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)); }
     private static String readLine(BufferedReader reader) throws IOException {
-        StringBuilder line = new StringBuilder(); int c;
-        while ((c = reader.read()) != -1 && c != '\n') { if (line.length() >= MAX_LINE) throw new IOException("Сообщение peer-сети превышает лимит."); if (c != '\r') line.append((char)c); }
+        StringBuilder line = new StringBuilder(); int c; int encodedBytes = 0;
+        while ((c = reader.read()) != -1 && c != '\n') {
+            if (c >= 0xD800 && c <= 0xDFFF) encodedBytes += 3;
+            else if (c <= 0x7F) encodedBytes++;
+            else if (c <= 0x7FF) encodedBytes += 2;
+            else encodedBytes += 3;
+            if (encodedBytes > MAX_LINE) throw new IOException("Сообщение peer-сети превышает лимит.");
+            if (c != '\r') line.append((char)c);
+        }
         if (c == -1 && line.isEmpty()) throw new IOException("Пир закрыл соединение."); return line.toString();
     }
-    private static void writeLine(BufferedWriter writer, String value) throws IOException { writer.write(value); writer.write('\n'); writer.flush(); }
+    private static void writeLine(BufferedWriter writer, String value) throws IOException {
+        if (value.getBytes(StandardCharsets.UTF_8).length > MAX_LINE)
+            throw new IOException("Сообщение peer-сети превышает лимит.");
+        writer.write(value); writer.write('\n'); writer.flush();
+    }
 
     @Override public void close() {
         closed = true;
@@ -396,7 +603,16 @@ public final class PeerMeshService implements AutoCloseable {
         workers.shutdownNow();
     }
 
-    public record Peer(String id, String name, String address, int port, boolean trusted, boolean online, String status) { }
-    public record SyncResult(long productsAdded, long workspaceRowsAdded) { }
+    public record Peer(String id, String name, String address, int port, boolean trusted, boolean online,
+                       String status, String role) {
+        public Peer(String id, String name, String address, int port, boolean trusted, boolean online, String status) {
+            this(id, name, address, port, trusted, online, status, "");
+        }
+    }
+    public record SyncResult(long productsAdded, long workspaceRowsAdded, long changesApplied, long conflicts) {
+        public SyncResult(long productsAdded, long workspaceRowsAdded) {
+            this(productsAdded, workspaceRowsAdded, 0, 0);
+        }
+    }
     @FunctionalInterface public interface TrustPrompt { boolean confirm(Peer peer, String fingerprint) throws Exception; }
 }

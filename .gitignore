@@ -12,3 +12,4 @@ all_products.sqlite
 .env
 .env.*
 !.env.example
+license-server-local/

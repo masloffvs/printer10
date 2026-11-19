@@ -1,6 +1,6 @@
 package com.setretailx.printer.ui;
 
-import com.setretailx.printer.service.PriceMonitoringTaskService;
+import com.setretailx.printer.service.ParentApiClient;
 import com.setretailx.printer.service.PriceMonitoringTaskService.SalesArticle;
 import com.setretailx.printer.service.PriceMonitoringTaskService.SalesDay;
 import com.setretailx.printer.service.PriceMonitoringTaskService.SalesPosition;
@@ -8,8 +8,11 @@ import com.setretailx.printer.service.PriceMonitoringTaskService.SalesPosition;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
+import javax.swing.JMenuItem;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JOptionPane;
+import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTable;
@@ -33,6 +36,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /** Search and analyze receipt sales across all locally synchronized articles. */
 @SuppressWarnings("serial")
@@ -43,7 +47,9 @@ final class SalesAnalyticsPanel extends JPanel {
     private static final NumberFormat MONEY = NumberFormat.getCurrencyInstance(Locale.forLanguageTag("ru-RU"));
     private static final int POSITION_LIMIT = 20_000;
 
-    private final PriceMonitoringTaskService service;
+    private final ParentApiClient service;
+    private final Consumer<SalesArticle> openProductCard;
+    private final Consumer<SalesArticle> addToPrintQueue;
     private final JTextField query = new JTextField(24);
     private final JComboBox<Period> period = new JComboBox<>(Period.values());
     private final DefaultTableModel articlesModel = new DefaultTableModel(
@@ -63,9 +69,12 @@ final class SalesAnalyticsPanel extends JPanel {
     private Set<String> selected = new LinkedHashSet<>();
     private boolean updatingTable;
 
-    SalesAnalyticsPanel(PriceMonitoringTaskService service) {
+    SalesAnalyticsPanel(ParentApiClient service, Consumer<SalesArticle> openProductCard,
+                        Consumer<SalesArticle> addToPrintQueue) {
         super(new BorderLayout(8, 8));
         this.service = service;
+        this.openProductCard = openProductCard;
+        this.addToPrintQueue = addToPrintQueue;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
         JButton search = new JButton("Найти");
@@ -81,6 +90,25 @@ final class SalesAnalyticsPanel extends JPanel {
         JButton refresh = new JButton("Обновить");
         refresh.addActionListener(event -> loadArticles());
         controls.add(refresh);
+        JButton login = new JButton();
+        updateLoginButton(login);
+        login.addActionListener(event -> {
+            if (service.isLoggedIn()) {
+                try {
+                    service.logout();
+                    updateLoginButton(login);
+                    articles = List.of();
+                    articlesModel.setRowCount(0);
+                    selected.clear();
+                    loadAnalytics();
+                    status.setText("Сеанс завершён.");
+                } catch (Exception error) { showError(error); }
+            } else if (showLoginDialog()) {
+                updateLoginButton(login);
+                loadArticles();
+            }
+        });
+        controls.add(login);
         JPanel header = new JPanel(new BorderLayout(4, 4));
         header.add(controls, BorderLayout.NORTH);
         header.add(summary, BorderLayout.SOUTH);
@@ -89,9 +117,11 @@ final class SalesAnalyticsPanel extends JPanel {
         articlesTable.setFillsViewportHeight(true);
         articlesTable.setAutoCreateRowSorter(true);
         articlesTable.getColumnModel().getColumn(0).setMaxWidth(34);
+        installArticleContextMenu();
         articlesTable.getModel().addTableModelListener(event -> {
             if (updatingTable || event.getType() != javax.swing.event.TableModelEvent.UPDATE
                     || event.getColumn() != 0 || event.getFirstRow() < 0) return;
+            // TableModelEvent indices are already model indices (unlike mouse/selection events).
             int row = event.getFirstRow();
             if (row >= articles.size()) return;
             String marking = articles.get(row).marking();
@@ -132,7 +162,85 @@ final class SalesAnalyticsPanel extends JPanel {
         content.setDividerLocation(410);
         add(content, BorderLayout.CENTER);
         add(status, BorderLayout.SOUTH);
-        loadArticles();
+        if (service.isLoggedIn()) loadArticles();
+        else {
+            summary.setText("Продажи доступны после входа с правом SALES_READ.");
+            status.setText("Войдите в родительский аккаунт для просмотра продаж и чеков.");
+        }
+    }
+
+    private void updateLoginButton(JButton button) {
+        button.setText(service.isLoggedIn() ? "Выйти" : "Войти");
+        button.setToolTipText(service.isLoggedIn() ? "Завершить пользовательский сеанс" :
+                "Войти в аккаунт родительского узла с правом чтения продаж");
+    }
+
+    private boolean showLoginDialog() {
+        JTextField username = new JTextField(20);
+        javax.swing.JPasswordField password = new javax.swing.JPasswordField(20);
+        JPanel fields = new JPanel(new java.awt.GridLayout(0, 1, 4, 4));
+        fields.add(new JLabel("Имя пользователя"));
+        fields.add(username);
+        fields.add(new JLabel("Пароль"));
+        fields.add(password);
+        int choice = JOptionPane.showConfirmDialog(this, fields, "Вход в parent API",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (choice != JOptionPane.OK_OPTION) {
+            java.util.Arrays.fill(password.getPassword(), '\0');
+            return false;
+        }
+        try {
+            service.login(username.getText(), password.getPassword());
+            status.setText("Вход выполнен.");
+            return true;
+        } catch (Exception error) {
+            showError(error);
+            return false;
+        }
+    }
+
+    private void installArticleContextMenu() {
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem showStats = new JMenuItem("Показать статистику продаж");
+        JMenuItem openCard = new JMenuItem("Открыть карточку товара");
+        JMenuItem queue = new JMenuItem("Добавить в очередь печати");
+        menu.add(showStats);
+        menu.add(openCard);
+        menu.add(queue);
+        showStats.addActionListener(event -> {
+            SalesArticle article = contextArticle();
+            if (article == null) return;
+            selected.clear();
+            selected.add(article.marking());
+            syncSelection();
+            loadAnalytics();
+        });
+        openCard.addActionListener(event -> {
+            SalesArticle article = contextArticle();
+            if (article != null) openProductCard.accept(article);
+        });
+        queue.addActionListener(event -> {
+            SalesArticle article = contextArticle();
+            if (article != null) addToPrintQueue.accept(article);
+        });
+        articlesTable.addMouseListener(new java.awt.event.MouseAdapter() {
+            private void showMenu(java.awt.event.MouseEvent event) {
+                if (!event.isPopupTrigger()) return;
+                int viewRow = articlesTable.rowAtPoint(event.getPoint());
+                if (viewRow < 0) return;
+                articlesTable.setRowSelectionInterval(viewRow, viewRow);
+                menu.show(articlesTable, event.getX(), event.getY());
+            }
+            @Override public void mousePressed(java.awt.event.MouseEvent event) { showMenu(event); }
+            @Override public void mouseReleased(java.awt.event.MouseEvent event) { showMenu(event); }
+        });
+    }
+
+    private SalesArticle contextArticle() {
+        int viewRow = articlesTable.getSelectedRow();
+        if (viewRow < 0) return null;
+        int row = articlesTable.convertRowIndexToModel(viewRow);
+        return row >= 0 && row < articles.size() ? articles.get(row) : null;
     }
 
     private void loadArticles() {
@@ -141,8 +249,8 @@ final class SalesAnalyticsPanel extends JPanel {
         String search = query.getText();
         summary.setText("Ищем артикулы в загруженной истории чеков…");
         new SwingWorker<List<SalesArticle>, Void>() {
-            @Override protected List<SalesArticle> doInBackground() throws SQLException {
-                return service.searchSalesArticles(search, bounds[0] < 0 ? null : bounds[0],
+            @Override protected List<SalesArticle> doInBackground() throws Exception {
+                return service.searchArticles(search, bounds[0] < 0 ? null : bounds[0],
                         bounds[1] < 0 ? null : bounds[1], 2000);
             }
             @Override protected void done() {
@@ -187,7 +295,7 @@ final class SalesAnalyticsPanel extends JPanel {
         }
         status.setText("Считаем продажи для " + markings.size() + " артикулов…");
         new SwingWorker<LoadedSales, Void>() {
-            @Override protected LoadedSales doInBackground() throws SQLException {
+            @Override protected LoadedSales doInBackground() throws Exception {
                 Double from = bounds[0] < 0 ? null : bounds[0];
                 Double to = bounds[1] < 0 ? null : bounds[1];
                 return new LoadedSales(service.salesHistory(markings, from, to),

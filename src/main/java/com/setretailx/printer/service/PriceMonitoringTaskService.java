@@ -77,10 +77,14 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
 
     public Path databasePath() { return path; }
 
+    /** Parent API access to the configured connector; the connector itself rejects child use. */
+    SetRetailXConnector connector() { return connector; }
+
     public void migrate() throws SQLException { initialize(); }
 
     /** Polls due tasks every five seconds. Only one task is run at a time. */
     public void start() {
+        if (AppConfig.nodeRole() != AppConfig.NodeRole.PARENT) return;
         if (running.compareAndSet(false, true)) {
             executor.scheduleWithFixedDelay(this::pollDueTask, 0, 5, TimeUnit.SECONDS);
         }
@@ -96,6 +100,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     }
 
     public void configure(String taskId, boolean enabled, int intervalSeconds) throws SQLException {
+        requireParentForMonitoring();
         int interval = Math.max(60, Math.min(intervalSeconds, 7 * 24 * 3600));
         double now = nowSeconds();
         try (Connection connection = connect()) {
@@ -125,6 +130,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
 
     /** Runs now while retaining the scheduled next run, matching Python force_claim behavior. */
     public boolean runNow(String taskId) {
+        requireParentForMonitoring();
         if (executor.isShutdown() || !running.get() || !isTaskRunning.compareAndSet(false, true)) return false;
         try {
             TaskInfo task = forceClaim(taskId, nowSeconds());
@@ -140,15 +146,55 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         }
     }
 
+    private static void requireParentForMonitoring() {
+        if (AppConfig.nodeRole() != AppConfig.NodeRole.PARENT)
+            throw new IllegalStateException("Мониторинг цен выполняется только на родительском ПК.");
+    }
+
     private final AtomicBoolean isTaskRunning = new AtomicBoolean();
 
     public List<PriceChange> recentChanges(int limit) throws SQLException {
+        return recentChanges(limit, "");
+    }
+
+    /** Returns the newest matching price changes across the full history, up to the requested display limit. */
+    public List<PriceChange> recentChanges(int limit, String query) throws SQLException {
         int bounded = Math.max(1, Math.min(limit, 1000));
+        String normalizedQuery = query == null ? "" : query.trim();
+        String foldedQuery = normalizedQuery.toLowerCase(java.util.Locale.ROOT);
+        List<PriceChange> result = new ArrayList<>();
+        String sql = "SELECT marking, name, barcode, detected_at, old_prices_json, new_prices_json "
+                + "FROM price_changes ORDER BY detected_at DESC"
+                + (normalizedQuery.isEmpty() ? " LIMIT ?" : "");
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (normalizedQuery.isEmpty()) statement.setInt(1, bounded);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    String marking = rows.getString("marking");
+                    String name = rows.getString("name");
+                    String barcode = rows.getString("barcode");
+                    if (!foldedQuery.isEmpty() && !containsIgnoreCase(marking, foldedQuery)
+                            && !containsIgnoreCase(name, foldedQuery) && !containsIgnoreCase(barcode, foldedQuery)) continue;
+                    result.add(new PriceChange(marking, name, barcode, rows.getDouble("detected_at"),
+                            rows.getString("old_prices_json"), rows.getString("new_prices_json")));
+                    if (result.size() >= bounded) break;
+                }
+            }
+        }
+        return result;
+    }
+
+    private static boolean containsIgnoreCase(String value, String foldedQuery) {
+        return value != null && value.toLowerCase(java.util.Locale.ROOT).contains(foldedQuery);
+    }
+
+    /** Returns all recorded price changes on or after the supplied timestamp, newest first. */
+    public List<PriceChange> changesSince(double afterSeconds) throws SQLException {
         List<PriceChange> result = new ArrayList<>();
         try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
                 "SELECT marking, name, barcode, detected_at, old_prices_json, new_prices_json "
-                        + "FROM price_changes ORDER BY detected_at DESC LIMIT ?")) {
-            statement.setInt(1, bounded);
+                        + "FROM price_changes WHERE detected_at>=? ORDER BY detected_at DESC")) {
+            statement.setDouble(1, afterSeconds);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     result.add(new PriceChange(rows.getString("marking"), rows.getString("name"),
@@ -192,6 +238,34 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
             }
         }
         return result;
+    }
+
+    /** Returns the most recently captured regular and promotional shelf prices for one article. */
+    public ShelfPrice latestShelfPrice(String marking) throws SQLException {
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT prices_json FROM price_snapshot_history WHERE marking=? ORDER BY captured_at DESC, id DESC LIMIT 1")) {
+            statement.setString(1, marking);
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) return null;
+                JsonNode root = JSON.readTree(row.getString("prices_json"));
+                JsonNode prices = root == null ? null : root.path("pricesMap");
+                return new ShelfPrice(priceValue(prices == null ? null : prices.path("2")),
+                        priceValue(prices == null ? null : prices.path("4")));
+            } catch (JsonProcessingException error) {
+                throw new SQLException("Не удалось прочитать последний ценник из истории.", error);
+            }
+        }
+    }
+
+    private static String priceValue(JsonNode price) {
+        if (price == null || price.isMissingNode() || price.isNull()) return "";
+        JsonNode value = price.isObject() ? price.path("value") : price;
+        if (value.isMissingNode() || value.isNull() || value.asText().isBlank()) return "";
+        try {
+            return new java.math.BigDecimal(value.asText()).stripTrailingZeros().toPlainString();
+        } catch (NumberFormatException ignored) {
+            return "";
+        }
     }
 
     /** Daily sales totals for one exact SetRetailX article, newest day first. */
@@ -441,8 +515,12 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                     if (fullCheck.path(property).isObject()) { fullCheck = fullCheck.path(property); break; }
                 }
                 if (!fullCheck.path("positions").isArray()) {
-                    throw new IllegalStateException("findChecks вернул только сводку чека " + id
-                            + " без positions; дополнительный findCheck не выполнялся, watermark не обновлён.");
+                    JsonNode fullResponse = connector.findCheck(check).join();
+                    fullCheck = fullCheckFromResponse(fullResponse, id, 0);
+                    if (fullCheck == null) {
+                        throw new IllegalStateException("findCheck не вернул полный чек " + id
+                                + " с positions; watermark не обновлён.");
+                    }
                 }
                 int saved = recordSalesCheck(fullCheck);
                 positions += saved;
@@ -568,6 +646,37 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
             checks.add(row);
         }
         return checks;
+    }
+
+    /** Finds the complete receipt in JSON-RPC wrappers without mistaking nested position rows for checks. */
+    private static JsonNode fullCheckFromResponse(JsonNode node, long expectedId, int depth) {
+        if (node == null || node.isNull() || node.isMissingNode() || depth > 10) return null;
+        if (node.isTextual()) {
+            String value = node.asText().trim();
+            if (value.startsWith("{") || value.startsWith("[")) {
+                try { return fullCheckFromResponse(JSON.readTree(value), expectedId, depth + 1); }
+                catch (JsonProcessingException ignored) { return null; }
+            }
+            return null;
+        }
+        if (node.isArray()) {
+            for (JsonNode child : node) {
+                JsonNode found = fullCheckFromResponse(child, expectedId, depth + 1);
+                if (found != null) return found;
+            }
+            return null;
+        }
+        if (!node.isObject()) return null;
+        if (node.path("positions").isArray()) {
+            JsonNode id = node.path("id");
+            if (id.isMissingNode() || id.isNull() || id.asText().isBlank()) id = node.path("checkId");
+            if (!id.isMissingNode() && !id.isNull() && id.asLong(Long.MIN_VALUE) == expectedId) return node;
+        }
+        for (String property : List.of("check", "receipt", "data", "result", "value", "object")) {
+            JsonNode found = fullCheckFromResponse(node.get(property), expectedId, depth + 1);
+            if (found != null) return found;
+        }
+        return null;
     }
 
     /** Finds a receipt array in common JSON-RPC collection and paging wrappers. */
@@ -1058,6 +1167,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public record PriceChange(String marking, String name, String barcode, double detectedAt,
                               String oldPricesJson, String newPricesJson) { }
     public record PriceSnapshot(String name, String barcode, double capturedAt, String pricesJson) { }
+    public record ShelfPrice(String regularPrice, String discountPrice) { }
     public record SalesDay(long dayEpochSeconds, double units, double revenue, int checks) { }
     public record SalesArticle(String marking, String name, String barcode, double units,
                                double revenue, int checks) { }
