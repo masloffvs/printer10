@@ -35,13 +35,16 @@ import java.util.function.Consumer;
 final class SalesPointMapPanel extends JPanel {
     private final SalesPointRepository repository;
     private final Consumer<SalesPoint> openEditor;
+    private final Consumer<SalesPoint> openChanges;
     private final Runnable pointsChanged;
     private final MapCanvas map = new MapCanvas();
 
-    SalesPointMapPanel(SalesPointRepository repository, Consumer<SalesPoint> openEditor, Runnable pointsChanged) {
+    SalesPointMapPanel(SalesPointRepository repository, Consumer<SalesPoint> openEditor,
+                       Consumer<SalesPoint> openChanges, Runnable pointsChanged) {
         super(new java.awt.BorderLayout());
         this.repository = repository;
         this.openEditor = openEditor;
+        this.openChanges = openChanges;
         this.pointsChanged = pointsChanged;
         JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.LEADING, 6, 5));
         JButton zoomOut = new JButton("−");
@@ -111,6 +114,9 @@ final class SalesPointMapPanel extends JPanel {
         JMenuItem edit = new JMenuItem("Открыть редактор точки");
         edit.addActionListener(event -> openEditor.accept(point));
         menu.add(edit);
+        JMenuItem changes = new JMenuItem("Изменения цен за 24 часа…");
+        changes.addActionListener(event -> openChanges.accept(point));
+        menu.add(changes);
         menu.addSeparator();
         JMenuItem rename = new JMenuItem("Переименовать");
         rename.addActionListener(event -> {
@@ -125,6 +131,9 @@ final class SalesPointMapPanel extends JPanel {
             }
         });
         menu.add(rename);
+        JMenuItem appearance = new JMenuItem("Цвет и значок…");
+        appearance.addActionListener(event -> editPointAppearance(point));
+        menu.add(appearance);
         JMenuItem delete = new JMenuItem("Удалить точку");
         delete.addActionListener(event -> {
             if (JOptionPane.showConfirmDialog(this, "Удалить точку «" + point.name() + "» и все её ценники?",
@@ -139,6 +148,41 @@ final class SalesPointMapPanel extends JPanel {
         });
         menu.add(delete);
         menu.show(map, location.x, location.y);
+    }
+
+    private void editPointAppearance(SalesPoint point) {
+        Color[] selected = {Color.decode(point.color())};
+        JButton color = new JButton("Выбрать цвет");
+        color.setBackground(selected[0]);
+        color.addActionListener(event -> {
+            Color chosen = JColorChooser.showDialog(this, "Цвет торговой точки", selected[0]);
+            if (chosen != null) { selected[0] = chosen; color.setBackground(chosen); }
+        });
+        javax.swing.JComboBox<String> icon = new javax.swing.JComboBox<>(new String[]{"store", "basket", "warehouse", "pin"});
+        icon.setSelectedItem(point.icon());
+        icon.setRenderer(new javax.swing.DefaultListCellRenderer() {
+            @Override public java.awt.Component getListCellRendererComponent(javax.swing.JList<?> list, Object value,
+                    int index, boolean selectedRow, boolean focus) {
+                super.getListCellRendererComponent(list, value, index, selectedRow, focus);
+                setText(switch (String.valueOf(value)) {
+                    case "basket" -> "Корзина";
+                    case "warehouse" -> "Склад";
+                    case "pin" -> "Метка";
+                    default -> "Магазин";
+                });
+                return this;
+            }
+        });
+        JPanel form = new JPanel(new java.awt.GridLayout(0, 2, 6, 6));
+        form.add(new JLabel("Цвет")); form.add(color);
+        form.add(new JLabel("Значок")); form.add(icon);
+        if (JOptionPane.showConfirmDialog(this, form, "Внешний вид точки",
+                JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
+        try {
+            String hex = String.format("#%06X", selected[0].getRGB() & 0xFFFFFF);
+            repository.updatePointAppearance(point.id(), hex, String.valueOf(icon.getSelectedItem()));
+            refresh();
+        } catch (Exception error) { showError("Не удалось изменить внешний вид точки", error); }
     }
 
     private final class MapCanvas extends JPanel {
@@ -160,7 +204,7 @@ final class SalesPointMapPanel extends JPanel {
             setOpaque(true);
             setBackground(javax.swing.UIManager.getColor("Panel.background"));
             setPreferredSize(new java.awt.Dimension(1100, 720));
-            setToolTipText("Нарисуйте прямоугольник, чтобы добавить точку; щёлкните точку для редактора, перетащите для перемещения, правый щелчок — меню.");
+         setToolTipText("Перетаскивайте точку левой кнопкой для перемещения; правый щелчок — меню создания и настройки.");
             addMouseListener(new MouseAdapter() {
                 @Override public void mousePressed(MouseEvent event) {
                     contextHandled = false;
@@ -186,8 +230,6 @@ final class SalesPointMapPanel extends JPanel {
                     }
                     if (draft != null && draft.width >= 50 && draft.height >= 35) {
                         createPoint(draft);
-                    } else if (moving != null && press != null && press.distance(event.getPoint()) < 4) {
-                        openEditor.accept(point(moving.id()));
                     } else if (moving != null) {
                         try {
                             SalesPoint moved = point(moving.id());
@@ -241,7 +283,7 @@ final class SalesPointMapPanel extends JPanel {
                         int dy = world.y - last.y;
                         points = points.stream().map(point -> point.id() == moving.id()
                                 ? new SalesPoint(point.id(), point.name(), Math.max(0, point.x() + dx),
-                                Math.max(0, point.y() + dy), point.width(), point.height()) : point).toList();
+                                Math.max(0, point.y() + dy), point.width(), point.height(), point.color(), point.icon()) : point).toList();
                         last = world;
                         repaint();
                     } else if (movingFixture != null) {
@@ -253,11 +295,6 @@ final class SalesPointMapPanel extends JPanel {
                                 fixture.y() + dy, fixture.width(), fixture.height(), fixture.rotation(), fixture.color())
                                 : fixture).toList();
                         last = world;
-                        repaint();
-                    } else {
-                        Point world = toWorld(event.getPoint());
-                        draft = new Rectangle(Math.min(pressWorld.x, world.x), Math.min(pressWorld.y, world.y),
-                                Math.abs(world.x - pressWorld.x), Math.abs(world.y - pressWorld.y));
                         repaint();
                     }
                 }
@@ -486,19 +523,20 @@ final class SalesPointMapPanel extends JPanel {
                     bounds.x, bounds.y + bounds.height, card));
             g.fillRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, arc, arc);
 
-            g.setColor(active ? accent : blend(accent, card, 0.34f));
+            Color pointColor = Color.decode(point.color());
+            g.setColor(active ? pointColor : blend(pointColor, card, 0.34f));
             g.setStroke(new BasicStroke(active ? 1.8f : 1.1f));
             g.drawRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, arc, arc);
-            g.setColor(accent);
+            g.setColor(pointColor);
             g.fillRoundRect(bounds.x + 1, bounds.y + 1, 5, bounds.height - 2, arc, arc);
 
             int pad = Math.max(12, bounds.width / 14);
             int iconSize = Math.min(34, Math.max(24, bounds.height / 3));
             int iconX = bounds.x + pad;
             int iconY = bounds.y + Math.max(10, (bounds.height - iconSize) / 2 - 3);
-            g.setColor(blend(accent, card, 0.84f));
+            g.setColor(blend(pointColor, card, 0.84f));
             g.fillOval(iconX, iconY, iconSize, iconSize);
-            paintStoreIcon(g, iconX, iconY, iconSize, accent);
+            paintPointIcon(g, iconX, iconY, iconSize, pointColor, point.icon());
 
             int textX = iconX + iconSize + Math.max(9, pad / 2);
             int textWidth = Math.max(20, bounds.x + bounds.width - pad - textX);
@@ -546,6 +584,37 @@ final class SalesPointMapPanel extends JPanel {
             g.drawRoundRect(left + 2, roofY + 4, width - 4, size - inset - (roofY - y), 3, 3);
             g.drawLine(left + width / 2, roofY + 5, left + width / 2, y + size - inset);
             g.drawLine(left + 3, roofY + 9, left + width - 3, roofY + 9);
+        }
+
+        private void paintPointIcon(Graphics2D g, int x, int y, int size, Color accent, String icon) {
+            if ("store".equals(icon)) { paintStoreIcon(g, x, y, size, accent); return; }
+            int inset = Math.max(6, size / 4), left = x + inset, top = y + inset;
+            int width = size - inset * 2, height = size - inset * 2;
+            g.setColor(accent);
+            g.setStroke(new BasicStroke(1.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            switch (icon) {
+                case "basket" -> {
+                    g.drawLine(left + 1, top + 4, left + width - 1, top + 4);
+                    g.drawLine(left + 3, top + 4, left + 5, top + height - 1);
+                    g.drawLine(left + width - 3, top + 4, left + width - 5, top + height - 1);
+                    g.drawLine(left + 5, top + height - 1, left + width - 5, top + height - 1);
+                    g.drawLine(left + width / 3, top + 6, left + width / 3, top + height - 2);
+                    g.drawLine(left + width * 2 / 3, top + 6, left + width * 2 / 3, top + height - 2);
+                }
+                case "warehouse" -> {
+                    g.drawLine(left, top + 5, left + width / 2, top);
+                    g.drawLine(left + width / 2, top, left + width, top + 5);
+                    g.drawRect(left + 2, top + 5, width - 4, height - 5);
+                    g.drawRect(left + width / 3, top + height / 2, width / 3, height / 2);
+                }
+                case "pin" -> {
+                    g.drawOval(left + width / 4, top, width / 2, height / 2);
+                    g.drawLine(left + width / 4, top + height / 3, left + width / 2, top + height);
+                    g.drawLine(left + width * 3 / 4, top + height / 3, left + width / 2, top + height);
+                    g.fillOval(left + width * 2 / 5, top + height / 6, Math.max(2, width / 5), Math.max(2, width / 5));
+                }
+                default -> paintStoreIcon(g, x, y, size, accent);
+            }
         }
 
         private String ellipsize(String text, FontMetrics metrics, int width) {

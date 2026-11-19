@@ -8,6 +8,7 @@ import com.setretailx.printer.model.PrintHistoryEntry;
 import com.setretailx.printer.repository.PriceChangePrintHistoryRepository;
 import com.setretailx.printer.repository.ChangedLabelPrintHistoryRepository;
 import com.setretailx.printer.model.PriceType;
+import com.setretailx.printer.model.Price;
 import com.setretailx.printer.model.ScannedProbe;
 import com.setretailx.printer.repository.ProductRepository;
 import com.setretailx.printer.repository.PrintHistoryRepository;
@@ -21,6 +22,7 @@ import com.setretailx.printer.repository.SalesPointRepository.ShelfItem;
 import com.setretailx.printer.service.SetRetailXConnector;
 import com.setretailx.printer.service.ExchangeEvent;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
+import com.setretailx.printer.service.PriceMonitoringTaskService.SalesPointPriceChange;
 import com.setretailx.printer.service.PeerMeshService;
 import com.setretailx.printer.service.setretailx.dto.PrintGroupItemDto;
 import com.setretailx.printer.service.setretailx.dto.PrintGroupResponseDto;
@@ -102,12 +104,14 @@ public final class MainWindow extends JFrame {
     });
     private final AddressSearchPanel addressSearchPanel = new AddressSearchPanel(addressStorage);
     private final SalesPointEditorPanel salesPointEditorPanel = new SalesPointEditorPanel(salesPoints);
+    private final SalesPointChangesPanel salesPointChangesPanel = new SalesPointChangesPanel(
+            this::processSalesPointChanges, this::refreshSalesPointChanges);
     private final SalesPointMapPanel salesPointMapPanel = new SalesPointMapPanel(salesPoints,
             point -> {
                 salesPointEditorPanel.refreshPoints();
                 salesPointEditorPanel.selectPoint(point);
                 workspace.showWindow("salesPointEditor");
-            }, salesPointEditorPanel::refreshPoints);
+            }, this::openSalesPointChanges, salesPointEditorPanel::refreshPoints);
     private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService, priceChangePrintHistory,
             (marking, name, barcode) ->
             workspace.addDynamicWindow("История цен — " + marking,
@@ -133,7 +137,7 @@ public final class MainWindow extends JFrame {
             log(peerMeshService.networkBindWarning());
         }
         comparison.setMismatchHandler(this::enqueueMismatchedProduct);
-        salesPointEditorPanel.setHistoryCheckHandler(this::checkSalesPointPriceHistory);
+        salesPointEditorPanel.setHistoryCheckHandler(this::openCurrentSalesPointChanges);
         salesPointEditorPanel.setForcedCheckHandler(this::forceSalesPointPriceCheck);
         add(workspace, BorderLayout.CENTER);
         status.setBorder(BorderFactory.createEmptyBorder(6, 10, 6, 10));
@@ -157,6 +161,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("addressSearch", addressSearchPanel, 860, 520);
         workspace.addWindow("salesPointMap", salesPointMapPanel, 1000, 680);
         workspace.addWindow("salesPointEditor", salesPointEditorPanel, 760, 520);
+        workspace.addWindow("salesPointChanges", salesPointChangesPanel, 1120, 580);
         workspace.addWindow("palletScanning", palletScanningPanel, 900, 600);
         workspace.addWindow("priceChanges", priceChanges, 900, 520);
         if (AppConfig.nodeRole() == AppConfig.NodeRole.PARENT) {
@@ -559,139 +564,113 @@ public final class MainWindow extends JFrame {
         }, error -> status.setText("Не удалось добавить изменённые ценники в очередь: " + error));
     }
 
-    private void checkSalesPointPriceHistory(List<ShelfItem> shelfItems) {
-        if (shelfItems == null || shelfItems.isEmpty()) return;
-        long since = System.currentTimeMillis() / 1000L - 24 * 60 * 60;
-        status.setText("Проверяем обновления цен за последние 24 часа…");
-        runBackground(() -> {
-            List<RecentShelfChange> changed = new ArrayList<>();
-            for (ShelfItem item : shelfItems) {
-                List<PriceMonitoringTaskService.PriceChange> changes = taskService.priceChangesSince(
-                        item.article(), since);
-                if (changes.isEmpty()) continue;
-                PriceMonitoringTaskService.PriceChange latest = changes.get(0);
-                PriceMonitoringTaskService.PriceChange earliest = changes.get(changes.size() - 1);
-                Product product = products.findByMarking(item.article());
-                if (product == null && !latest.barcode().isBlank()) {
-                    product = parentApiClient.searchOnlineProduct(latest.barcode()).orElse(null);
-                }
-                changed.add(new RecentShelfChange(item, earliest, latest, product));
-            }
-            return changed;
-        }, changed -> {
-            if (changed.isEmpty()) {
-                status.setText("За последние 24 часа изменений цен не найдено.");
-                JOptionPane.showMessageDialog(this,
-                        "Проверено ценников: " + shelfItems.size()
-                                + ".\nЗа последние 24 часа в истории обновлений изменения цен не найдены.",
-                        "Изменения цен за 24 часа", JOptionPane.INFORMATION_MESSAGE);
-                return;
-            }
-            showRecentSalesPointChanges(changed, shelfItems.size());
-        }, error -> status.setText("Не удалось проверить историю цен за 24 часа: " + error));
+    private void openCurrentSalesPointChanges() {
+        long pointId = salesPointEditorPanel.selectedPointId();
+        if (pointId < 0) {
+            status.setText("Сначала выберите точку на карте.");
+            return;
+        }
+        try {
+            SalesPointRepository.SalesPoint point = salesPoints.points().stream()
+                    .filter(candidate -> candidate.id() == pointId).findFirst().orElse(null);
+            if (point != null) openSalesPointChanges(point);
+        } catch (Exception error) { status.setText("Не удалось открыть события точки: " + error.getMessage()); }
     }
 
-    private void showRecentSalesPointChanges(List<RecentShelfChange> changes, int checkedCount) {
-        String[] columns = {"Артикул", "Товар", "Время", "Было · обычная / акция",
-                "Стало · обычная / акция", "Δ обычная", "Δ акция"};
-        javax.swing.table.DefaultTableModel model = new javax.swing.table.DefaultTableModel(columns, 0) {
-            @Override public boolean isCellEditable(int row, int column) { return false; }
-        };
-        for (RecentShelfChange row : changes) {
-            PricePair before = pricesFromJson(row.earliest().oldPricesJson());
-            PricePair after = pricesFromJson(row.latest().newPricesJson());
-            String name = row.shelfItem().name().isBlank() ? row.latest().name() : row.shelfItem().name();
-            if (row.product() == null) name += " · товар не найден, печать недоступна";
-            String time = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")
-                    .withZone(java.time.ZoneId.systemDefault())
-                    .format(java.time.Instant.ofEpochMilli((long) (row.latest().detectedAt() * 1000)));
-            model.addRow(new Object[]{row.shelfItem().article(), name, time,
-                    before.regular() + " / " + before.promo(), after.regular() + " / " + after.promo(),
-                    priceDelta(before.regular(), after.regular()), priceDelta(before.promo(), after.promo())});
+    private void openSalesPointChanges(SalesPointRepository.SalesPoint point) {
+        salesPointChangesPanel.setPoint(point.id(), point.name());
+        workspace.showWindow("salesPointChanges");
+        refreshSalesPointChanges();
+    }
+
+    private void refreshSalesPointChanges() {
+        long pointId = salesPointChangesPanel.pointId();
+        if (pointId < 0) return;
+        double since = System.currentTimeMillis() / 1000d - 24 * 60 * 60;
+        status.setText("Загружаем события изменения цен за 24 часа…");
+        runBackground(() -> taskService.salesPointChanges(pointId, since), changes -> {
+            if (salesPointChangesPanel.pointId() != pointId) return;
+            salesPointChangesPanel.setChanges(changes);
+            long pending = changes.stream().filter(change -> change.processedAt() == null).count();
+            status.setText("Событий за 24 часа: " + changes.size() + " · не обработано: " + pending);
+        }, error -> status.setText("Не удалось загрузить события торговой точки: " + error));
+    }
+
+    private void processSalesPointChanges(List<SalesPointPriceChange> selected) {
+        if (selected == null || selected.isEmpty()) return;
+        long pointId = salesPointChangesPanel.pointId();
+        List<SalesPointPriceChange> exactSelection = selected.stream()
+                .filter(change -> change.pointId() == pointId && change.processedAt() == null).toList();
+        if (exactSelection.isEmpty()) {
+            status.setText("Среди выбранных событий нет необработанных.");
+            return;
         }
-        javax.swing.JTable table = new javax.swing.JTable(model);
-        table.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
-        table.setAutoCreateRowSorter(true);
-        table.setFillsViewportHeight(true);
-        table.setRowHeight(24);
-        javax.swing.table.DefaultTableCellRenderer deltaRenderer = new javax.swing.table.DefaultTableCellRenderer() {
-            @Override public Component getTableCellRendererComponent(javax.swing.JTable target, Object value,
-                    boolean selected, boolean focus, int row, int column) {
-                super.getTableCellRendererComponent(target, value, selected, focus, row, column);
-                if (!selected && value != null) {
-                    String delta = value.toString();
-                    setForeground(delta.startsWith("+") ? new Color(190, 35, 35)
-                            : delta.startsWith("−") ? new Color(20, 125, 65)
-                            : javax.swing.UIManager.getColor("Table.foreground"));
+        status.setText("Обрабатываем выбранные события изменения цен…");
+        runBackground(() -> {
+            List<AppliedQueueCandidate> applied = new ArrayList<>();
+            List<String> failures = new ArrayList<>();
+            for (SalesPointPriceChange change : exactSelection) {
+                try {
+                    var result = taskService.applySalesPointChange(pointId, change.id());
+                    Product product = products.findByMarking(result.marking());
+                    if (product == null && !change.barcode().isBlank()) product = products.findByBarcode(change.barcode());
+                    if (product == null && !change.barcode().isBlank()) {
+                        product = parentApiClient.searchOnlineProduct(change.barcode()).orElse(null);
+                    }
+                    if (product == null) product = new Product(result.marking(), result.name(), "",
+                            change.barcode(), "ST", "sales-point", null, "", java.util.Map.of());
+                    applied.add(new AppliedQueueCandidate(result, product));
                 }
-                return this;
+                catch (Exception error) {
+                    failures.add(change.marking() + " (событие " + change.id() + "): " + error.getMessage());
+                }
             }
-        };
-        table.getColumnModel().getColumn(5).setCellRenderer(deltaRenderer);
-        table.getColumnModel().getColumn(6).setCellRenderer(deltaRenderer);
-        for (int i = 0; i < changes.size(); i++) {
-            if (changes.get(i).product() != null) table.addRowSelectionInterval(i, i);
-        }
-        javax.swing.JScrollPane scroll = new javax.swing.JScrollPane(table);
-        scroll.setPreferredSize(new java.awt.Dimension(1080, Math.min(420, 100 + changes.size() * 26)));
-        javax.swing.JPanel content = new javax.swing.JPanel(new BorderLayout(0, 8));
-        content.add(new javax.swing.JLabel("Обновления за последние 24 часа · проверено ценников: " + checkedCount
-                + ". Рост выделен красным, снижение — зелёным. Выберите ценники для очереди печати."),
-                BorderLayout.NORTH);
-        content.add(scroll, BorderLayout.CENTER);
-        int answer = JOptionPane.showConfirmDialog(this, content,
-                "Изменения цен торговой точки · последние 24 часа",
-                JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE);
-        if (answer == JOptionPane.YES_OPTION) {
+            return new AppliedEvents(applied, failures);
+        }, result -> {
+            salesPointEditorPanel.refreshPoints();
+            refreshSalesPointChanges();
             int queued = 0;
-            for (int viewRow : table.getSelectedRows()) {
-                int modelRow = table.convertRowIndexToModel(viewRow);
-                RecentShelfChange entry = changes.get(modelRow);
-                if (entry.product() == null) continue;
-                entries.add(new QueueEntry(entry.product()));
-                queued++;
+            for (AppliedQueueCandidate candidate : result.applied()) {
+                PriceMonitoringTaskService.AppliedPointPriceChange applied = candidate.applied();
+                Product queueProduct = productWithCurrentPointPrice(candidate.product(), applied);
+                String price = applied.discountPrice().isBlank() ? applied.regularPrice() : applied.discountPrice();
+                int answer = JOptionPane.showConfirmDialog(this,
+                        "Ценник «" + applied.marking() + "» обновлён (обычная: "
+                                + displayPrice(applied.regularPrice()) + ", акция: "
+                                + displayPrice(applied.discountPrice()) + ").\nДобавить актуальный ценник в очередь печати?",
+                        "Обновление ценника точки", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+                if (answer == JOptionPane.YES_OPTION) {
+                    QueueEntry queueEntry = new QueueEntry(queueProduct);
+                    if (applied.discountPrice().isBlank()) queueEntry.priceType = PriceType.REGULAR;
+                    entries.add(queueEntry);
+                    queued++;
+                    log("Обновлённый ценник точки " + applied.marking() + " добавлен в очередь; цена " + price);
+                }
             }
             refreshQueue();
             if (queued > 0) workspace.showWindow("queue");
-            status.setText("Добавлено в очередь: " + queued + " ценников с изменившимися ценами.");
-            log("По изменениям цен за 24 часа в очередь добавлено ценников: " + queued);
-        } else {
-            status.setText("Найдено изменившихся ценников за 24 часа: " + changes.size()
-                    + ". В очередь не добавляли.");
-        }
+            String summary = "Обработано событий: " + result.applied().size() + " из " + exactSelection.size()
+                    + (queued == 0 ? " · в очередь не добавляли" : " · добавлено в очередь: " + queued);
+            if (!result.failures().isEmpty()) summary += " · ошибки: " + String.join("; ", result.failures());
+            status.setText(summary);
+            log(summary);
+        }, error -> status.setText("Не удалось обработать выбранные события: " + error));
     }
 
-    private static PricePair pricesFromJson(String json) {
+    private static Product productWithCurrentPointPrice(Product source,
+            PriceMonitoringTaskService.AppliedPointPriceChange applied) {
+        String effective = applied.discountPrice().isBlank() ? applied.regularPrice() : applied.discountPrice();
+        Price price = source.price();
         try {
-            com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper()
-                    .readTree(json == null ? "{}" : json);
-            return new PricePair(finalPrice(root.path("pricesMap")), finalPrice(root.path("prices99Map")));
-        } catch (Exception ignored) {
-            return new PricePair("—", "—");
-        }
+            if (!effective.isBlank()) price = new Price(new java.math.BigDecimal(effective)
+                    .movePointRight(2).setScale(0, java.math.RoundingMode.HALF_UP).longValueExact());
+        } catch (NumberFormatException | ArithmeticException ignored) { }
+        return new Product(source.stCode(), applied.name().isBlank() ? source.name() : applied.name(),
+                source.vendorCode(), source.barcode(), source.uom(), source.source(), price,
+                source.totalQuantity(), source.details(), source.rawJson());
     }
 
-    private static String finalPrice(com.fasterxml.jackson.databind.JsonNode prices) {
-        for (String key : new String[]{"4", "2"}) {
-            com.fasterxml.jackson.databind.JsonNode value = prices.path(key);
-            if (value.isObject()) value = value.path("value");
-            if (value.isMissingNode() || value.isNull() || value.asText().isBlank()) continue;
-            try { return new java.math.BigDecimal(value.asText()).stripTrailingZeros().toPlainString().replace('.', ','); }
-            catch (NumberFormatException ignored) { return value.asText(); }
-        }
-        return "—";
-    }
-
-    private static String priceDelta(String before, String after) {
-        if ("—".equals(before) || "—".equals(after)) return "—";
-        try {
-            java.math.BigDecimal delta = new java.math.BigDecimal(after.replace(',', '.'))
-                    .subtract(new java.math.BigDecimal(before.replace(',', '.')));
-            if (delta.signum() == 0) return "0";
-            return (delta.signum() > 0 ? "+" : "−")
-                    + delta.abs().stripTrailingZeros().toPlainString().replace('.', ',');
-        } catch (NumberFormatException ignored) { return "—"; }
-    }
+    private static String displayPrice(String value) { return value == null || value.isBlank() ? "—" : value; }
 
     private void forceSalesPointPriceCheck(List<ShelfItem> shelfItems) {
         if (shelfItems == null || shelfItems.isEmpty()) return;
@@ -724,9 +703,10 @@ public final class MainWindow extends JFrame {
         }, error -> status.setText("Не удалось выполнить принудительную сверку: " + error));
     }
 
-    private record RecentShelfChange(ShelfItem shelfItem, PriceMonitoringTaskService.PriceChange earliest,
-                                     PriceMonitoringTaskService.PriceChange latest, Product product) { }
-    private record PricePair(String regular, String promo) { }
+    private record AppliedQueueCandidate(PriceMonitoringTaskService.AppliedPointPriceChange applied,
+                                         Product product) { }
+    private record AppliedEvents(List<AppliedQueueCandidate> applied,
+                                 List<String> failures) { }
     private record ForcedShelfScan(ShelfItem shelfItem, Product product) { }
     private record SalesPointBarcodeItem(Product product, PriceMonitoringTaskService.ShelfPrice price) { }
     private record ScannedPrintProduct(Product product, PrintHistoryEntry previousPrint) { }

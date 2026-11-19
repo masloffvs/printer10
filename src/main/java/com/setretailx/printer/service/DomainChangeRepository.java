@@ -112,8 +112,8 @@ final class DomainChangeRepository {
 
     private static void createSalesTriggers(Statement statement) throws SQLException {
         createTriggers(statement, "sales_points", "sync_key", "NEW.sync_key", "OLD.sync_key",
-                "json_object('sync_key',NEW.sync_key,'name',NEW.name,'x',NEW.x,'y',NEW.y,'width',NEW.width,'height',NEW.height)",
-                "json_object('sync_key',OLD.sync_key,'name',OLD.name,'x',OLD.x,'y',OLD.y,'width',OLD.width,'height',OLD.height)");
+                "json_object('sync_key',NEW.sync_key,'name',NEW.name,'x',NEW.x,'y',NEW.y,'width',NEW.width,'height',NEW.height,'color',NEW.color,'icon',NEW.icon)",
+                "json_object('sync_key',OLD.sync_key,'name',OLD.name,'x',OLD.x,'y',OLD.y,'width',OLD.width,'height',OLD.height,'color',OLD.color,'icon',OLD.icon)");
         String pointNew = "(SELECT sync_key FROM sales_points WHERE point_id=NEW.point_id)";
         String pointOld = "(SELECT sync_key FROM sales_points WHERE point_id=OLD.point_id)";
         String pointNameNew = "(SELECT name FROM sales_points WHERE point_id=NEW.point_id)";
@@ -344,18 +344,21 @@ final class DomainChangeRepository {
                         find.setString(1, syncKey);
                         try (ResultSet row = find.executeQuery()) {
                             if (row.next()) {
-                                try (PreparedStatement update = connection.prepareStatement("UPDATE sales_points SET name=?,x=?,y=?,width=?,height=? WHERE point_id=?")) {
+                                try (PreparedStatement update = connection.prepareStatement("UPDATE sales_points SET name=?,x=?,y=?,width=?,height=?,color=?,icon=? WHERE point_id=?")) {
                                     update.setString(1, name); update.setInt(2, payload.path("x").asInt()); update.setInt(3, payload.path("y").asInt());
                                     update.setInt(4, payload.path("width").asInt(160)); update.setInt(5, payload.path("height").asInt(100));
-                                    update.setLong(6, row.getLong(1)); update.executeUpdate();
+                                    update.setString(6, payload.path("color").asText("#2F7E69"));
+                                    update.setString(7, payload.path("icon").asText("store"));
+                                    update.setLong(8, row.getLong(1)); update.executeUpdate();
                                 }
                                 return;
                             }
                         }
                     }
-                    try (PreparedStatement insert = connection.prepareStatement("INSERT INTO sales_points(sync_key,name,x,y,width,height) VALUES(?,?,?,?,?,?)")) {
+                    try (PreparedStatement insert = connection.prepareStatement("INSERT INTO sales_points(sync_key,name,x,y,width,height,color,icon) VALUES(?,?,?,?,?,?,?,?)")) {
                         insert.setString(1, syncKey); insert.setString(2, name); insert.setInt(3, payload.path("x").asInt()); insert.setInt(4, payload.path("y").asInt());
-                        insert.setInt(5, payload.path("width").asInt(160)); insert.setInt(6, payload.path("height").asInt(100)); insert.executeUpdate();
+                        insert.setInt(5, payload.path("width").asInt(160)); insert.setInt(6, payload.path("height").asInt(100));
+                        insert.setString(7, payload.path("color").asText("#2F7E69")); insert.setString(8, payload.path("icon").asText("store")); insert.executeUpdate();
                     }
                 }
             }

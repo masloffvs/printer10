@@ -35,9 +35,9 @@ public final class SalesPointRepository {
     public List<SalesPoint> points() throws SQLException {
         List<SalesPoint> result = new ArrayList<>();
         try (Connection connection = connect(); Statement statement = connection.createStatement();
-             ResultSet rows = statement.executeQuery("SELECT point_id, name, x, y, width, height FROM sales_points ORDER BY point_id")) {
+              ResultSet rows = statement.executeQuery("SELECT point_id, name, x, y, width, height, color, icon FROM sales_points ORDER BY point_id")) {
             while (rows.next()) result.add(new SalesPoint(rows.getLong(1), rows.getString(2),
-                    rows.getInt(3), rows.getInt(4), rows.getInt(5), rows.getInt(6)));
+                    rows.getInt(3), rows.getInt(4), rows.getInt(5), rows.getInt(6), rows.getString(7), rows.getString(8)));
         }
         return result;
     }
@@ -45,13 +45,14 @@ public final class SalesPointRepository {
     public SalesPoint createPoint(String name, int x, int y, int width, int height) throws SQLException {
         String title = required(name, "Введите название точки.");
         try (Connection connection = connect(); PreparedStatement insert = connection.prepareStatement(
-                "INSERT INTO sales_points(sync_key,name,x,y,width,height) VALUES(?,?,?,?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
+                "INSERT INTO sales_points(sync_key,name,x,y,width,height,color,icon) VALUES(?,?,?,?,?,?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
             insert.setString(1, java.util.UUID.randomUUID().toString());
             insert.setString(2, title); insert.setInt(3, x); insert.setInt(4, y);
             insert.setInt(5, Math.max(80, width)); insert.setInt(6, Math.max(48, height));
+            insert.setString(7, "#2F7E69"); insert.setString(8, "store");
             insert.executeUpdate();
             try (ResultSet keys = insert.getGeneratedKeys()) {
-                if (keys.next()) return new SalesPoint(keys.getLong(1), title, x, y, Math.max(80, width), Math.max(48, height));
+                if (keys.next()) return new SalesPoint(keys.getLong(1), title, x, y, Math.max(80, width), Math.max(48, height), "#2F7E69", "store");
             }
         }
         throw new SQLException("Не удалось создать точку продаж.");
@@ -61,6 +62,18 @@ public final class SalesPointRepository {
         try (Connection connection = connect(); PreparedStatement update = connection.prepareStatement(
                 "UPDATE sales_points SET name=? WHERE point_id=?")) {
             update.setString(1, required(name, "Введите название точки.")); update.setLong(2, id);
+            if (update.executeUpdate() == 0) throw new SQLException("Точка больше не существует.");
+        }
+    }
+
+    public void updatePointAppearance(long id, String color, String icon) throws SQLException {
+        String safeIcon = switch (icon == null ? "" : icon) {
+            case "store", "basket", "warehouse", "pin" -> icon;
+            default -> throw new SQLException("Выберите значок торговой точки.");
+        };
+        try (Connection connection = connect(); PreparedStatement update = connection.prepareStatement(
+                "UPDATE sales_points SET color=?,icon=? WHERE point_id=?")) {
+            update.setString(1, validColor(color)); update.setString(2, safeIcon); update.setLong(3, id);
             if (update.executeUpdate() == 0) throw new SQLException("Точка больше не существует.");
         }
     }
@@ -201,7 +214,8 @@ public final class SalesPointRepository {
         try (Connection connection = connect(); Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA foreign_keys=ON");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_points (point_id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                    + "sync_key TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL)");
+                    + "sync_key TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, "
+                    + "color TEXT NOT NULL DEFAULT '#2F7E69', icon TEXT NOT NULL DEFAULT 'store')");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_point_items (point_id INTEGER NOT NULL "
                     + "REFERENCES sales_points(point_id) ON DELETE CASCADE, article TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', "
                     + "price TEXT NOT NULL DEFAULT '', discount_price TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, PRIMARY KEY(point_id, article))");
@@ -214,6 +228,8 @@ public final class SalesPointRepository {
                 while (columns.next()) if ("sync_key".equalsIgnoreCase(columns.getString("name"))) hasPointSyncKey = true;
             }
             if (!hasPointSyncKey) statement.executeUpdate("ALTER TABLE sales_points ADD COLUMN sync_key TEXT NOT NULL DEFAULT ''");
+            ensureColumn(connection, "sales_points", "color", "TEXT NOT NULL DEFAULT '#2F7E69'");
+            ensureColumn(connection, "sales_points", "icon", "TEXT NOT NULL DEFAULT 'store'");
             java.util.List<Long> pointIds = new java.util.ArrayList<>();
             try (Statement rows = connection.createStatement(); ResultSet points = rows.executeQuery("SELECT point_id FROM sales_points WHERE sync_key=''")) {
                 while (points.next()) pointIds.add(points.getLong(1));
@@ -252,6 +268,16 @@ public final class SalesPointRepository {
         }
     }
 
+    private static void ensureColumn(Connection connection, String table, String column, String definition) throws SQLException {
+        boolean found = false;
+        try (Statement statement = connection.createStatement(); ResultSet columns = statement.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (columns.next()) if (column.equalsIgnoreCase(columns.getString("name"))) found = true;
+        }
+        if (!found) try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+        }
+    }
+
     private Connection connect() throws SQLException {
         Connection connection = DriverManager.getConnection("jdbc:sqlite:" + databasePath);
         try (Statement statement = connection.createStatement()) {
@@ -271,7 +297,7 @@ public final class SalesPointRepository {
         catch (NumberFormatException error) { throw new SQLException("Выберите корректный цвет.", error); }
     }
 
-    public record SalesPoint(long id, String name, int x, int y, int width, int height) { }
+    public record SalesPoint(long id, String name, int x, int y, int width, int height, String color, String icon) { }
     public record MapFixture(long id, String kind, String name, int x, int y, int width, int height,
                              double rotation, String color) { }
     public record ShelfItem(String article, String name, String price, String discountPrice, long updatedAt) { }

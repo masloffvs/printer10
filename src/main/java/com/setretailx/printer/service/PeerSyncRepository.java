@@ -255,7 +255,7 @@ final class PeerSyncRepository {
     private ObjectNode exportWorkspace() throws SQLException {
         ObjectNode result = JSON.createObjectNode();
         try (Connection connection = connect(tasksPath)) {
-            result.set("points", queryRows(connection, "SELECT sync_key,name,x,y,width,height FROM sales_points"));
+            result.set("points", queryRows(connection, "SELECT sync_key,name,x,y,width,height,color,icon FROM sales_points"));
             result.set("pointItems", queryRows(connection,
                     "SELECT p.sync_key AS point_sync_key,p.name AS point_name,i.article,i.name,i.price,i.discount_price,i.updated_at "
                             + "FROM sales_point_items i JOIN sales_points p ON p.point_id=i.point_id"));
@@ -317,10 +317,12 @@ final class PeerSyncRepository {
                         continue;
                     }
                     try (PreparedStatement insert = connection.prepareStatement(
-                            "INSERT INTO sales_points(sync_key,name,x,y,width,height) VALUES(?,?,?,?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
+                            "INSERT INTO sales_points(sync_key,name,x,y,width,height,color,icon) VALUES(?,?,?,?,?,?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
                         insert.setString(1, syncKey); insert.setString(2, name); insert.setInt(3, point.path("x").asInt());
                         insert.setInt(4, point.path("y").asInt()); insert.setInt(5, point.path("width").asInt(160));
-                        insert.setInt(6, point.path("height").asInt(100)); insert.executeUpdate();
+                        insert.setInt(6, point.path("height").asInt(100));
+                        insert.setString(7, text(point, "color").isBlank() ? "#2F7E69" : text(point, "color"));
+                        insert.setString(8, text(point, "icon").isBlank() ? "store" : text(point, "icon")); insert.executeUpdate();
                         try (ResultSet key = insert.getGeneratedKeys()) { if (key.next()) pointIds.put(syncKey, key.getLong(1)); }
                     }
                     added++;

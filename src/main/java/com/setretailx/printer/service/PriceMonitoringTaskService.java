@@ -163,7 +163,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         String normalizedQuery = query == null ? "" : query.trim();
         String foldedQuery = normalizedQuery.toLowerCase(java.util.Locale.ROOT);
         List<PriceChange> result = new ArrayList<>();
-        String sql = "SELECT marking, name, barcode, detected_at, old_prices_json, new_prices_json "
+        String sql = "SELECT id, marking, name, barcode, detected_at, old_prices_json, new_prices_json "
                 + "FROM price_changes ORDER BY detected_at DESC"
                 + (normalizedQuery.isEmpty() ? " LIMIT ?" : "");
         try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -175,7 +175,7 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                     String barcode = rows.getString("barcode");
                     if (!foldedQuery.isEmpty() && !containsIgnoreCase(marking, foldedQuery)
                             && !containsIgnoreCase(name, foldedQuery) && !containsIgnoreCase(barcode, foldedQuery)) continue;
-                    result.add(new PriceChange(marking, name, barcode, rows.getDouble("detected_at"),
+                    result.add(new PriceChange(rows.getLong("id"), marking, name, barcode, rows.getDouble("detected_at"),
                             rows.getString("old_prices_json"), rows.getString("new_prices_json")));
                     if (result.size() >= bounded) break;
                 }
@@ -192,12 +192,12 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public List<PriceChange> changesSince(double afterSeconds) throws SQLException {
         List<PriceChange> result = new ArrayList<>();
         try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
-                "SELECT marking, name, barcode, detected_at, old_prices_json, new_prices_json "
+                "SELECT id, marking, name, barcode, detected_at, old_prices_json, new_prices_json "
                         + "FROM price_changes WHERE detected_at>=? ORDER BY detected_at DESC")) {
             statement.setDouble(1, afterSeconds);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    result.add(new PriceChange(rows.getString("marking"), rows.getString("name"),
+                    result.add(new PriceChange(rows.getLong("id"), rows.getString("marking"), rows.getString("name"),
                             rows.getString("barcode"), rows.getDouble("detected_at"),
                             rows.getString("old_prices_json"), rows.getString("new_prices_json")));
                 }
@@ -210,19 +210,120 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public List<PriceChange> priceChangesSince(String marking, double afterSeconds) throws SQLException {
         List<PriceChange> result = new ArrayList<>();
         try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(
-                "SELECT marking, name, barcode, detected_at, old_prices_json, new_prices_json "
+                "SELECT id, marking, name, barcode, detected_at, old_prices_json, new_prices_json "
                         + "FROM price_changes WHERE marking=? AND detected_at>? ORDER BY detected_at DESC")) {
             statement.setString(1, marking);
             statement.setDouble(2, afterSeconds);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    result.add(new PriceChange(rows.getString("marking"), rows.getString("name"),
+                    result.add(new PriceChange(rows.getLong("id"), rows.getString("marking"), rows.getString("name"),
                             rows.getString("barcode"), rows.getDouble("detected_at"),
                             rows.getString("old_prices_json"), rows.getString("new_prices_json")));
                 }
             }
         }
         return result;
+    }
+
+    /** Recent change events for articles currently present on one point, with per-point processing state. */
+    public List<SalesPointPriceChange> salesPointChanges(long pointId, double afterSeconds) throws SQLException {
+        List<SalesPointPriceChange> result = new ArrayList<>();
+        String sql = "SELECT c.id,c.marking,c.name,c.barcode,c.detected_at,c.old_prices_json,c.new_prices_json,"
+                + "i.name AS point_item_name,s.processed_at FROM price_changes c "
+                + "JOIN sales_point_items i ON i.point_id=? AND i.article=c.marking COLLATE NOCASE "
+                + "LEFT JOIN sales_point_price_change_status s ON s.change_id=c.id AND s.point_id=i.point_id "
+                + "WHERE c.detected_at>=? ORDER BY c.detected_at DESC,c.id DESC";
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, pointId);
+            statement.setDouble(2, afterSeconds);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    double processedAt = rows.getDouble("processed_at");
+                    Double processed = rows.wasNull() ? null : processedAt;
+                    result.add(new SalesPointPriceChange(rows.getLong("id"), pointId, rows.getString("marking"),
+                            rows.getString("point_item_name"), rows.getString("name"), rows.getString("barcode"),
+                            rows.getDouble("detected_at"), rows.getString("old_prices_json"),
+                            rows.getString("new_prices_json"), processed));
+                }
+            }
+        }
+        return result;
+    }
+
+    /** Applies exactly one selected event and records its point-specific status in the same SQLite transaction. */
+    public AppliedPointPriceChange applySalesPointChange(long pointId, long changeId) throws SQLException {
+        try (Connection connection = connect()) {
+            connection.setAutoCommit(false);
+            try {
+                // Reserve SQLite's writer lock before inspecting the event/status, so concurrent clicks cannot both apply it.
+                try (PreparedStatement lock = connection.prepareStatement(
+                        "UPDATE sales_point_items SET updated_at=updated_at WHERE point_id=? AND article=("
+                                + "SELECT marking FROM price_changes WHERE id=?) COLLATE NOCASE")) {
+                    lock.setLong(1, pointId); lock.setLong(2, changeId);
+                    if (lock.executeUpdate() == 0) throw new SQLException("Товар события больше не находится в этой точке.");
+                }
+                String marking, name, pricesJson;
+                double detectedAt;
+                try (PreparedStatement query = connection.prepareStatement(
+                        "SELECT marking,name,new_prices_json,detected_at FROM price_changes WHERE id=?")) {
+                    query.setLong(1, changeId);
+                    try (ResultSet row = query.executeQuery()) {
+                        if (!row.next()) throw new SQLException("Выбранное событие больше не существует.");
+                        marking = row.getString("marking"); name = row.getString("name");
+                        pricesJson = row.getString("new_prices_json");
+                        detectedAt = row.getDouble("detected_at");
+                    }
+                }
+                try (PreparedStatement done = connection.prepareStatement(
+                        "SELECT 1 FROM sales_point_price_change_status WHERE point_id=? AND change_id=?")) {
+                    done.setLong(1, pointId); done.setLong(2, changeId);
+                    try (ResultSet row = done.executeQuery()) {
+                        if (row.next()) throw new SQLException("Это событие уже обработано для данной точки.");
+                    }
+                }
+                try (PreparedStatement newer = connection.prepareStatement(
+                        "SELECT 1 FROM price_changes WHERE marking=? COLLATE NOCASE "
+                                + "AND (detected_at>? OR (detected_at=? AND id>?)) LIMIT 1")) {
+                    newer.setString(1, marking); newer.setDouble(2, detectedAt);
+                    newer.setDouble(3, detectedAt); newer.setLong(4, changeId);
+                    try (ResultSet row = newer.executeQuery()) {
+                        if (row.next()) throw new SQLException("Есть более новое событие этого товара. Обновите список и выберите последнее.");
+                    }
+                }
+                JsonNode root;
+                try { root = JSON.readTree(pricesJson == null ? "{}" : pricesJson); }
+                catch (JsonProcessingException error) { throw new SQLException("Не удалось прочитать новые цены события.", error); }
+                // Shelf-item columns correspond to SetRetailX price numbers 2 (regular) and 4 (discount)
+                // in pricesMap. prices99Map is a separate price source, not the point's discount column.
+                String regular = priceValue(root.path("pricesMap").path("2"));
+                String promo = priceValue(root.path("pricesMap").path("4"));
+                if (regular.isBlank() && promo.isBlank()) {
+                    throw new SQLException("В выбранном событии нет обычной или скидочной цены для ценника.");
+                }
+                try (PreparedStatement update = connection.prepareStatement(
+                        "UPDATE sales_point_items SET name=CASE WHEN ?<>'' THEN ? ELSE name END,"
+                                + "price=CASE WHEN ?<>'' THEN ? ELSE price END,"
+                                + "discount_price=CASE WHEN ?<>'' THEN ? ELSE discount_price END,updated_at=? "
+                                + "WHERE point_id=? AND article=? COLLATE NOCASE")) {
+                    update.setString(1, name == null ? "" : name.trim()); update.setString(2, name == null ? "" : name.trim());
+                    update.setString(3, regular); update.setString(4, regular);
+                    update.setString(5, promo); update.setString(6, promo);
+                    update.setLong(7, System.currentTimeMillis()); update.setLong(8, pointId); update.setString(9, marking);
+                    if (update.executeUpdate() == 0) throw new SQLException("Не удалось обновить ценник точки.");
+                }
+                long processedAt = System.currentTimeMillis();
+                try (PreparedStatement mark = connection.prepareStatement(
+                        "INSERT INTO sales_point_price_change_status(point_id,change_id,processed_at) VALUES(?,?,?)")) {
+                    mark.setLong(1, pointId); mark.setLong(2, changeId); mark.setLong(3, processedAt); mark.executeUpdate();
+                }
+                connection.commit();
+                return new AppliedPointPriceChange(pointId, changeId, marking, name == null ? "" : name,
+                        regular, promo, processedAt);
+            } catch (SQLException | RuntimeException error) {
+                connection.rollback();
+                throw error;
+            }
+        }
     }
 
     /** Returns every price observation retained for one product, newest first. */
@@ -1065,6 +1166,11 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS price_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                     + "marking TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', barcode TEXT NOT NULL DEFAULT '', detected_at REAL NOT NULL, "
                     + "old_prices_json TEXT NOT NULL, new_prices_json TEXT NOT NULL)");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS sales_point_price_change_status ("
+                    + "point_id INTEGER NOT NULL, change_id INTEGER NOT NULL, processed_at INTEGER NOT NULL, "
+                    + "PRIMARY KEY(point_id,change_id))");
+            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_sales_point_change_status_event "
+                    + "ON sales_point_price_change_status(change_id,point_id)");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                     + "task_id TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, status TEXT NOT NULL, "
                     + "result TEXT NOT NULL DEFAULT '')");
@@ -1164,8 +1270,13 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
     public record TaskInfo(String taskId, String name, boolean enabled, int intervalSeconds,
                            Double nextRunAt, Double lastStartedAt, Double lastFinishedAt,
                            String lastStatus, String lastResult) { }
-    public record PriceChange(String marking, String name, String barcode, double detectedAt,
+    public record PriceChange(long id, String marking, String name, String barcode, double detectedAt,
                               String oldPricesJson, String newPricesJson) { }
+    public record SalesPointPriceChange(long id, long pointId, String marking, String pointItemName,
+                                        String name, String barcode, double detectedAt, String oldPricesJson,
+                                        String newPricesJson, Double processedAt) { }
+    public record AppliedPointPriceChange(long pointId, long changeId, String marking, String name,
+                                          String regularPrice, String discountPrice, long processedAt) { }
     public record PriceSnapshot(String name, String barcode, double capturedAt, String pricesJson) { }
     public record ShelfPrice(String regularPrice, String discountPrice) { }
     public record SalesDay(long dayEpochSeconds, double units, double revenue, int checks) { }

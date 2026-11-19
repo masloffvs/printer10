@@ -43,7 +43,7 @@ final class SalesPointEditorPanel extends JPanel {
     private final JLabel heading = new JLabel("Выберите торговую точку для редактирования.");
     private long selectedPointId = -1;
     private boolean updatingSelector;
-    private Consumer<List<ShelfItem>> historyCheckHandler = ignored -> { };
+    private Runnable historyCheckHandler = () -> { };
     private Consumer<List<ShelfItem>> forcedCheckHandler = ignored -> { };
 
     SalesPointEditorPanel(SalesPointRepository repository) {
@@ -78,7 +78,7 @@ final class SalesPointEditorPanel extends JPanel {
         refreshItems.addActionListener(event -> refreshItems());
         JButton checkHistory = new JButton("Изменения за 24 часа");
         checkHistory.setToolTipText("Показать цены до и после по обновлениям за последние 24 часа");
-        checkHistory.addActionListener(event -> historyCheckHandler.accept(selectedItems()));
+        checkHistory.addActionListener(event -> historyCheckHandler.run());
         JButton forceCheck = new JButton("Сверить с фактическими ценами");
         forceCheck.setToolTipText("Сравнить цены ценников с фактическими ценами товаров");
         forceCheck.addActionListener(event -> forcedCheckHandler.accept(selectedItems()));
@@ -101,8 +101,8 @@ final class SalesPointEditorPanel extends JPanel {
 
     long selectedPointId() { return selectedPointId; }
 
-    void setHistoryCheckHandler(Consumer<List<ShelfItem>> handler) {
-        historyCheckHandler = handler == null ? ignored -> { } : handler;
+    void setHistoryCheckHandler(Runnable handler) {
+        historyCheckHandler = handler == null ? () -> { } : handler;
     }
 
     void setForcedCheckHandler(Consumer<List<ShelfItem>> handler) {
