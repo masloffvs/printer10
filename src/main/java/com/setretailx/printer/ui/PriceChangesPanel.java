@@ -65,6 +65,7 @@ final class PriceChangesPanel extends JPanel {
     private final ChangeOverviewChart chart = new ChangeOverviewChart();
     private final JLabel count = new JLabel(" ");
     private final Timer refreshTimer;
+    private String appliedQuery = "";
 
     PriceChangesPanel(PriceMonitoringTaskService service, PriceChangePrintHistoryRepository printHistory,
                       HistoryOpener openHistory, ChangedLabelsQueueHandler queueChangedLabels) {
@@ -97,10 +98,10 @@ final class PriceChangesPanel extends JPanel {
         path.setToolTipText(service.databasePath().toString());
         footer.add(path, BorderLayout.SOUTH);
         add(footer, BorderLayout.SOUTH);
-        search.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            @Override public void insertUpdate(javax.swing.event.DocumentEvent event) { refresh(); }
-            @Override public void removeUpdate(javax.swing.event.DocumentEvent event) { refresh(); }
-            @Override public void changedUpdate(javax.swing.event.DocumentEvent event) { refresh(); }
+        search.setToolTipText("Артикул, название, штрихкод или полный скан. Нажмите Enter для поиска по всей истории (до 1000 результатов).");
+        search.addActionListener(event -> {
+            appliedQuery = search.getText().trim();
+            refresh();
         });
         priceType.addActionListener(event -> refresh());
         priceNumber.addActionListener(event -> refresh());
@@ -160,17 +161,19 @@ final class PriceChangesPanel extends JPanel {
                 if (value instanceof ChangeRow row) selectedRows.add(row.selectionKey());
             }
             table.clearSelection();
-            String query = search.getText().trim().toLowerCase(Locale.ROOT);
-            String barcodeQuery = BarInput.barcode(query).orElse("").toLowerCase(Locale.ROOT);
+            String rawQuery = appliedQuery;
+            String barcodeQuery = BarInput.barcode(rawQuery).orElse("").trim();
+            String query = (barcodeQuery.isEmpty() ? rawQuery : barcodeQuery).toLowerCase(Locale.ROOT);
             PriceFilter filter = (PriceFilter) priceType.getSelectedItem();
             int selectedNumber = priceNumber.getSelectedIndex();
             List<ChangeRow> visible = new ArrayList<>();
-            List<PriceMonitoringTaskService.PriceChange> changes = service.recentChanges(1000);
-            chart.setChanges(changes);
+            double chartFrom = LocalDate.now().minusDays(5).atStartOfDay(ZoneId.systemDefault())
+                    .toEpochSecond();
+            List<PriceMonitoringTaskService.PriceChange> chartChanges = service.changesSince(chartFrom);
+            chart.setChanges(chartChanges);
+            List<PriceMonitoringTaskService.PriceChange> changes = query.isEmpty()
+                    ? service.recentChanges(1000) : service.recentChanges(1000, query);
             for (var change : changes) {
-                String searchable = (change.marking() + " " + change.name() + " " + change.barcode()).toLowerCase(Locale.ROOT);
-                if (!query.isEmpty() && !searchable.contains(query)
-                        && (barcodeQuery.isEmpty() || !change.barcode().toLowerCase(Locale.ROOT).contains(barcodeQuery))) continue;
                 appendChangedPrices(visible, change, readJson(change.oldPricesJson()), readJson(change.newPricesJson()),
                         filter, selectedNumber);
             }
@@ -185,8 +188,10 @@ final class PriceChangesPanel extends JPanel {
                     if (viewRow >= 0) table.addRowSelectionInterval(viewRow, viewRow);
                 }
             }
-            count.setText("Показано изменений цен: " + visible.size()
-                    + (changes.size() >= 1000 ? " · просмотрены последние 1000 событий" : ""));
+            count.setText("Показано строк: " + visible.size() + " · найдено событий: " + changes.size()
+                    + (query.isEmpty() ? " · последние события" : " · поиск по всей истории")
+                    + (changes.size() >= 1000 ? " · отображены последние 1000 результатов" : "")
+                    + " · график: " + chartChanges.size() + " событий за 6 дней");
         } catch (SQLException error) { count.setText("Не удалось загрузить историю: " + error.getMessage()); }
     }
 
@@ -246,7 +251,7 @@ final class PriceChangesPanel extends JPanel {
         private List<PriceMonitoringTaskService.PriceChange> changes = List.of();
 
         private ChangeOverviewChart() {
-            setBorder(BorderFactory.createTitledBorder("Обзор изменений цен · последние 7 дней"));
+            setBorder(BorderFactory.createTitledBorder("Суммы событий по дням · последние 6 дней"));
             setPreferredSize(new java.awt.Dimension(600, 155));
             setMinimumSize(new java.awt.Dimension(300, 100));
         }
@@ -264,11 +269,11 @@ final class PriceChangesPanel extends JPanel {
                 int left = 45, right = getWidth() - 15, top = 24, bottom = getHeight() - 27;
                 if (right <= left || bottom <= top) return;
                 LocalDate today = LocalDate.now();
-                int[] totals = new int[7];
+                int[] totals = new int[6];
                 ZoneId zone = ZoneId.systemDefault();
                 for (var change : changes) {
                     LocalDate day = Instant.ofEpochMilli((long) (change.detectedAt() * 1000)).atZone(zone).toLocalDate();
-                    long offset = java.time.temporal.ChronoUnit.DAYS.between(today.minusDays(6), day);
+                    long offset = java.time.temporal.ChronoUnit.DAYS.between(today.minusDays(5), day);
                     if (offset >= 0 && offset < totals.length) totals[(int) offset]++;
                 }
                 int max = java.util.Arrays.stream(totals).max().orElse(0);
@@ -295,7 +300,7 @@ final class PriceChangesPanel extends JPanel {
                     g.setColor(chartForeground());
                     g.drawString(number, x + (barWidth - g.getFontMetrics().stringWidth(number)) / 2, Math.max(top + 9, y - 3));
                     g.setFont(new Font("DejaVu Sans", Font.PLAIN, 8));
-                    String day = today.minusDays(6L - i).format(DateTimeFormatter.ofPattern("dd.MM"));
+                    String day = today.minusDays(5L - i).format(DateTimeFormatter.ofPattern("dd.MM"));
                     g.drawString(day, x + (barWidth - g.getFontMetrics().stringWidth(day)) / 2, getHeight() - 8);
                 }
                 g.setColor(chartForeground());
