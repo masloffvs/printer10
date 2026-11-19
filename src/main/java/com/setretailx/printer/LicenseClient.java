@@ -34,6 +34,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.EnumSet;
 import java.util.Locale;
+import java.util.Properties;
 import java.util.UUID;
 
 /** Performs the signed, encrypted license lease handshake before opening application data. */
@@ -46,8 +47,25 @@ final class LicenseClient {
     private static final Path DEVICE_PUBLIC = LICENSE_DIR.resolve("device-ed25519.pub");
     private static final Path CACHED_LEASE = LICENSE_DIR.resolve("lease.json");
     private static final Path CLOCK_FILE = LICENSE_DIR.resolve("last-clock.txt");
+    private static final boolean CHECK_ENABLED = loadCheckEnabled();
 
     private LicenseClient() { }
+
+    static boolean isCheckEnabled() {
+        return CHECK_ENABLED;
+    }
+
+    private static boolean loadCheckEnabled() {
+        Properties properties = new Properties();
+        try (var input = LicenseClient.class.getResourceAsStream("/license.properties")) {
+            if (input == null) return true;
+            properties.load(input);
+            return Boolean.parseBoolean(properties.getProperty("enabled", "true"));
+        } catch (IOException error) {
+            System.err.println("Не удалось прочитать настройки проверки лицензии; проверка остаётся включённой.");
+            return true;
+        }
+    }
 
     static void check() throws LicenseException {
         check(true);

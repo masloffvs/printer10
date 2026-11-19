@@ -27,7 +27,7 @@ jobs:
           cache: maven
 
       - name: Build application
-        run: mvn --batch-mode --no-transfer-progress clean package
+        run: mvn --batch-mode --no-transfer-progress -Plicense-disabled clean package
 
       - name: Package portable app and installer
         shell: pwsh

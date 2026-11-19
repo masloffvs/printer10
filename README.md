@@ -23,6 +23,8 @@ Before opening application databases, the app validates its license with the lic
 
 For local development, see `license-server-local/README.md`. The `license-server-local/` directory is Git-ignored; its keys and no-TLS HTTP server are for local testing only and must not be exposed to a network. Configure the production URL and pinned public keys in `.env` using `SETRETAILX_LICENSE_URL`, `SETRETAILX_LICENSE_ENCRYPTION_KEY_FILE`, `SETRETAILX_LICENSE_VERIFY_KEY_FILE`, and `SETRETAILX_LICENSE_KEY`.
 
+The temporary Windows CI artifacts are built with `-Plicense-disabled`, so they skip both startup license checks and background lease renewal. Standard builds keep license verification enabled. Remove this profile from `.github/workflows/windows-build.yml` to restore enforcement in Windows artifacts; do not distribute bypass builds as licensed production releases.
+
 ## Parent and child nodes
 
 Set `SETRETAILX_NODE_ROLE=parent` on the single parent PC and `SETRETAILX_NODE_ROLE=child` on each child in `.env` (or the process environment). The parent is the intended source of truth; children initiate synchronization and can bind to only one parent identity. Discovery and encrypted peer transport use TCP/UDP port `45873`; allow it only on trusted private networks. The first encrypted connection displays the remote Ed25519 SHA-256 fingerprint and requires explicit approval; compare it with the other computer through a separate trusted channel. Identity, parent binding, and trust records are stored under `~/.setretailx/peer-mesh` (or the equivalent user home directory).

@@ -41,7 +41,7 @@ public final class PrinterApp {
         new SwingWorker<ProductRepository.StartupSummary, ProductRepository.StartupProgress>() {
             @Override
             protected ProductRepository.StartupSummary doInBackground() throws Exception {
-                LicenseClient.check();
+                if (LicenseClient.isCheckEnabled()) LicenseClient.check();
                 DatabaseMigrator.migrateAll();
                 return products.prepareForStartup(progress -> publish(progress));
             }
@@ -65,7 +65,7 @@ public final class PrinterApp {
                     MainWindow mainWindow = new MainWindow();
                     splash.dispose();
                     mainWindow.setVisible(true);
-                    monitorLicense(mainWindow);
+                    if (LicenseClient.isCheckEnabled()) monitorLicense(mainWindow);
                 } catch (Exception error) {
                     Throwable cause = error;
                     while (cause.getCause() != null) cause = cause.getCause();
