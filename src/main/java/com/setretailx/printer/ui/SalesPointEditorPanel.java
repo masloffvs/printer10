@@ -13,13 +13,17 @@ import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
+import javax.swing.JMenuItem;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -94,6 +98,24 @@ final class SalesPointEditorPanel extends JPanel {
         add(top, BorderLayout.NORTH);
         table.setFillsViewportHeight(true);
         table.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        JPopupMenu shelfMenu = new JPopupMenu();
+        JMenuItem sendToComparison = new JMenuItem("Отправить выбранные ценники на сверку");
+        sendToComparison.addActionListener(event -> forcedCheckHandler.accept(selectedItems()));
+        shelfMenu.add(sendToComparison);
+        table.addMouseListener(new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent event) { showShelfMenu(event); }
+            @Override public void mouseReleased(MouseEvent event) { showShelfMenu(event); }
+
+            private void showShelfMenu(MouseEvent event) {
+                if (!event.isPopupTrigger()) return;
+                int row = table.rowAtPoint(event.getPoint());
+                if (row < 0) return;
+                if (!table.isRowSelected(row)) {
+                    table.setRowSelectionInterval(row, row);
+                }
+                shelfMenu.show(table, event.getX(), event.getY());
+            }
+        });
         add(new JScrollPane(table), BorderLayout.CENTER);
         add(actions, BorderLayout.SOUTH);
         refreshPoints();
