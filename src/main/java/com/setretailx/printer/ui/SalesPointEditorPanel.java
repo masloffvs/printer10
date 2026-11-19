@@ -76,9 +76,11 @@ final class SalesPointEditorPanel extends JPanel {
         remove.addActionListener(event -> removeItem());
         JButton refreshItems = new JButton("Обновить ценники");
         refreshItems.addActionListener(event -> refreshItems());
-        JButton checkHistory = new JButton("Проверить историю цен");
+        JButton checkHistory = new JButton("Изменения за 24 часа");
+        checkHistory.setToolTipText("Показать цены до и после по обновлениям за последние 24 часа");
         checkHistory.addActionListener(event -> historyCheckHandler.accept(selectedItems()));
-        JButton forceCheck = new JButton("Принудительно сверить");
+        JButton forceCheck = new JButton("Сверить с фактическими ценами");
+        forceCheck.setToolTipText("Сравнить цены ценников с фактическими ценами товаров");
         forceCheck.addActionListener(event -> forcedCheckHandler.accept(selectedItems()));
         actions.add(add);
         actions.add(remove);

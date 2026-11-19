@@ -36,6 +36,7 @@ import javax.swing.SwingWorker;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Component;
 import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.print.PageFormat;
@@ -560,55 +561,136 @@ public final class MainWindow extends JFrame {
 
     private void checkSalesPointPriceHistory(List<ShelfItem> shelfItems) {
         if (shelfItems == null || shelfItems.isEmpty()) return;
-        status.setText("Проверяем историю изменения ценников…");
+        long since = System.currentTimeMillis() / 1000L - 24 * 60 * 60;
+        status.setText("Проверяем обновления цен за последние 24 часа…");
         runBackground(() -> {
-            List<ChangedShelfProduct> changed = new ArrayList<>();
+            List<RecentShelfChange> changed = new ArrayList<>();
             for (ShelfItem item : shelfItems) {
                 List<PriceMonitoringTaskService.PriceChange> changes = taskService.priceChangesSince(
-                        item.article(), item.updatedAt() / 1000.0);
+                        item.article(), since);
                 if (changes.isEmpty()) continue;
+                PriceMonitoringTaskService.PriceChange latest = changes.get(0);
+                PriceMonitoringTaskService.PriceChange earliest = changes.get(changes.size() - 1);
                 Product product = products.findByMarking(item.article());
-                if (product == null && !changes.get(0).barcode().isBlank()) {
-                    product = parentApiClient.searchOnlineProduct(changes.get(0).barcode()).orElse(null);
+                if (product == null && !latest.barcode().isBlank()) {
+                    product = parentApiClient.searchOnlineProduct(latest.barcode()).orElse(null);
                 }
-                changed.add(new ChangedShelfProduct(item, changes.size(), product));
+                changed.add(new RecentShelfChange(item, earliest, latest, product));
             }
             return changed;
         }, changed -> {
             if (changed.isEmpty()) {
-                status.setText("Проверено ценников: " + shelfItems.size() + ". Изменений в истории нет — всё хорошо.");
+                status.setText("За последние 24 часа изменений цен не найдено.");
                 JOptionPane.showMessageDialog(this,
-                        "Проверено ценников: " + shelfItems.size() + ".\nИзменений цен после последнего обновления не найдено — всё хорошо.",
-                        "История цен торговой точки", JOptionPane.INFORMATION_MESSAGE);
+                        "Проверено ценников: " + shelfItems.size()
+                                + ".\nЗа последние 24 часа в истории обновлений изменения цен не найдены.",
+                        "Изменения цен за 24 часа", JOptionPane.INFORMATION_MESSAGE);
                 return;
             }
-            long queueable = changed.stream().filter(item -> item.product() != null).count();
-            StringBuilder message = new StringBuilder("Найдены изменения цен после обновления ценника:\n\n");
-            for (ChangedShelfProduct entry : changed) {
-                message.append("• ").append(entry.shelfItem().article()).append(" — ")
-                        .append(entry.shelfItem().name().isBlank() ? "без названия" : entry.shelfItem().name())
-                        .append(" (событий: ").append(entry.changeCount()).append(")")
-                        .append(entry.product() == null ? " · товар не найден для очереди" : "")
-                        .append('\n');
-            }
-            message.append("\nДобавить найденные товары в очередь печати? (доступно: ")
-                    .append(queueable).append(')');
-            int answer = JOptionPane.showConfirmDialog(this, message.toString(), "Изменения цен",
-                    JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
-            if (answer == JOptionPane.YES_OPTION) {
-                int queued = 0;
-                for (ChangedShelfProduct entry : changed) {
-                    if (entry.product() == null) continue;
-                    entries.add(new QueueEntry(entry.product()));
-                    queued++;
+            showRecentSalesPointChanges(changed, shelfItems.size());
+        }, error -> status.setText("Не удалось проверить историю цен за 24 часа: " + error));
+    }
+
+    private void showRecentSalesPointChanges(List<RecentShelfChange> changes, int checkedCount) {
+        String[] columns = {"Артикул", "Товар", "Время", "Было · обычная / акция",
+                "Стало · обычная / акция", "Δ обычная", "Δ акция"};
+        javax.swing.table.DefaultTableModel model = new javax.swing.table.DefaultTableModel(columns, 0) {
+            @Override public boolean isCellEditable(int row, int column) { return false; }
+        };
+        for (RecentShelfChange row : changes) {
+            PricePair before = pricesFromJson(row.earliest().oldPricesJson());
+            PricePair after = pricesFromJson(row.latest().newPricesJson());
+            String name = row.shelfItem().name().isBlank() ? row.latest().name() : row.shelfItem().name();
+            if (row.product() == null) name += " · товар не найден, печать недоступна";
+            String time = java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")
+                    .withZone(java.time.ZoneId.systemDefault())
+                    .format(java.time.Instant.ofEpochMilli((long) (row.latest().detectedAt() * 1000)));
+            model.addRow(new Object[]{row.shelfItem().article(), name, time,
+                    before.regular() + " / " + before.promo(), after.regular() + " / " + after.promo(),
+                    priceDelta(before.regular(), after.regular()), priceDelta(before.promo(), after.promo())});
+        }
+        javax.swing.JTable table = new javax.swing.JTable(model);
+        table.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        table.setAutoCreateRowSorter(true);
+        table.setFillsViewportHeight(true);
+        table.setRowHeight(24);
+        javax.swing.table.DefaultTableCellRenderer deltaRenderer = new javax.swing.table.DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(javax.swing.JTable target, Object value,
+                    boolean selected, boolean focus, int row, int column) {
+                super.getTableCellRendererComponent(target, value, selected, focus, row, column);
+                if (!selected && value != null) {
+                    String delta = value.toString();
+                    setForeground(delta.startsWith("+") ? new Color(190, 35, 35)
+                            : delta.startsWith("−") ? new Color(20, 125, 65)
+                            : javax.swing.UIManager.getColor("Table.foreground"));
                 }
-                refreshQueue();
-                status.setText("Добавлено в очередь: " + queued + " ценников с изменившимися ценами.");
-                log("По истории изменений цен в очередь добавлено ценников: " + queued);
-            } else {
-                status.setText("Найдено изменившихся ценников: " + changed.size() + ". В очередь не добавляли.");
+                return this;
             }
-        }, error -> status.setText("Не удалось проверить историю цен: " + error));
+        };
+        table.getColumnModel().getColumn(5).setCellRenderer(deltaRenderer);
+        table.getColumnModel().getColumn(6).setCellRenderer(deltaRenderer);
+        for (int i = 0; i < changes.size(); i++) {
+            if (changes.get(i).product() != null) table.addRowSelectionInterval(i, i);
+        }
+        javax.swing.JScrollPane scroll = new javax.swing.JScrollPane(table);
+        scroll.setPreferredSize(new java.awt.Dimension(1080, Math.min(420, 100 + changes.size() * 26)));
+        javax.swing.JPanel content = new javax.swing.JPanel(new BorderLayout(0, 8));
+        content.add(new javax.swing.JLabel("Обновления за последние 24 часа · проверено ценников: " + checkedCount
+                + ". Рост выделен красным, снижение — зелёным. Выберите ценники для очереди печати."),
+                BorderLayout.NORTH);
+        content.add(scroll, BorderLayout.CENTER);
+        int answer = JOptionPane.showConfirmDialog(this, content,
+                "Изменения цен торговой точки · последние 24 часа",
+                JOptionPane.YES_NO_OPTION, JOptionPane.INFORMATION_MESSAGE);
+        if (answer == JOptionPane.YES_OPTION) {
+            int queued = 0;
+            for (int viewRow : table.getSelectedRows()) {
+                int modelRow = table.convertRowIndexToModel(viewRow);
+                RecentShelfChange entry = changes.get(modelRow);
+                if (entry.product() == null) continue;
+                entries.add(new QueueEntry(entry.product()));
+                queued++;
+            }
+            refreshQueue();
+            if (queued > 0) workspace.showWindow("queue");
+            status.setText("Добавлено в очередь: " + queued + " ценников с изменившимися ценами.");
+            log("По изменениям цен за 24 часа в очередь добавлено ценников: " + queued);
+        } else {
+            status.setText("Найдено изменившихся ценников за 24 часа: " + changes.size()
+                    + ". В очередь не добавляли.");
+        }
+    }
+
+    private static PricePair pricesFromJson(String json) {
+        try {
+            com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(json == null ? "{}" : json);
+            return new PricePair(finalPrice(root.path("pricesMap")), finalPrice(root.path("prices99Map")));
+        } catch (Exception ignored) {
+            return new PricePair("—", "—");
+        }
+    }
+
+    private static String finalPrice(com.fasterxml.jackson.databind.JsonNode prices) {
+        for (String key : new String[]{"4", "2"}) {
+            com.fasterxml.jackson.databind.JsonNode value = prices.path(key);
+            if (value.isObject()) value = value.path("value");
+            if (value.isMissingNode() || value.isNull() || value.asText().isBlank()) continue;
+            try { return new java.math.BigDecimal(value.asText()).stripTrailingZeros().toPlainString().replace('.', ','); }
+            catch (NumberFormatException ignored) { return value.asText(); }
+        }
+        return "—";
+    }
+
+    private static String priceDelta(String before, String after) {
+        if ("—".equals(before) || "—".equals(after)) return "—";
+        try {
+            java.math.BigDecimal delta = new java.math.BigDecimal(after.replace(',', '.'))
+                    .subtract(new java.math.BigDecimal(before.replace(',', '.')));
+            if (delta.signum() == 0) return "0";
+            return (delta.signum() > 0 ? "+" : "−")
+                    + delta.abs().stripTrailingZeros().toPlainString().replace('.', ',');
+        } catch (NumberFormatException ignored) { return "—"; }
     }
 
     private void forceSalesPointPriceCheck(List<ShelfItem> shelfItems) {
@@ -642,7 +724,9 @@ public final class MainWindow extends JFrame {
         }, error -> status.setText("Не удалось выполнить принудительную сверку: " + error));
     }
 
-    private record ChangedShelfProduct(ShelfItem shelfItem, int changeCount, Product product) { }
+    private record RecentShelfChange(ShelfItem shelfItem, PriceMonitoringTaskService.PriceChange earliest,
+                                     PriceMonitoringTaskService.PriceChange latest, Product product) { }
+    private record PricePair(String regular, String promo) { }
     private record ForcedShelfScan(ShelfItem shelfItem, Product product) { }
     private record SalesPointBarcodeItem(Product product, PriceMonitoringTaskService.ShelfPrice price) { }
     private record ScannedPrintProduct(Product product, PrintHistoryEntry previousPrint) { }
