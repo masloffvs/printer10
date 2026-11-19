@@ -12,4 +12,9 @@ all_products.sqlite
 .env
 .env.*
 !.env.example
-license-server-local/
+license-server-local/*
+!license-server-local/README.md
+!license-server-local/server.js
+!license-server-local/generate-keys.js
+!license-server-local/cloudflare-worker/
+!license-server-local/cloudflare-worker/**

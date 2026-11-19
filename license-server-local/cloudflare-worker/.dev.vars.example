@@ -1,0 +1,3 @@
+# Copy to .dev.vars locally and populate with PEM contents. Never commit .dev.vars.
+LICENSE_ENCRYPTION_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+LICENSE_SIGNING_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
