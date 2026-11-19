@@ -71,6 +71,7 @@ public final class PeerMeshService implements AutoCloseable {
     private final AppConfig.NodeRole nodeRole;
     private volatile String peerName;
     private volatile boolean closed;
+    private volatile String networkBindWarning = "";
     private ServerSocket server;
     private DatagramSocket discoverySocket;
 
@@ -102,6 +103,7 @@ public final class PeerMeshService implements AutoCloseable {
     public int port() { return PORT; }
     public Map<String, Peer> peers() { return Map.copyOf(peers); }
     public String parentNodeId() { return parentNodeId; }
+    public String networkBindWarning() { return networkBindWarning; }
 
     public void configureParentApi(ParentApiService service) {
         if (nodeRole != AppConfig.NodeRole.PARENT)
@@ -153,16 +155,45 @@ public final class PeerMeshService implements AutoCloseable {
     public boolean isTrusted(String id) { return trustedKeys.containsKey(id); }
 
     private void startNetwork() throws IOException {
-        server = new ServerSocket();
-        server.setReuseAddress(true);
-        server.bind(new InetSocketAddress("0.0.0.0", PORT));
-        discoverySocket = new DatagramSocket(null);
-        discoverySocket.setReuseAddress(true);
-        discoverySocket.bind(new InetSocketAddress(PORT));
+        try {
+            bindNetwork(InetAddress.getByName("0.0.0.0"));
+        } catch (IOException allInterfacesError) {
+            try {
+                bindNetwork(InetAddress.getByName("127.0.0.1"));
+                networkBindWarning = "Не удалось привязать peer-сервер к 0.0.0.0:"
+                        + PORT + ". Он запущен только на 127.0.0.1; связь с другими ПК недоступна. Причина: "
+                        + safeMessage(allInterfacesError);
+            } catch (IOException loopbackError) {
+                loopbackError.addSuppressed(allInterfacesError);
+                throw new IOException("Не удалось запустить peer-сервер ни на 0.0.0.0, ни на 127.0.0.1:"
+                        + PORT + ". " + safeMessage(loopbackError), loopbackError);
+            }
+        }
         workers.execute(this::acceptLoop);
         workers.execute(this::discoveryLoop);
         workers.scheduleWithFixedDelay(this::announce, 1, 4, TimeUnit.SECONDS);
         workers.scheduleWithFixedDelay(this::expirePeers, 5, 5, TimeUnit.SECONDS);
+    }
+
+    private void bindNetwork(InetAddress address) throws IOException {
+        ServerSocket tcp = new ServerSocket();
+        DatagramSocket udp = new DatagramSocket(null);
+        try {
+            tcp.setReuseAddress(true);
+            tcp.bind(new InetSocketAddress(address, PORT));
+            udp.setReuseAddress(true);
+            udp.bind(new InetSocketAddress(address, PORT));
+            server = tcp;
+            discoverySocket = udp;
+        } catch (IOException error) {
+            try { tcp.close(); } catch (IOException ignored) { }
+            udp.close();
+            throw error;
+        }
+    }
+
+    private static String safeMessage(Exception error) {
+        return error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
     }
 
     private void announce() {

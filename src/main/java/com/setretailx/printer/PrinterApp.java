@@ -65,6 +65,7 @@ public final class PrinterApp {
                     MainWindow mainWindow = new MainWindow();
                     splash.dispose();
                     mainWindow.setVisible(true);
+                    SwingUtilities.invokeLater(mainWindow::promptParentLogin);
                     if (LicenseClient.isCheckEnabled()) monitorLicense(mainWindow);
                 } catch (Exception error) {
                     Throwable cause = error;

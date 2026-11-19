@@ -101,11 +101,23 @@ public final class ParentApiClient {
 
     public PrintGroupResponseDto printGroup(AppConfig.PrintFormat format, int amountToPrint,
                                             List<PrintGroupItemDto> items) throws Exception {
-        ObjectNode request = authenticated("printing.printGroup");
+        ObjectNode request = request("printing.printGroup");
+        if (peers.nodeRole() != AppConfig.NodeRole.PARENT) {
+            if (token.isBlank()) throw new ParentAccessService.AccessDeniedException("Сначала войдите в систему.");
+            request.put("token", token);
+        }
         request.put("format", format == null ? "" : format.key());
         request.put("amount", amountToPrint);
         request.set("items", JSON.valueToTree(items == null ? List.of() : items));
-        JsonNode result = call(request).path("result");
+        JsonNode response;
+        if (peers.nodeRole() == AppConfig.NodeRole.PARENT) {
+            if (local == null) throw new IllegalStateException("Локальный parent API не настроен.");
+            response = local.dispatchLocal(request);
+            if (!response.path("ok").asBoolean(true)) throw apiError(response);
+        } else {
+            response = call(request);
+        }
+        JsonNode result = response.path("result");
         return JSON.treeToValue(result, PrintGroupResponseDto.class);
     }
 

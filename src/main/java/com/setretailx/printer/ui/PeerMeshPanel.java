@@ -73,6 +73,11 @@ final class PeerMeshPanel extends JPanel {
         fields.add(new JLabel("Имя в сети и порт TCP/UDP: " + service.peerName() + " · " + service.port()));
         fields.add(new JLabel("ID: " + service.nodeId()));
         fields.add(new JLabel("Fingerprint Ed25519: " + service.fingerprint()));
+        if (!service.networkBindWarning().isBlank()) {
+            JLabel warning = new JLabel("Предупреждение: " + service.networkBindWarning());
+            warning.setForeground(javax.swing.UIManager.getColor("Component.error.focusedBorderColor"));
+            fields.add(warning);
+        }
         JPanel edit = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         name.setText(service.peerName());
         JButton save = new JButton("Сохранить имя");
@@ -105,7 +110,8 @@ final class PeerMeshPanel extends JPanel {
         model.setPeers(peers);
         boolean child = service.nodeRole() == AppConfig.NodeRole.CHILD;
         sync.setEnabled(child && peers.stream().anyMatch(peer -> peer.role().equals("parent")));
-        if (peers.isEmpty()) status.setText("Узлы пока не найдены. Проверьте, что ПК в одной подсети и UDP/TCP-порт 45873 разрешён в firewall.");
+        if (!service.networkBindWarning().isBlank()) status.setText(service.networkBindWarning());
+        else if (peers.isEmpty()) status.setText("Узлы пока не найдены. Проверьте, что ПК в одной подсети и UDP/TCP-порт 45873 разрешён в firewall.");
         else if (!child) status.setText("Родительский ПК принимает дочерние узлы; синхронизацию запускают на дочернем ПК.");
     }
 

@@ -25,6 +25,17 @@ public final class ParentApiService {
 
     /** Dispatches a small JSON request. Authentication is handled here, not by peer trust. */
     public ObjectNode dispatch(JsonNode request) throws Exception {
+        return dispatch(request, false);
+    }
+
+    /** Dispatches a request made directly by the parent application's local UI. */
+    public ObjectNode dispatchLocal(JsonNode request) throws Exception {
+        if (AppConfig.nodeRole() != AppConfig.NodeRole.PARENT)
+            throw new SecurityException("Локальное разрешение доступно только на родительском ПК.");
+        return dispatch(request, true);
+    }
+
+    private ObjectNode dispatch(JsonNode request, boolean localParentRequest) throws Exception {
         if (request == null || !request.isObject() || request.path("apiVersion").asInt(-1) != API_VERSION)
             throw new IllegalArgumentException("Неизвестная версия parent API.");
         String operation = request.path("operation").asText("");
@@ -81,7 +92,7 @@ public final class ParentApiService {
                 response.set("products", JSON.valueToTree(await(tasks.connector().getProducts(markings, shelf))));
             }
             case "printing.printGroup" -> {
-                require(request, AccountRepository.Permission.SHARED_DATA_WRITE);
+                if (!localParentRequest) require(request, AccountRepository.Permission.SHARED_DATA_WRITE);
                 AppConfig.PrintFormat format = AppConfig.formatByKey(request.path("format").asText(""));
                 if (format == null) throw new IllegalArgumentException("Неизвестный формат печати.");
                 int amount = request.path("amount").asInt(1);

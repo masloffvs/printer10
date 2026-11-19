@@ -116,7 +116,6 @@ public final class MainWindow extends JFrame {
             new ChangedLabelPrintHistoryPanel(changedLabelPrintHistory),
             new PriceChangePrintHistoryPanel(priceChangePrintHistory));
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
-    private List<Product> searchResults = new ArrayList<>();
     private boolean printInProgress;
 
     public MainWindow() {
@@ -128,6 +127,10 @@ public final class MainWindow extends JFrame {
         setLocationRelativeTo(null);
         setJMenuBar(workspace.createMenuBar(this::dispose, this::showAbout));
         if (parentApi != null) peerMeshService.configureParentApi(parentApi);
+        if (!peerMeshService.networkBindWarning().isBlank()) {
+            status.setText(peerMeshService.networkBindWarning());
+            log(peerMeshService.networkBindWarning());
+        }
         comparison.setMismatchHandler(this::enqueueMismatchedProduct);
         salesPointEditorPanel.setHistoryCheckHandler(this::checkSalesPointPriceHistory);
         salesPointEditorPanel.setForcedCheckHandler(this::forceSalesPointPriceCheck);
@@ -192,6 +195,43 @@ public final class MainWindow extends JFrame {
                 peerMeshService.close();
             }
         });
+    }
+
+    public void promptParentLogin() {
+        if (parentApiClient.isLoggedIn() || accountRepository == null) return;
+        try {
+            if (accountRepository.countAccounts() == 0) return;
+        } catch (java.sql.SQLException error) {
+            JOptionPane.showMessageDialog(this, "Не удалось проверить учётные записи: " + error.getMessage(),
+                    "Вход в родительский аккаунт", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        while (!parentApiClient.isLoggedIn()) {
+            javax.swing.JTextField username = new javax.swing.JTextField(22);
+            javax.swing.JPasswordField password = new javax.swing.JPasswordField(22);
+            javax.swing.JPanel form = new javax.swing.JPanel(new java.awt.GridLayout(0, 1, 4, 4));
+            form.add(new javax.swing.JLabel("Войдите в учётную запись родительского ПК."));
+            form.add(new javax.swing.JLabel("Имя пользователя:"));
+            form.add(username);
+            form.add(new javax.swing.JLabel("Пароль:"));
+            form.add(password);
+            int choice = JOptionPane.showConfirmDialog(this, form, "Вход в родительский аккаунт",
+                    JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+            if (choice != JOptionPane.OK_OPTION) return;
+            char[] secret = password.getPassword();
+            try {
+                parentApiClient.login(username.getText(), secret);
+                status.setText("Вход выполнен: " + username.getText().trim());
+                log("Выполнен вход в родительский аккаунт: " + username.getText().trim());
+            } catch (Exception error) {
+                JOptionPane.showMessageDialog(this,
+                        error.getMessage() == null ? error.toString() : error.getMessage(),
+                        "Не удалось войти", JOptionPane.ERROR_MESSAGE);
+            } finally {
+                java.util.Arrays.fill(secret, '\0');
+                password.setText("");
+            }
+        }
     }
 
     private void checkNetworkConnection() {
@@ -626,7 +666,6 @@ public final class MainWindow extends JFrame {
             return parentApiClient.searchOnlineProduct(lookup).map(List::of).orElseGet(List::of);
         }, results -> {
             search.setSearchEnabled(true);
-            searchResults = new ArrayList<>(results);
             search.showResults(results);
             search.setStatus("Найдено товаров: " + results.size());
         }, error -> {
@@ -824,12 +863,10 @@ public final class MainWindow extends JFrame {
     }
 
     private void addSelectedSearchResults() {
-        int selectedCount = search.selectedCount();
-        for (int row : search.selectedRows()) {
-            if (row >= 0 && row < searchResults.size()) entries.add(new QueueEntry(searchResults.get(row)));
-        }
+        List<Product> selectedProducts = search.selectedProducts();
+        for (Product product : selectedProducts) entries.add(new QueueEntry(product));
         refreshQueue();
-        status.setText("Добавлено товаров в очередь: " + selectedCount);
+        status.setText("Добавлено товаров в очередь: " + selectedProducts.size());
     }
 
     private void showProductCard(Product product) {

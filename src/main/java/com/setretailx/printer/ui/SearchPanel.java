@@ -293,9 +293,12 @@ final class SearchPanel extends JPanel {
     String query() { return input.getText().trim(); }
     boolean advancedSearch() { return advancedSearch.isSelected(); }
     void setQuery(String query) { input.setText(query); }
-    int[] selectedRows() {
+    List<Product> selectedProducts() {
         return java.util.Arrays.stream(table.getSelectedRows())
-                .map(table::convertRowIndexToModel).toArray();
+                .map(table::convertRowIndexToModel)
+                .filter(row -> row >= 0 && row < results.size())
+                .mapToObj(results::get)
+                .toList();
     }
     int selectedCount() { return table.getSelectedRowCount(); }
     DefaultTableModel model() { return model; }
