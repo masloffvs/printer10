@@ -454,7 +454,7 @@ final class OrderBuilderPanel extends JPanel {
     }
 
     private static final class OrderPrintable implements Printable {
-        private static final double HEAD = 54, TABLE_HEAD = 22, FOOTER = 88, ROW = 28;
+        private static final double HEAD = 46, TABLE_HEAD = 18, FOOTER = 80, ROW = 24;
         private final String name;
         private final List<PrintRow> rows;
         OrderPrintable(String name, List<PrintRow> rows) { this.name = name; this.rows = List.copyOf(rows); }
@@ -469,39 +469,54 @@ final class OrderBuilderPanel extends JPanel {
             try {
                 g.translate(page.getImageableX(), page.getImageableY());
                 g.setColor(Color.BLACK);
-                g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 15));
-                g.drawString("СБОРКА ЗАКАЗА", 0, 17);
-                g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8));
-                g.drawString(name, 0, 34);
-                g.drawString("ЛИСТ " + (pageIndex + 1) + "/" + pages.size(), (int) width - 55, 17);
-                g.drawLine(0, 43, (int) width, 43);
+                g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+                g.drawString("СБОРКА ЗАКАЗА", 0, 15);
+                g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 7));
+                g.drawString(name, 0, 29);
+                g.drawString("ЛИСТ " + (pageIndex + 1) + "/" + pages.size(), (int) width - 48, 15);
+                g.drawLine(0, 37, (int) width, 37);
                 double tableTop = HEAD;
                 double[] x = {0, width * .39, width * .53, width * .66, width * .80, width * .91};
                 double[] w = {width * .39, width * .14, width * .13, width * .14, width * .11, width * .09};
                 g.setColor(new Color(225, 229, 234));
                 g.fillRect(0, (int) tableTop, (int) width, (int) TABLE_HEAD);
                 g.setColor(Color.BLACK);
-                g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
+                g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 6));
                 String[] headings = {"ТОВАР / ПОТРЕБНОСТЬ", "SAP / ST", "АРТИКУЛ", "ШТРИХКОД", "ЦЕНА", "ОСТАТОК"};
-                for (int col = 0; col < headings.length; col++) g.drawString(headings[col], (int) x[col] + 2, (int) tableTop + 14);
+                for (int col = 0; col < headings.length; col++) g.drawString(headings[col], (int) x[col] + 2, (int) tableTop + 12);
                 for (int i = 0; i < pageRows.size(); i++) {
                     PrintRow row = pageRows.get(i);
                     int y = (int) (tableTop + TABLE_HEAD + i * ROW);
                     if (row.kind().equals("group")) {
-                        g.setColor(new Color(232, 236, 241)); g.fillRect(0, y, (int) width, (int) ROW);
-                        g.setColor(Color.BLACK); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 8));
-                        g.drawString("ГРУППА: " + clip(row.name(), width - 8, g), 4, y + 17); continue;
+                        g.setColor(new Color(221, 228, 236)); g.fillRect(0, y, (int) width, (int) ROW);
+                        g.setColor(new Color(76, 94, 116)); g.fillRect(0, y, 3, (int) ROW);
+                        g.setColor(Color.BLACK); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
+                        g.drawString("ГРУППА  /  " + clip(row.name(), width - 12, g), 7, y + 16); continue;
                     }
                     if (row.kind().equals("need")) {
-                        g.setColor(new Color(244, 239, 221)); g.fillRect(0, y, (int) width, (int) ROW);
-                        g.setColor(Color.BLACK); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 8));
-                        g.drawString("НУЖНО: " + clip(row.name(), width - 8, g), 4, y + 13);
-                        if (!row.comment().isBlank()) { g.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 7)); g.drawString("Сборщик: " + clip(row.comment(), width - 8, g), 12, y + 24); }
+                        g.setColor(new Color(247, 243, 230)); g.fillRect(0, y, (int) width, (int) ROW);
+                        g.setColor(new Color(166, 135, 66)); g.fillRect(8, y + 3, 2, (int) ROW - 6);
+                        g.setColor(Color.BLACK); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
+                        g.drawString("ПОТРЕБНОСТЬ  /  " + clip(row.name(), width - 20, g), 14, y + 10);
+                        if (!row.comment().isBlank()) {
+                            g.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 6));
+                            g.drawString("Сборщик: " + clip(row.comment(), width - 24, g), 18, y + 21);
+                        }
                         continue;
+                    }
+                    boolean candidate = row.kind().equals("candidate");
+                    if (candidate) {
+                        g.setColor(new Color(247, 249, 251));
+                        g.fillRect(12, y, (int) width - 12, (int) ROW);
+                        g.setColor(new Color(166, 177, 190));
+                        g.drawLine(15, y, 15, y + (int) ROW);
+                        g.drawLine(15, y + (int) ROW / 2, 21, y + (int) ROW / 2);
                     }
                     g.setColor(Color.BLACK);
                     g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 7));
-                    g.drawString(clip((row.kind().equals("candidate") ? "↳ " : "") + row.name(), w[0] - 4, g), (int) x[0] + 2, y + 11);
+                    int nameIndent = candidate ? 24 : 3;
+                    String prefix = candidate ? "↳ " : "• ";
+                    g.drawString(clip(prefix + row.name(), w[0] - nameIndent - 2, g), (int) x[0] + nameIndent, y + 10);
                     g.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 7));
                     String st = row.stCode();
                     g.drawString(clip(st, w[1] - 4, g), (int) x[1] + 2, y + 11);
@@ -511,17 +526,21 @@ final class OrderBuilderPanel extends JPanel {
                     g.drawString(row.price(), (int) x[4] + 2, y + 11);
                     g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
                     g.drawString(clip(row.stock(), w[5] - 4, g), (int) x[5] + 2, y + 11);
-                    if (!row.comment().isBlank()) { g.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 6)); g.drawString("Сборщик: " + clip(row.comment(), width - x[0] - 8, g), (int) x[0] + 8, y + 23); }
+                    if (!row.comment().isBlank()) {
+                        g.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 6));
+                        g.setColor(new Color(75, 75, 75));
+                        g.drawString("Сборщик: " + clip(row.comment(), width - x[0] - 10, g), (int) x[0] + nameIndent + 5, y + 21);
+                    }
                     g.setColor(new Color(210, 210, 210)); g.drawLine(0, y + (int) ROW, (int) width, y + (int) ROW);
                 }
-                int footerY = (int) (height - FOOTER + 3);
+                int footerY = (int) (height - FOOTER + 2);
                 g.setColor(Color.DARK_GRAY); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
                 g.drawString("SAP/ST-КОДЫ ЭТОГО ЛИСТА · " + codes.size(), 0, footerY);
                 if (!codes.isEmpty()) try {
                     String payload = String.join("\n", codes);
-                    var matrix = new MultiFormatWriter().encode(payload, BarcodeFormat.QR_CODE, 74, 74,
+                    var matrix = new MultiFormatWriter().encode(payload, BarcodeFormat.QR_CODE, 62, 62,
                             Map.of(EncodeHintType.MARGIN, 1));
-                    g.drawImage(MatrixToImageWriter.toBufferedImage(matrix), 0, footerY + 5, 74, 74, null);
+                    g.drawImage(MatrixToImageWriter.toBufferedImage(matrix), 0, footerY + 5, 62, 62, null);
                 } catch (Exception ignored) { }
                 return PAGE_EXISTS;
             } finally { g.dispose(); }
