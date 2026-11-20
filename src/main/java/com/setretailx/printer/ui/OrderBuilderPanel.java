@@ -464,7 +464,9 @@ final class OrderBuilderPanel extends JPanel {
             List<List<PrintRow>> pages = paginate(rows, perPage);
             if (pageIndex < 0 || pageIndex >= pages.size()) return NO_SUCH_PAGE;
             List<PrintRow> pageRows = pages.get(pageIndex);
-            List<String> codes = pageRows.stream().filter(row -> !row.stCode().isBlank()).map(PrintRow::stCode).distinct().toList();
+            List<PrintRow> qrRows = pageRows.stream()
+                    .filter(row -> !row.stCode().isBlank() || !row.article().isBlank() || !row.barcode().isBlank())
+                    .toList();
             Graphics2D g = (Graphics2D) graphics.create();
             try {
                 g.translate(page.getImageableX(), page.getImageableY());
@@ -528,9 +530,11 @@ final class OrderBuilderPanel extends JPanel {
                 }
                 int footerY = (int) (height - FOOTER + 2);
                 g.setColor(Color.DARK_GRAY); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
-                g.drawString("SAP/ST-КОДЫ ЭТОГО ЛИСТА · " + codes.size(), 0, footerY);
-                if (!codes.isEmpty()) try {
-                    String payload = String.join("\n", codes);
+                g.drawString("QR: SAP, АРТИКУЛ, ШК · " + qrRows.size(), 0, footerY);
+                if (!qrRows.isEmpty()) try {
+                    String payload = qrRows.stream()
+                            .map(row -> String.join(",", row.stCode(), row.article(), row.barcode()))
+                            .collect(java.util.stream.Collectors.joining("\n"));
                     var matrix = new MultiFormatWriter().encode(payload, BarcodeFormat.QR_CODE, 62, 62,
                             Map.of(EncodeHintType.MARGIN, 1));
                     g.drawImage(MatrixToImageWriter.toBufferedImage(matrix), 0, footerY + 5, 62, 62, null);
