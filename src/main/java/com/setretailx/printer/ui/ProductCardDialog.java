@@ -671,31 +671,23 @@ final class ProductCardDialog extends JPanel {
                 y = drawWrapped(g, normalizeText(description), x + 2, y + 10, width - 4, 12, paint) + 7;
             }
 
-            List<Map.Entry<String, String>> main = new ArrayList<>(), service = new ArrayList<>();
+            List<Map.Entry<String, String>> main = new ArrayList<>();
             for (Map.Entry<String, String> entry : product.details().entrySet()) {
                 String key = normalizeKey(entry.getKey());
-                if (HIDDEN_FIELDS.contains(key) || key.equals("catalogattributes") || entry.getValue().isBlank()) continue;
-                (isServiceField(key) ? service : main).add(entry);
+                if (HIDDEN_FIELDS.contains(key) || key.equals("catalogattributes") || isServiceField(key)
+                        || key.contains("json") || entry.getValue().isBlank()) continue;
+                main.add(entry);
             }
-            if (!main.isEmpty() || !service.isEmpty()) {
+            if (!main.isEmpty()) {
                 y = drawSection(g, "ХАРАКТЕРИСТИКИ", x, y, width, paint);
-                if (!main.isEmpty()) {
-                    y = drawSubheading(g, "Основные", y, width, paint);
-                    for (Map.Entry<String, String> entry : main) {
-                        String key = normalizeKey(entry.getKey());
-                        String value = key.equals("isadult")
-                                ? (entry.getValue().equals("1") || entry.getValue().equalsIgnoreCase("true") ? "Да" : "Нет")
-                                : normalizeText(entry.getValue());
-                        y = drawAttribute(g, LABELS.getOrDefault(key, humanize(entry.getKey())), value,
-                                y, width, BODY, BODY_BOLD, paint);
-                    }
-                }
-                if (!service.isEmpty()) {
-                    y = drawSubheading(g, "Служебные поля", y + 3, width, paint);
-                    for (Map.Entry<String, String> entry : service) {
-                        y = drawAttribute(g, LABELS.getOrDefault(normalizeKey(entry.getKey()), humanize(entry.getKey())),
-                                normalizeText(entry.getValue()), y, width, SERVICE, SERVICE, paint);
-                    }
+                y = drawSubheading(g, "Основные", y, width, paint);
+                for (Map.Entry<String, String> entry : main) {
+                    String key = normalizeKey(entry.getKey());
+                    String value = key.equals("isadult")
+                            ? (entry.getValue().equals("1") || entry.getValue().equalsIgnoreCase("true") ? "Да" : "Нет")
+                            : normalizeText(entry.getValue());
+                    y = drawAttribute(g, LABELS.getOrDefault(key, humanize(entry.getKey())), value,
+                            y, width, BODY, BODY_BOLD, paint);
                 }
             }
 
@@ -785,7 +777,7 @@ final class ProductCardDialog extends JPanel {
                     .filter(entry -> {
                         String key = normalizeKey(entry.getKey());
                         return !HIDDEN_FIELDS.contains(key) && !key.equals("catalogattributes")
-                                && !isServiceField(key) && !entry.getValue().isBlank();
+                                && !isServiceField(key) && !key.contains("json") && !entry.getValue().isBlank();
                     })
                     .limit(7)
                     .toList();
