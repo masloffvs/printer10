@@ -478,24 +478,19 @@ final class OrderBuilderPanel extends JPanel {
                 double tableTop = HEAD;
                 double[] x = {0, width * .39, width * .53, width * .66, width * .80, width * .91};
                 double[] w = {width * .39, width * .14, width * .13, width * .14, width * .11, width * .09};
-                g.setColor(new Color(225, 229, 234));
-                g.fillRect(0, (int) tableTop, (int) width, (int) TABLE_HEAD);
                 g.setColor(Color.BLACK);
                 g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 6));
                 String[] headings = {"ТОВАР / ПОТРЕБНОСТЬ", "SAP / ST", "АРТИКУЛ", "ШТРИХКОД", "ЦЕНА", "ОСТАТОК"};
                 for (int col = 0; col < headings.length; col++) g.drawString(headings[col], (int) x[col] + 2, (int) tableTop + 12);
+                g.drawLine(0, (int) (tableTop + TABLE_HEAD), (int) width, (int) (tableTop + TABLE_HEAD));
                 for (int i = 0; i < pageRows.size(); i++) {
                     PrintRow row = pageRows.get(i);
                     int y = (int) (tableTop + TABLE_HEAD + i * ROW);
                     if (row.kind().equals("group")) {
-                        g.setColor(new Color(221, 228, 236)); g.fillRect(0, y, (int) width, (int) ROW);
-                        g.setColor(new Color(76, 94, 116)); g.fillRect(0, y, 3, (int) ROW);
                         g.setColor(Color.BLACK); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
                         g.drawString("ГРУППА  /  " + clip(row.name(), width - 12, g), 7, y + 16); continue;
                     }
                     if (row.kind().equals("need")) {
-                        g.setColor(new Color(247, 243, 230)); g.fillRect(0, y, (int) width, (int) ROW);
-                        g.setColor(new Color(166, 135, 66)); g.fillRect(8, y + 3, 2, (int) ROW - 6);
                         g.setColor(Color.BLACK); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
                         g.drawString("ПОТРЕБНОСТЬ  /  " + clip(row.name(), width - 20, g), 14, y + 10);
                         if (!row.comment().isBlank()) {
@@ -506,9 +501,7 @@ final class OrderBuilderPanel extends JPanel {
                     }
                     boolean candidate = row.kind().equals("candidate");
                     if (candidate) {
-                        g.setColor(new Color(247, 249, 251));
-                        g.fillRect(12, y, (int) width - 12, (int) ROW);
-                        g.setColor(new Color(166, 177, 190));
+                        g.setColor(Color.BLACK);
                         g.drawLine(15, y, 15, y + (int) ROW);
                         g.drawLine(15, y + (int) ROW / 2, 21, y + (int) ROW / 2);
                     }
@@ -531,7 +524,7 @@ final class OrderBuilderPanel extends JPanel {
                         g.setColor(new Color(75, 75, 75));
                         g.drawString("Сборщик: " + clip(row.comment(), width - x[0] - 10, g), (int) x[0] + nameIndent + 5, y + 21);
                     }
-                    g.setColor(new Color(210, 210, 210)); g.drawLine(0, y + (int) ROW, (int) width, y + (int) ROW);
+                    g.setColor(Color.BLACK); g.drawLine(0, y + (int) ROW, (int) width, y + (int) ROW);
                 }
                 int footerY = (int) (height - FOOTER + 2);
                 g.setColor(Color.DARK_GRAY); g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 7));
