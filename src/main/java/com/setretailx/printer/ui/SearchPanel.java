@@ -220,6 +220,12 @@ final class SearchPanel extends JPanel {
         JMenuItem addToQueue = new JMenuItem("Добавить выбранные в очередь печати");
         addToQueue.addActionListener(event -> addSelected.run());
         contextMenu.add(addToQueue);
+        JMenuItem addToOrder = new JMenuItem("Добавить в сборку заказа…");
+        addToOrder.addActionListener(event -> {
+            List<Product> selected = selectedProducts();
+            if (!selected.isEmpty()) orderBuilderHandler.accept(selected);
+        });
+        contextMenu.add(addToOrder);
         int[] popupRow = {-1};
         JMenuItem openCard = new JMenuItem("Открыть карточку товара");
         openCard.addActionListener(event -> {
@@ -245,6 +251,12 @@ final class SearchPanel extends JPanel {
             @Override public void mousePressed(MouseEvent event) { showMenu(event); }
             @Override public void mouseReleased(MouseEvent event) { showMenu(event); }
         });
+    }
+
+    private Consumer<List<Product>> orderBuilderHandler = ignored -> { };
+
+    void setOrderBuilderHandler(Consumer<List<Product>> handler) {
+        orderBuilderHandler = handler == null ? ignored -> { } : handler;
     }
 
     private void resetFilters(Runnable search) {

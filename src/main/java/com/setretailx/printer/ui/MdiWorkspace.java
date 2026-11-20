@@ -40,6 +40,7 @@ final class MdiWorkspace extends JPanel {
             new WindowSpec("comparison", "Сверка ценников", "Сверка"),
             new WindowSpec("search", "Поиск товаров", "Поиск"),
             new WindowSpec("queue", "Печать ценников", "Печать ценников"),
+            new WindowSpec("orderBuilder", "Сборка заказа", "Сборка заказа"),
             new WindowSpec("exchange", "Обмен с SetRetailX", "Обмен"),
             new WindowSpec("apiExchangeLog", "Журнал обменов SetRetailX", "Логи API"),
             new WindowSpec("peerMesh", "Офисная peer-сеть", "Пиры"),
@@ -260,7 +261,7 @@ final class MdiWorkspace extends JPanel {
         toolBar.setRollover(true);
         toolBar.setToolTipText("Навигация по разделам и открытым окнам");
         toolBar.setBorder(javax.swing.BorderFactory.createEmptyBorder(8, 6, 8, 6));
-        addNavigationGroup("ТОВАРЫ", "scanner", "comparison", "search", "queue");
+        addNavigationGroup("ТОВАРЫ", "scanner", "comparison", "search", "queue", "orderBuilder");
         addNavigationGroup("СКЛАД", "storageAddresses", "addressCreate", "palletScanning", "storage", "addressSearch");
         addNavigationGroup("ТОРГОВЫЕ ТОЧКИ", "salesPointMap", "salesPointEditor", "salesPointChanges");
         addNavigationGroup("ИСТОРИЯ И ЗАДАЧИ", "history", "salesHistory", "priceChangePrintHistory", "priceChanges", "tasks");
@@ -485,7 +486,7 @@ final class MdiWorkspace extends JPanel {
                         g.drawOval(x + 3, y + 3, 10, 10);
                         g.drawLine(x + 12, y + 12, x + 18, y + 18);
                     }
-                    case "queue", "tasks" -> {
+                    case "queue", "tasks", "orderBuilder" -> {
                         g.drawLine(x + 4, y + 5, x + 17, y + 5);
                         g.drawLine(x + 4, y + 10, x + 17, y + 10);
                         g.drawLine(x + 4, y + 15, x + 17, y + 15);
@@ -556,7 +557,7 @@ final class MdiWorkspace extends JPanel {
                 case "scanner" -> new Color(42, 123, 190);
                 case "comparison", "priceChanges" -> new Color(135, 81, 170);
                 case "search" -> new Color(56, 133, 97);
-                case "queue", "history", "priceChangePrintHistory", "tasks" -> new Color(190, 125, 45);
+                case "queue", "history", "priceChangePrintHistory", "tasks", "orderBuilder" -> new Color(190, 125, 45);
                 case "storage", "storageAddresses", "addressCreate", "addressSearch", "palletScanning", "salesPointMap", "salesPointEditor", "salesPointChanges" -> new Color(46, 139, 132);
                 default -> new Color(105, 113, 125);
             };

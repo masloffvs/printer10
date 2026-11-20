@@ -12,6 +12,7 @@ import com.setretailx.printer.model.Price;
 import com.setretailx.printer.model.ScannedProbe;
 import com.setretailx.printer.repository.ProductRepository;
 import com.setretailx.printer.repository.PrintHistoryRepository;
+import com.setretailx.printer.repository.OrderBuilderRepository;
 import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.repository.SalesPointRepository;
 import com.setretailx.printer.repository.AccountRepository;
@@ -59,6 +60,7 @@ import java.util.concurrent.CompletionException;
 public final class MainWindow extends JFrame {
     private final ProductRepository products = new ProductRepository();
     private final PrintHistoryRepository printHistory = new PrintHistoryRepository();
+    private final OrderBuilderRepository orderBuilderRepository = new OrderBuilderRepository();
     private final PriceChangePrintHistoryRepository priceChangePrintHistory = new PriceChangePrintHistoryRepository();
     private final ChangedLabelPrintHistoryRepository changedLabelPrintHistory = new ChangedLabelPrintHistoryRepository();
     private final AddressStorageRepository addressStorage = new AddressStorageRepository();
@@ -72,6 +74,7 @@ public final class MainWindow extends JFrame {
             picker -> workspace.addDynamicWindow("Выбор категории", picker, 500, 520));
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
             this::clearQueue, this::moveSelected, this::printAssigned, this::printQueueList);
+    private final OrderBuilderPanel orderBuilderPanel = new OrderBuilderPanel(orderBuilderRepository);
     private final ExchangePanel exchange = new ExchangePanel(this::checkNetworkConnection);
     private final PeerMeshService peerMeshService = new PeerMeshService(
             peer -> SwingUtilities.invokeLater(this::refreshPeerMesh), PeerMeshPanel::confirmTrust);
@@ -137,6 +140,7 @@ public final class MainWindow extends JFrame {
             log(peerMeshService.networkBindWarning());
         }
         comparison.setMismatchHandler(this::enqueueMismatchedProduct);
+        search.setOrderBuilderHandler(this::addProductsToOrder);
         salesPointEditorPanel.setHistoryCheckHandler(this::openCurrentSalesPointChanges);
         salesPointEditorPanel.setForcedCheckHandler(this::forceSalesPointPriceCheck);
         add(workspace, BorderLayout.CENTER);
@@ -147,6 +151,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("comparison", comparison, 900, 470);
         workspace.addWindow("search", search, 760, 480);
         workspace.addWindow("queue", queue, 760, 440);
+        workspace.addWindow("orderBuilder", orderBuilderPanel, 900, 600);
         workspace.addWindow("exchange", exchange, 650, 400);
         workspace.addWindow("apiExchangeLog", new ApiExchangeLogPanel(), 1000, 620);
         workspace.addWindow("peerMesh", peerMeshPanel, 850, 500);
@@ -931,6 +936,11 @@ public final class MainWindow extends JFrame {
         for (Product product : selectedProducts) entries.add(new QueueEntry(product));
         refreshQueue();
         status.setText("Добавлено товаров в очередь: " + selectedProducts.size());
+    }
+
+    private void addProductsToOrder(List<Product> selectedProducts) {
+        orderBuilderPanel.addProducts(selectedProducts);
+        workspace.showWindow("orderBuilder");
     }
 
     private void showProductCard(Product product) {
