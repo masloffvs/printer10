@@ -145,6 +145,8 @@ public final class MainWindow extends JFrame {
         }
         comparison.setMismatchHandler(this::enqueueMismatchedProduct);
         search.setOrderBuilderHandler(this::addProductsToOrder);
+        search.setPrintProductInfoHandler(product -> new ProductCardDialog(product, addressStorage, taskService, parentApiClient)
+                .printInfoFromSearch());
         salesPointEditorPanel.setHistoryCheckHandler(this::openCurrentSalesPointChanges);
         salesPointEditorPanel.setForcedCheckHandler(this::forceSalesPointPriceCheck);
         add(workspace, BorderLayout.CENTER);
@@ -966,7 +968,9 @@ public final class MainWindow extends JFrame {
 
     private void showProductCard(Product product) {
         if (product == null) return;
-        workspace.addProductCard("Карточка — " + product.name(),
+        String cardTitle = "Карточка — " + product.name()
+                + (product.stCode().isBlank() ? "" : " · СТ " + product.stCode());
+        workspace.addProductCard(cardTitle,
                 new ProductCardDialog(product, addressStorage, taskService, parentApiClient));
     }
 

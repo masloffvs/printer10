@@ -164,6 +164,24 @@ public final class SalesPointRepository {
     }
 
     /** Distinct SetRetailX item/barcode keys stored on all locally configured sales points. */
+    public List<PointItemLocation> locationsForProduct(String marking, String barcode) throws SQLException {
+        List<PointItemLocation> result = new ArrayList<>();
+        String article = marking == null ? "" : marking.trim();
+        String code = barcode == null ? "" : barcode.trim();
+        try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
+                "SELECT p.name, i.article, i.name, i.price, i.discount_price "
+                        + "FROM sales_point_items i JOIN sales_points p ON p.point_id=i.point_id "
+                        + "WHERE TRIM(i.article)=? OR TRIM(i.article)=? ORDER BY p.name COLLATE NOCASE")) {
+            query.setString(1, article);
+            query.setString(2, code);
+            try (ResultSet rows = query.executeQuery()) {
+                while (rows.next()) result.add(new PointItemLocation(rows.getString(1), rows.getString(2),
+                        rows.getString(3), rows.getString(4), rows.getString(5)));
+            }
+        }
+        return result;
+    }
+
     public List<String> productItemOrBarcodes() throws SQLException {
         List<String> result = new ArrayList<>();
         try (Connection connection = connect(); Statement statement = connection.createStatement();
@@ -301,4 +319,5 @@ public final class SalesPointRepository {
     public record MapFixture(long id, String kind, String name, int x, int y, int width, int height,
                              double rotation, String color) { }
     public record ShelfItem(String article, String name, String price, String discountPrice, long updatedAt) { }
+    public record PointItemLocation(String pointName, String article, String name, String price, String discountPrice) { }
 }

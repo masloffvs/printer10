@@ -3,6 +3,11 @@ package com.setretailx.printer.ui;
 import com.setretailx.printer.model.Product;
 import com.setretailx.printer.repository.ProductRepository.SearchOptions;
 
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.EncodeHintType;
+import com.google.zxing.MultiFormatWriter;
+import com.google.zxing.client.j2se.MatrixToImageWriter;
+
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -11,6 +16,7 @@ import javax.swing.JComponent;
 import javax.swing.JInternalFrame;
 import javax.swing.JLabel;
 import javax.swing.JMenuItem;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
@@ -32,6 +38,9 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Rectangle;
 import java.awt.FlowLayout;
+import java.awt.Font;
+import java.awt.Image;
+import java.awt.image.BufferedImage;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.KeyEvent;
@@ -70,6 +79,7 @@ final class SearchPanel extends JPanel {
     private final JButton clear = new JButton("Сбросить");
     private final Consumer<JPanel> openCategoryPicker;
     private final Consumer<String> requestSuggestions;
+    private Consumer<Product> printProductInfo = ignored -> { };
     private final JPopupMenu suggestionsPopup = new JPopupMenu();
     private final javax.swing.Timer suggestionsTimer;
     private List<Product> results = List.of();
@@ -97,9 +107,13 @@ final class SearchPanel extends JPanel {
         JPanel resultPane = new JPanel(new BorderLayout(0, 8));
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setAutoCreateRowSorter(true);
+        if (table.getRowSorter() instanceof javax.swing.table.TableRowSorter<?> sorter) {
+            sorter.setComparator(3, (left, right) -> Long.compare(priceKopecks(left), priceKopecks(right)));
+        }
         table.setFillsViewportHeight(true);
         table.setRowHeight(25);
         table.setDefaultRenderer(Object.class, new HighlightRenderer());
+        table.getColumnModel().getColumn(3).setCellRenderer(new PriceCellRenderer());
         installResultSearch();
         table.getSelectionModel().addListSelectionListener(event -> {
             if (!event.getValueIsAdjusting()) selectionChanged.run();
@@ -262,11 +276,38 @@ final class SearchPanel extends JPanel {
         int[] popupRow = {-1};
         JMenuItem openCard = new JMenuItem("Открыть карточку товара");
         openCard.addActionListener(event -> {
-            int row = popupRow[0] >= 0 ? popupRow[0] : table.getSelectedRow();
-            Product product = row < 0 ? null : productAt(row);
+            Product product = popupProduct(popupRow[0]);
             if (product != null) openProduct.accept(product);
         });
         contextMenu.add(openCard);
+        JMenuItem printInfo = new JMenuItem("Печать информационного листа…");
+        printInfo.addActionListener(event -> {
+            Product product = popupProduct(popupRow[0]);
+            if (product != null) printProductInfo.accept(product);
+        });
+        contextMenu.add(printInfo);
+        JMenuItem web = new JMenuItem("Найти в интернете по штрихкоду");
+        web.addActionListener(event -> {
+            Product product = popupProduct(popupRow[0]);
+            if (product != null && !product.barcode().isBlank()) {
+                try { java.awt.Desktop.getDesktop().browse(java.net.URI.create("https://www.google.com/search?q=" + java.net.URLEncoder.encode(product.barcode(), java.nio.charset.StandardCharsets.UTF_8))); }
+                catch (Exception ignored) { }
+            }
+        });
+        contextMenu.add(web);
+        JMenuItem copyBarcode = new JMenuItem("Копировать штрихкод");
+        copyBarcode.addActionListener(event -> {
+            Product product = popupProduct(popupRow[0]);
+            if (product != null) java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
+                    .setContents(new java.awt.datatransfer.StringSelection(product.barcode()), null);
+        });
+        contextMenu.add(copyBarcode);
+        JMenuItem barcodeQr = new JMenuItem("Показать QR-код штрихкода");
+        barcodeQr.addActionListener(event -> showQrCode(popupProduct(popupRow[0]), false));
+        contextMenu.add(barcodeQr);
+        JMenuItem markingQr = new JMenuItem("Показать QR-код артикула");
+        markingQr.addActionListener(event -> showQrCode(popupProduct(popupRow[0]), true));
+        contextMenu.add(markingQr);
         table.addMouseListener(new MouseAdapter() {
             private void showMenu(MouseEvent event) {
                 if (!event.isPopupTrigger()) return;
@@ -287,6 +328,28 @@ final class SearchPanel extends JPanel {
     }
 
     private Consumer<List<Product>> orderBuilderHandler = ignored -> { };
+
+    void setPrintProductInfoHandler(Consumer<Product> handler) {
+        printProductInfo = handler == null ? ignored -> { } : handler;
+    }
+
+    private Product popupProduct(int row) {
+        int selectedRow = row >= 0 ? row : table.getSelectedRow();
+        return selectedRow < 0 ? null : productAt(selectedRow);
+    }
+
+    private void showQrCode(Product product, boolean marking) {
+        if (product == null) return;
+        String value = marking ? product.marking() : product.barcode();
+        if (value == null || value.isBlank()) return;
+        try {
+            var matrix = new MultiFormatWriter().encode(value, BarcodeFormat.QR_CODE, 260, 260,
+                    Map.of(EncodeHintType.MARGIN, 1));
+            JLabel code = new JLabel(new javax.swing.ImageIcon(MatrixToImageWriter.toBufferedImage(matrix)));
+            JOptionPane.showMessageDialog(this, code, marking ? "QR-код артикула" : "QR-код штрихкода",
+                    JOptionPane.PLAIN_MESSAGE);
+        } catch (Exception ignored) { }
+    }
 
     void setOrderBuilderHandler(Consumer<List<Product>> handler) {
         orderBuilderHandler = handler == null ? ignored -> { } : handler;
@@ -610,6 +673,16 @@ final class SearchPanel extends JPanel {
         if (table.getRowSorter() instanceof javax.swing.table.TableRowSorter<?> sorter) sorter.setSortKeys(null);
     }
 
+    private static long priceKopecks(Object value) {
+        if (value == null || "—".equals(value.toString())) return Long.MIN_VALUE;
+        try {
+            return Math.round(Double.parseDouble(value.toString().replace("₽", "")
+                    .replace(" ", "").replace(',', '.').trim()) * 100);
+        } catch (NumberFormatException ignored) {
+            return Long.MIN_VALUE;
+        }
+    }
+
     private static boolean matches(Product product, String normalizedQuery) {
         String searchable = String.join(" ", product.name(), product.marking(), product.barcode(),
                 product.price() == null ? "—" : product.price().format(), product.totalQuantity())
@@ -637,6 +710,16 @@ final class SearchPanel extends JPanel {
             Dimension preferred = super.getPreferredSize();
             preferred.width = Math.min(preferred.width, MAX_PREFERRED_WIDTH);
             return preferred;
+        }
+    }
+
+    private final class PriceCellRenderer extends DefaultTableCellRenderer {
+        @Override public java.awt.Component getTableCellRendererComponent(JTable source, Object value,
+                boolean selected, boolean focused, int row, int column) {
+            super.getTableCellRendererComponent(source, value, selected, focused, row, column);
+            setFont(new Font(Font.MONOSPACED, getFont().getStyle(), getFont().getSize()));
+            setHorizontalAlignment(javax.swing.SwingConstants.RIGHT);
+            return this;
         }
     }
 

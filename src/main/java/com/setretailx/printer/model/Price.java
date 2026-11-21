@@ -20,7 +20,7 @@ public record Price(long kopecks) {
         NumberFormat formatter = NumberFormat.getNumberInstance(Locale.forLanguageTag("ru-RU"));
         formatter.setMinimumFractionDigits(2);
         formatter.setMaximumFractionDigits(2);
-        formatter.setGroupingUsed(false);
+        formatter.setGroupingUsed(true);
         return formatter.format(BigDecimal.valueOf(kopecks, 2)) + " ₽";
     }
 }

@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.setretailx.printer.model.Product;
 import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.repository.AddressStorageRepository.LocationResult;
+import com.setretailx.printer.repository.SalesPointRepository;
+import com.setretailx.printer.repository.SalesPointRepository.PointItemLocation;
 import com.setretailx.printer.service.ProductImageService;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
 import com.setretailx.printer.service.ParentApiClient;
@@ -20,6 +22,7 @@ import javax.swing.BorderFactory;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JSlider;
 import javax.swing.JComboBox;
 import javax.swing.JEditorPane;
 import javax.swing.JLabel;
@@ -28,7 +31,6 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
-import javax.swing.JTextArea;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
@@ -56,7 +58,6 @@ import java.io.ByteArrayInputStream;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -90,17 +91,20 @@ final class ProductCardDialog extends JPanel {
     private static final Color LABEL_COLOR = new Color(110, 114, 122);
     private static final Color CATEGORY_COLOR = new Color(36, 99, 173);
 
+    private final Product product;
     private final JLabel image = new JLabel("Загружаем фото…", SwingConstants.CENTER);
-    private final JButton openPhotoButton = new JButton("Открыть в новом окне");
     private final JButton printInfoButton = new JButton("Печать информационного листа…");
     private final AddressStorageRepository addressStorage;
+    private final SalesPointRepository salesPoints;
     private final ParentApiClient connector;
     private BufferedImage originalImage;
 
     ProductCardDialog(Product product, AddressStorageRepository addressStorage,
                       PriceMonitoringTaskService priceHistoryService, ParentApiClient connector) {
         super(new BorderLayout());
+        this.product = product;
         this.addressStorage = addressStorage;
+        this.salesPoints = new SalesPointRepository();
         this.connector = connector;
         JPanel content = new JPanel(new BorderLayout(16, 10));
         content.setBorder(BorderFactory.createEmptyBorder(18, 18, 18, 18));
@@ -116,27 +120,19 @@ final class ProductCardDialog extends JPanel {
         tabs.addTab("Общее", createOverview(product, priceHistoryService));
         tabs.addTab("Характеристики", createCharacteristics(product));
         tabs.addTab("Размещение", createLocations(product));
-        tabs.addTab(historyTitle("История цен", product), createPriceHistory(product, priceHistoryService));
-        tabs.addTab(historyTitle("Продажи", product), createSalesHistory(product, priceHistoryService));
-        tabs.addTab("Raw JSON", createRawJson(product));
+        tabs.addTab("История цен", createPriceHistory(product, priceHistoryService));
+        tabs.addTab("Продажи", createSalesHistory(product, priceHistoryService));
+        tabs.setTabPlacement(JTabbedPane.BOTTOM);
         content.add(tabs, BorderLayout.CENTER);
-
-        JPanel actions = new JPanel(new BorderLayout());
-        actions.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
-        actions.add(printInfoButton, BorderLayout.LINE_END);
         printInfoButton.addActionListener(event -> printProductInfo(product));
-        content.add(actions, BorderLayout.SOUTH);
 
         add(content, BorderLayout.CENTER);
         setPreferredSize(new Dimension(620, 540));
         loadImage(product);
     }
 
-    private static String historyTitle(String section, Product product) {
-        String title = section + " · " + product.marking();
-        if (!product.name().isBlank()) title += " · " + product.name();
-        if (!product.barcode().isBlank()) title += " · " + product.barcode();
-        return title;
+    void printInfoFromSearch() {
+        printProductInfo(product);
     }
 
     private void printProductInfo(Product product) {
@@ -171,7 +167,16 @@ final class ProductCardDialog extends JPanel {
                     ProductDto match = results.stream()
                             .filter(item -> item.marking() != null && item.marking().equalsIgnoreCase(product.marking()))
                             .findFirst().orElse(results.size() == 1 ? results.get(0) : null);
-                    return match == null ? List.of() : productPrices(match);
+                    List<String> prices = new ArrayList<>(match == null ? List.of() : productPrices(match));
+                    try {
+                        List<PointItemLocation> locations = salesPoints.locationsForProduct(product.marking(), product.barcode());
+                        String points = locations.stream().map(PointItemLocation::pointName).distinct()
+                                .collect(java.util.stream.Collectors.joining(", "));
+                        prices.add("Торговые точки: " + (points.isBlank() ? "не найдено" : points));
+                    } catch (Exception ignored) {
+                        prices.add("Торговые точки: нет данных");
+                    }
+                    return prices;
                 } catch (Exception ignored) {
                     return List.of();
                 }
@@ -348,12 +353,15 @@ final class ProductCardDialog extends JPanel {
         image.setVerticalAlignment(SwingConstants.CENTER);
         image.setHorizontalAlignment(SwingConstants.CENTER);
 
-        openPhotoButton.setEnabled(false);
-        openPhotoButton.addActionListener(ignored -> openPhotoInNewWindow());
-
-        JPanel panel = new JPanel(new BorderLayout(0, 8));
+        image.setToolTipText("Открыть фотографию в отдельном окне");
+        image.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        image.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent event) {
+                if (event.getClickCount() == 1 && originalImage != null) openPhotoInNewWindow();
+            }
+        });
+        JPanel panel = new JPanel(new BorderLayout());
         panel.add(image, BorderLayout.CENTER);
-        panel.add(openPhotoButton, BorderLayout.SOUTH);
         return panel;
     }
 
@@ -370,8 +378,12 @@ final class ProductCardDialog extends JPanel {
         JLabel price = new JLabel("Цена каталога: " + (product.price() == null ? "—" : product.price().format()));
         price.setFont(price.getFont().deriveFont(Font.BOLD, 19f));
         details.add(price, BorderLayout.NORTH);
+        JLabel pointStatus = new JLabel("Проверяем торговые точки…");
+        pointStatus.setForeground(CATEGORY_COLOR);
         JPanel latestPrice = new JPanel(new java.awt.GridLayout(0, 1));
+        latestPrice.add(pointStatus);
         details.add(latestPrice, BorderLayout.SOUTH);
+        loadSalesPointLocations(product, pointStatus);
         loadLatestPrice(product, priceHistoryService, latestPrice);
 
         JPanel keyFields = new JPanel(new GridBagLayout());
@@ -400,6 +412,23 @@ final class ProductCardDialog extends JPanel {
         return overview;
     }
 
+    private void loadSalesPointLocations(Product product, JLabel status) {
+        new SwingWorker<List<PointItemLocation>, Void>() {
+            @Override protected List<PointItemLocation> doInBackground() throws Exception {
+                return salesPoints.locationsForProduct(product.marking(), product.barcode());
+            }
+            @Override protected void done() {
+                try {
+                    List<PointItemLocation> locations = get();
+                    status.setText(locations.isEmpty() ? "На торговых точках не найдено" : "Торговые точки: "
+                            + locations.stream().map(PointItemLocation::pointName).distinct().limit(3)
+                            .collect(java.util.stream.Collectors.joining(", "))
+                            + (locations.size() > 3 ? " и ещё " + (locations.size() - 3) : ""));
+                } catch (Exception error) { status.setText("Торговые точки: нет данных"); }
+            }
+        }.execute();
+    }
+
     private void loadLatestPrice(Product product, PriceMonitoringTaskService service, JPanel details) {
         new SwingWorker<PriceMonitoringTaskService.ShelfPrice, Void>() {
             @Override protected PriceMonitoringTaskService.ShelfPrice doInBackground() throws Exception {
@@ -413,12 +442,12 @@ final class ProductCardDialog extends JPanel {
                     String current = latest.regularPrice().isBlank() ? latest.discountPrice() : latest.regularPrice();
                     JLabel shelf = new JLabel("Последняя цена мониторинга: " + current + " ₽");
                     shelf.setForeground(new Color(36, 99, 173));
-                    details.add(shelf, BorderLayout.SOUTH);
+                    details.add(shelf);
                     boolean changed = product.price() != null && !samePrice(product.price(), current);
                     if (changed) {
                         JLabel warning = new JLabel("Цена отличается от каталога. Проверьте историю изменений.");
                         warning.setForeground(new Color(170, 80, 20));
-                        details.add(warning, BorderLayout.SOUTH);
+                        details.add(warning);
                     }
                     details.revalidate();
                     details.repaint();
@@ -452,38 +481,6 @@ final class ProductCardDialog extends JPanel {
         JScrollPane characteristicsScroll = new JScrollPane(characteristics);
         characteristicsScroll.getVerticalScrollBar().setUnitIncrement(16);
         return characteristicsScroll;
-    }
-
-    private JScrollPane createRawJson(Product product) {
-        JTextArea raw = new JTextArea(rawJson(product));
-        raw.setEditable(false);
-        raw.setLineWrap(false);
-        raw.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        raw.setCaretPosition(0);
-        JScrollPane scroll = new JScrollPane(raw);
-        scroll.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
-        scroll.getVerticalScrollBar().setUnitIncrement(16);
-        return scroll;
-    }
-
-    private static String rawJson(Product product) {
-        if (!product.rawJson().isBlank()) return product.rawJson();
-        Map<String, Object> values = new LinkedHashMap<>();
-        values.put("stCode", product.stCode());
-        values.put("name", product.name());
-        values.put("vendorCode", product.vendorCode());
-        values.put("barcode", product.barcode());
-        values.put("uom", product.uom());
-        values.put("source", product.source());
-        values.put("price", product.price() == null ? null : product.price().format());
-        values.put("totalQuantity", product.totalQuantity());
-        values.put("details", product.details());
-        try {
-            return new com.fasterxml.jackson.databind.ObjectMapper().writerWithDefaultPrettyPrinter()
-                    .writeValueAsString(values);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
-            return values.toString();
-        }
     }
 
     private void addField(JPanel panel, int row, String label, String value) {
@@ -542,14 +539,13 @@ final class ProductCardDialog extends JPanel {
                 try {
                     image.setText("");
                     image.setIcon(new ImageIcon(get()));
-                    image.setToolTipText("Нажмите или используйте кнопку, чтобы открыть фото в новом окне");
+                    image.setToolTipText("Открыть фотографию в отдельном окне");
                     image.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
                     image.addMouseListener(new java.awt.event.MouseAdapter() {
                         @Override public void mouseClicked(java.awt.event.MouseEvent event) {
                             if (event.getClickCount() == 1 && originalImage != null) showEnlargedImage();
                         }
                     });
-                    openPhotoButton.setEnabled(true);
                 } catch (Exception error) {
                     Throwable cause = error.getCause() == null ? error : error.getCause();
                     image.setIcon(null);
@@ -561,21 +557,43 @@ final class ProductCardDialog extends JPanel {
 
     private void showEnlargedImage() {
         if (originalImage == null) return;
-        Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
-        int maxWidth = Math.max(320, (int) (screen.width * 0.88));
-        int maxHeight = Math.max(240, (int) (screen.height * 0.82));
-        double scale = Math.min(1.0, Math.min((double) maxWidth / originalImage.getWidth(), (double) maxHeight / originalImage.getHeight()));
-        int width = Math.max(1, (int) Math.round(originalImage.getWidth() * scale));
-        int height = Math.max(1, (int) Math.round(originalImage.getHeight() * scale));
-        Image scaled = originalImage.getScaledInstance(width, height, Image.SCALE_SMOOTH);
-        JLabel enlarged = new JLabel(new ImageIcon(scaled));
         java.awt.Window owner = SwingUtilities.getWindowAncestor(this);
         javax.swing.JDialog dialog = new javax.swing.JDialog(owner, "Фотография товара",
                 java.awt.Dialog.ModalityType.MODELESS);
         dialog.setDefaultCloseOperation(javax.swing.JDialog.DISPOSE_ON_CLOSE);
-        dialog.add(new JScrollPane(enlarged));
-        dialog.pack();
+        JLabel preview = new JLabel("", SwingConstants.CENTER);
+        JSlider zoom = new JSlider(25, 300, 100);
+        JButton rotate = new JButton("Повернуть");
+        final int[] angle = {0};
+        Runnable render = () -> {
+            double scale = zoom.getValue() / 100.0;
+            BufferedImage source = originalImage;
+            if (angle[0] % 180 != 0) source = new BufferedImage(originalImage.getHeight(), originalImage.getWidth(), BufferedImage.TYPE_INT_ARGB);
+            else source = new BufferedImage(originalImage.getWidth(), originalImage.getHeight(), BufferedImage.TYPE_INT_ARGB);
+            Graphics2D graphics = source.createGraphics();
+            try {
+                graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                java.awt.geom.AffineTransform transform = new java.awt.geom.AffineTransform();
+                transform.translate(source.getWidth() / 2.0, source.getHeight() / 2.0);
+                transform.rotate(Math.toRadians(angle[0]));
+                transform.scale(scale, scale);
+                transform.translate(-originalImage.getWidth() / 2.0, -originalImage.getHeight() / 2.0);
+                graphics.drawImage(originalImage, transform, null);
+            } finally { graphics.dispose(); }
+            preview.setIcon(new ImageIcon(source));
+            preview.revalidate();
+        };
+        zoom.addChangeListener(event -> render.run());
+        rotate.addActionListener(event -> { angle[0] = (angle[0] + 90) % 360; render.run(); });
+        JPanel controls = new JPanel(new BorderLayout(8, 0));
+        controls.add(new JLabel("Масштаб"), BorderLayout.WEST);
+        controls.add(zoom, BorderLayout.CENTER);
+        controls.add(rotate, BorderLayout.EAST);
+        dialog.add(new JScrollPane(preview), BorderLayout.CENTER);
+        dialog.add(controls, BorderLayout.SOUTH);
+        dialog.setSize(780, 620);
         dialog.setLocationRelativeTo(this);
+        render.run();
         dialog.setVisible(true);
     }
 
