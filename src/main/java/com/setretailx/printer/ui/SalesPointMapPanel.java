@@ -53,7 +53,7 @@ final class SalesPointMapPanel extends JPanel {
         JButton rotateRight = new JButton("⟳ Повернуть");
         JButton addShelf = new JButton("＋ Стеллаж");
         JButton addWalkway = new JButton("＋ Дорожка");
-        JLabel hint = new JLabel("Колесо — масштаб · перетаскивание — перемещение · ПКМ — настройки");
+        JLabel hint = new JLabel("Колесо — масштаб · пустое место — обзор · ПКМ — настройки");
         zoomOut.addActionListener(event -> map.setZoom(map.zoom / 1.15));
         zoomIn.addActionListener(event -> map.setZoom(map.zoom * 1.15));
         rotateLeft.addActionListener(event -> map.rotateView(-Math.PI / 12));
@@ -190,6 +190,8 @@ final class SalesPointMapPanel extends JPanel {
         private List<MapFixture> fixtures = List.of();
         private Point press;
         private Point last;
+        private Point viewOffset = new Point();
+        private boolean panning;
         private SalesPoint moving;
         private MapFixture movingFixture;
         private Point pressWorld;
@@ -213,12 +215,15 @@ final class SalesPointMapPanel extends JPanel {
                         contextHandled = true;
                         return;
                     }
-                    if (!javax.swing.SwingUtilities.isLeftMouseButton(event)) return;
+                    if (!javax.swing.SwingUtilities.isLeftMouseButton(event)
+                            && !javax.swing.SwingUtilities.isMiddleMouseButton(event)) return;
                     press = event.getPoint();
+                    last = event.getPoint();
+                    panning = javax.swing.SwingUtilities.isLeftMouseButton(event)
+                            || javax.swing.SwingUtilities.isMiddleMouseButton(event);
                     pressWorld = toWorld(press);
-                    last = pressWorld;
-                    moving = at(pressWorld);
-                    movingFixture = moving == null ? fixtureAt(pressWorld) : null;
+                    moving = null;
+                    movingFixture = null;
                     draft = null;
                 }
 
@@ -228,31 +233,12 @@ final class SalesPointMapPanel extends JPanel {
                         contextHandled = false;
                         return;
                     }
-                    if (draft != null && draft.width >= 50 && draft.height >= 35) {
-                        createPoint(draft);
-                    } else if (moving != null) {
-                        try {
-                            SalesPoint moved = point(moving.id());
-                            if (moved != null) repository.movePoint(moved.id(), moved.x(), moved.y());
-                            refresh();
-                        } catch (Exception error) {
-                            JOptionPane.showMessageDialog(SalesPointMapPanel.this,
-                                    "Не удалось переместить точку: " + error.getMessage(),
-                                    "Карта торговых точек", JOptionPane.ERROR_MESSAGE);
-                            refresh();
-                        }
-                    } else if (movingFixture != null) {
-                        try {
-                            MapFixture fixture = fixture(movingFixture.id());
-                            if (fixture != null) repository.moveFixture(fixture.id(), fixture.x(), fixture.y());
-                            refresh();
-                        } catch (Exception error) { showError("Не удалось переместить объект", error); refresh(); }
-                    }
                     press = null;
                     last = null;
                     moving = null;
                     movingFixture = null;
                     pressWorld = null;
+                    panning = false;
                     draft = null;
                     repaint();
                 }
@@ -276,27 +262,11 @@ final class SalesPointMapPanel extends JPanel {
                 }
 
                 @Override public void mouseDragged(MouseEvent event) {
-                    if (press == null) return;
-                    if (moving != null) {
-                        Point world = toWorld(event.getPoint());
-                        int dx = world.x - last.x;
-                        int dy = world.y - last.y;
-                        points = points.stream().map(point -> point.id() == moving.id()
-                                ? new SalesPoint(point.id(), point.name(), Math.max(0, point.x() + dx),
-                                Math.max(0, point.y() + dy), point.width(), point.height(), point.color(), point.icon()) : point).toList();
-                        last = world;
-                        repaint();
-                    } else if (movingFixture != null) {
-                        Point world = toWorld(event.getPoint());
-                        int dx = world.x - last.x;
-                        int dy = world.y - last.y;
-                        fixtures = fixtures.stream().map(fixture -> fixture.id() == movingFixture.id()
-                                ? new MapFixture(fixture.id(), fixture.kind(), fixture.name(), fixture.x() + dx,
-                                fixture.y() + dy, fixture.width(), fixture.height(), fixture.rotation(), fixture.color())
-                                : fixture).toList();
-                        last = world;
-                        repaint();
-                    }
+                    if (press == null || !panning) return;
+                    Point current = event.getPoint();
+                    viewOffset.translate(current.x - last.x, current.y - last.y);
+                    last = current;
+                    repaint();
                 }
             });
         }
@@ -345,7 +315,7 @@ final class SalesPointMapPanel extends JPanel {
 
         private AffineTransform viewTransform() {
             AffineTransform transform = new AffineTransform();
-            transform.translate(getWidth() / 2.0, getHeight() / 2.0);
+            transform.translate(getWidth() / 2.0 + viewOffset.x, getHeight() / 2.0 + viewOffset.y);
             transform.rotate(viewRotation);
             transform.scale(zoom, zoom);
             transform.translate(-getWidth() / 2.0, -getHeight() / 2.0);
@@ -444,11 +414,6 @@ final class SalesPointMapPanel extends JPanel {
                 g.fillRect(0, 0, getWidth(), getHeight());
                 g.transform(viewTransform());
 
-                Color grid = blend(panel, javax.swing.UIManager.getColor("Label.foreground"), 0.10f);
-                g.setColor(grid);
-                for (int x = 24; x < getWidth(); x += 28) {
-                    for (int y = 24; y < getHeight(); y += 28) g.fillOval(x, y, 2, 2);
-                }
                 for (SalesPoint point : points) {
                     Rectangle bounds = bounds(point);
                     paintPoint(g, point, bounds, hovered != null && hovered.id() == point.id());
@@ -476,15 +441,13 @@ final class SalesPointMapPanel extends JPanel {
                 object.rotate(Math.toRadians(fixture.rotation()));
                 Color color = Color.decode(fixture.color());
                 int x = -fixture.width() / 2, y = -fixture.height() / 2;
-                object.setColor(new Color(0, 0, 0, 45));
-                object.fillRoundRect(x + 2, y + 4, fixture.width(), fixture.height(), 12, 12);
                 object.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(),
-                        "walkway".equals(fixture.kind()) ? 105 : 225));
-                object.fillRoundRect(x, y, fixture.width(), fixture.height(), 12, 12);
-                object.setColor(color.darker());
-                object.setStroke(new BasicStroke(active ? 3f : 1.5f, BasicStroke.CAP_ROUND,
+                        "walkway".equals(fixture.kind()) ? 70 : 150));
+                object.fillRoundRect(x, y, fixture.width(), fixture.height(), 10, 10);
+                object.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), active ? 220 : 125));
+                object.setStroke(new BasicStroke(active ? 2f : 1f, BasicStroke.CAP_ROUND,
                         BasicStroke.JOIN_ROUND, 10f, "walkway".equals(fixture.kind()) ? new float[]{8f, 6f} : null, 0));
-                object.drawRoundRect(x, y, fixture.width(), fixture.height(), 12, 12);
+                object.drawRoundRect(x, y, fixture.width(), fixture.height(), 10, 10);
                 if ("shelf".equals(fixture.kind())) {
                     object.setColor(new Color(255, 255, 255, 115));
                     object.setStroke(new BasicStroke(1f));
@@ -497,41 +460,31 @@ final class SalesPointMapPanel extends JPanel {
                         object.drawLine(column, y + 5, column, y + fixture.height() - 5);
                     }
                 }
-                object.setColor(new Color(255, 255, 255, 225));
-                object.setFont(getFont().deriveFont(java.awt.Font.BOLD, 12f));
+                object.setFont(getFont().deriveFont(java.awt.Font.PLAIN, 11f));
                 FontMetrics metrics = object.getFontMetrics();
                 String label = fixture.name().length() > 24 ? fixture.name().substring(0, 23) + "…" : fixture.name();
-                object.setColor(new Color(20, 28, 38, 210));
-                object.fillRoundRect(-metrics.stringWidth(label) / 2 - 5, -9,
-                        metrics.stringWidth(label) + 10, 18, 8, 8);
-                object.setColor(Color.WHITE);
+                object.setColor(new Color(20, 28, 38, 205));
                 object.drawString(label, -metrics.stringWidth(label) / 2, metrics.getAscent() / 2);
             } finally { object.dispose(); }
         }
 
         private void paintPoint(Graphics2D g, SalesPoint point, Rectangle bounds, boolean active) {
-            int arc = Math.min(20, Math.max(12, bounds.height / 3));
+            int arc = Math.min(12, Math.max(8, bounds.height / 5));
             Color accent = accentColor();
             Color foreground = javax.swing.UIManager.getColor("Label.foreground");
             if (foreground == null) foreground = new Color(40, 52, 64);
             Color card = javax.swing.UIManager.getColor("Panel.background");
             if (card == null) card = Color.WHITE;
 
-            g.setColor(new Color(20, 35, 50, active ? 34 : 20));
-            g.fillRoundRect(bounds.x + 1, bounds.y + 4, bounds.width, bounds.height, arc, arc);
-            g.setPaint(new GradientPaint(bounds.x, bounds.y, blend(card, Color.WHITE, 0.18f),
-                    bounds.x, bounds.y + bounds.height, card));
-            g.fillRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, arc, arc);
-
             Color pointColor = Color.decode(point.color());
-            g.setColor(active ? pointColor : blend(pointColor, card, 0.34f));
-            g.setStroke(new BasicStroke(active ? 1.8f : 1.1f));
+            g.setColor(blend(pointColor, card, active ? 0.76f : 0.88f));
+            g.fillRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, arc, arc);
+            g.setColor(active ? pointColor : blend(pointColor, card, 0.38f));
+            g.setStroke(new BasicStroke(active ? 1.5f : 0.8f));
             g.drawRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, arc, arc);
-            g.setColor(pointColor);
-            g.fillRoundRect(bounds.x + 1, bounds.y + 1, 5, bounds.height - 2, arc, arc);
 
-            int pad = Math.max(12, bounds.width / 14);
-            int iconSize = Math.min(34, Math.max(24, bounds.height / 3));
+            int pad = Math.max(10, bounds.width / 16);
+            int iconSize = Math.min(30, Math.max(22, bounds.height / 3));
             int iconX = bounds.x + pad;
             int iconY = bounds.y + Math.max(10, (bounds.height - iconSize) / 2 - 3);
             g.setColor(blend(pointColor, card, 0.84f));
@@ -551,22 +504,10 @@ final class SalesPointMapPanel extends JPanel {
             if (bounds.height >= 64) {
                 g.setFont(getFont().deriveFont(java.awt.Font.PLAIN, Math.max(10f, titleSize - 3f)));
                 g.setColor(blend(foreground, card, 0.42f));
-                String meta = "ТОРГОВАЯ ТОЧКА  ·  №" + point.id();
+                String meta = "№" + point.id();
                 FontMetrics metaMetrics = g.getFontMetrics();
-                int metaBaseline = Math.min(bounds.y + bounds.height - 12, titleBaseline + titleMetrics.getHeight() - 1);
+                int metaBaseline = Math.min(bounds.y + bounds.height - 10, titleBaseline + titleMetrics.getHeight() - 1);
                 g.drawString(ellipsize(meta, metaMetrics, textWidth), textX, metaBaseline);
-            }
-
-            if (bounds.height >= 92 && bounds.width >= 190) {
-                int chipH = 22;
-                int chipY = bounds.y + bounds.height - chipH - 10;
-                g.setColor(blend(accent, card, 0.88f));
-                g.fillRoundRect(textX, chipY, Math.min(textWidth, 132), chipH, 11, 11);
-                g.setColor(accent);
-                g.setFont(getFont().deriveFont(java.awt.Font.BOLD, 10f));
-                String action = "ОТКРЫТЬ ЦЕННИКИ  ›";
-                g.drawString(ellipsize(action, g.getFontMetrics(), Math.min(textWidth - 12, 120)),
-                        textX + 8, chipY + 15);
             }
         }
 
