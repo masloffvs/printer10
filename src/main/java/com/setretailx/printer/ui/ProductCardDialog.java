@@ -113,11 +113,11 @@ final class ProductCardDialog extends JPanel {
         content.add(header, BorderLayout.NORTH);
 
         JTabbedPane tabs = new JTabbedPane();
-        tabs.addTab("Общее", createOverview(product));
+        tabs.addTab("Общее", createOverview(product, priceHistoryService));
         tabs.addTab("Характеристики", createCharacteristics(product));
         tabs.addTab("Размещение", createLocations(product));
-        tabs.addTab("История цен", createPriceHistory(product, priceHistoryService));
-        tabs.addTab("Продажи", createSalesHistory(product, priceHistoryService));
+        tabs.addTab(historyTitle("История цен", product), createPriceHistory(product, priceHistoryService));
+        tabs.addTab(historyTitle("Продажи", product), createSalesHistory(product, priceHistoryService));
         tabs.addTab("Raw JSON", createRawJson(product));
         content.add(tabs, BorderLayout.CENTER);
 
@@ -130,6 +130,13 @@ final class ProductCardDialog extends JPanel {
         add(content, BorderLayout.CENTER);
         setPreferredSize(new Dimension(620, 540));
         loadImage(product);
+    }
+
+    private static String historyTitle(String section, Product product) {
+        String title = section + " · " + product.marking();
+        if (!product.name().isBlank()) title += " · " + product.name();
+        if (!product.barcode().isBlank()) title += " · " + product.barcode();
+        return title;
     }
 
     private void printProductInfo(Product product) {
@@ -355,14 +362,17 @@ final class ProductCardDialog extends JPanel {
         showEnlargedImage();
     }
 
-    private JPanel createOverview(Product product) {
+    private JPanel createOverview(Product product, PriceMonitoringTaskService priceHistoryService) {
         JPanel overview = new JPanel(new BorderLayout(16, 10));
         overview.setBorder(BorderFactory.createEmptyBorder(10, 0, 0, 0));
         overview.add(createPhotoPanel(), BorderLayout.WEST);
         JPanel details = new JPanel(new BorderLayout(0, 10));
-        JLabel price = new JLabel("Цена: " + (product.price() == null ? "—" : product.price().format()));
+        JLabel price = new JLabel("Цена каталога: " + (product.price() == null ? "—" : product.price().format()));
         price.setFont(price.getFont().deriveFont(Font.BOLD, 19f));
         details.add(price, BorderLayout.NORTH);
+        JPanel latestPrice = new JPanel(new java.awt.GridLayout(0, 1));
+        details.add(latestPrice, BorderLayout.SOUTH);
+        loadLatestPrice(product, priceHistoryService, latestPrice);
 
         JPanel keyFields = new JPanel(new GridBagLayout());
         keyFields.setBorder(BorderFactory.createTitledBorder("Основное"));
@@ -388,6 +398,38 @@ final class ProductCardDialog extends JPanel {
         details.add(content, BorderLayout.CENTER);
         overview.add(details, BorderLayout.CENTER);
         return overview;
+    }
+
+    private void loadLatestPrice(Product product, PriceMonitoringTaskService service, JPanel details) {
+        new SwingWorker<PriceMonitoringTaskService.ShelfPrice, Void>() {
+            @Override protected PriceMonitoringTaskService.ShelfPrice doInBackground() throws Exception {
+                return service.latestShelfPrice(product.marking());
+            }
+
+            @Override protected void done() {
+                try {
+                    PriceMonitoringTaskService.ShelfPrice latest = get();
+                    if (latest == null || (latest.regularPrice().isBlank() && latest.discountPrice().isBlank())) return;
+                    String current = latest.regularPrice().isBlank() ? latest.discountPrice() : latest.regularPrice();
+                    JLabel shelf = new JLabel("Последняя цена мониторинга: " + current + " ₽");
+                    shelf.setForeground(new Color(36, 99, 173));
+                    details.add(shelf, BorderLayout.SOUTH);
+                    boolean changed = product.price() != null && !samePrice(product.price(), current);
+                    if (changed) {
+                        JLabel warning = new JLabel("Цена отличается от каталога. Проверьте историю изменений.");
+                        warning.setForeground(new Color(170, 80, 20));
+                        details.add(warning, BorderLayout.SOUTH);
+                    }
+                    details.revalidate();
+                    details.repaint();
+                } catch (Exception ignored) { }
+            }
+        }.execute();
+    }
+
+    private static boolean samePrice(com.setretailx.printer.model.Price price, String value) {
+        try { return price.kopecks() == Math.round(Double.parseDouble(value.replace(',', '.')) * 100); }
+        catch (NumberFormatException error) { return false; }
     }
 
     private JScrollPane createCharacteristics(Product product) {

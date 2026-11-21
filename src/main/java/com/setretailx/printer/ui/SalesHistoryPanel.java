@@ -41,6 +41,7 @@ final class SalesHistoryPanel extends JPanel {
     private final JLabel status = new JLabel("Загружаем историю продаж…");
     private final SalesChart chart = new SalesChart();
     private List<PriceMonitoringTaskService.SalesDay> days = List.of();
+    private long loadGeneration;
 
     SalesHistoryPanel(PriceMonitoringTaskService service, String marking, String name, String barcode) {
         super(new BorderLayout(8, 8));
@@ -49,14 +50,10 @@ final class SalesHistoryPanel extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
         JPanel header = new JPanel(new BorderLayout(4, 4));
-        JPanel titleRow = new JPanel(new BorderLayout(8, 0));
-        titleRow.add(new JLabel("Артикул: " + marking + " · " + (name == null ? "" : name)
-                + (barcode == null || barcode.isBlank() ? "" : " · Штрихкод: " + barcode)), BorderLayout.CENTER);
         JButton refresh = new JButton("Обновить");
         refresh.addActionListener(event -> load());
-        titleRow.add(refresh, BorderLayout.EAST);
-        header.add(titleRow, BorderLayout.NORTH);
-        header.add(new JLabel("История формируется из всех позиций чеков; фоновое обновление — каждый час."), BorderLayout.SOUTH);
+        header.add(refresh, BorderLayout.EAST);
+        header.add(new JLabel("История формируется из всех позиций чеков; фоновое обновление — каждый час."), BorderLayout.CENTER);
         add(header, BorderLayout.NORTH);
 
         JTable daysTable = new JTable(daysModel);
@@ -79,12 +76,14 @@ final class SalesHistoryPanel extends JPanel {
     }
 
     private void load() {
+        long generation = ++loadGeneration;
         new SwingWorker<LoadedSales, Void>() {
             @Override protected LoadedSales doInBackground() throws SQLException {
                 return new LoadedSales(service.salesHistory(marking), service.salesPositions(marking));
             }
 
             @Override protected void done() {
+                if (generation != loadGeneration) return;
                 try {
                     LoadedSales loaded = get();
                     days = loaded.days();

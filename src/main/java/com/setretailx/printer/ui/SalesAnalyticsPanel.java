@@ -62,12 +62,12 @@ final class SalesAnalyticsPanel extends JPanel {
             new Object[]{"День", "Продано", "Выручка", "Чеков"},
             new Class<?>[]{java.util.Date.class, BigDecimal.class, BigDecimal.class, Integer.class});
     private final DefaultTableModel positionsModel = new TypedTableModel(
-            new Object[]{"Дата", "Чек", "Артикул", "Товар", "Кол-во", "Цена", "Сумма", "Скидка"},
-            new Class<?>[]{java.util.Date.class, ReceiptNumber.class, String.class, String.class,
+            new Object[]{"Дата", "Чек", "Товар", "Кол-во", "Цена", "Сумма", "Скидка"},
+            new Class<?>[]{java.util.Date.class, ReceiptNumber.class, String.class,
                     BigDecimal.class, BigDecimal.class, BigDecimal.class, BigDecimal.class});
     private final DefaultTableModel recentModel = new TypedTableModel(
-            new Object[]{"Дата продажи", "Чек", "Артикул", "Товар", "Кол-во", "Цена", "Сумма", "Скидка"},
-            new Class<?>[]{java.util.Date.class, ReceiptNumber.class, String.class, String.class,
+            new Object[]{"Дата продажи", "Чек", "Товар", "Кол-во", "Цена", "Сумма", "Скидка"},
+            new Class<?>[]{java.util.Date.class, ReceiptNumber.class, String.class,
                     BigDecimal.class, BigDecimal.class, BigDecimal.class, BigDecimal.class});
     private final JTable articlesTable = new JTable(articlesModel);
     private final DefaultMutableTreeNode articlesRoot = new DefaultMutableTreeNode("Артикулы");
@@ -391,7 +391,7 @@ final class SalesAnalyticsPanel extends JPanel {
                     positionsModel.setRowCount(0);
                     for (SalesPosition position : loaded.positions()) {
                         positionsModel.addRow(new Object[]{new java.util.Date((long) (position.soldAt() * 1000)),
-                                new ReceiptNumber(position.checkNumber()), position.item(), position.name(),
+                                new ReceiptNumber(position.checkNumber()), position.name(),
                                 BigDecimal.valueOf(position.quantity()), BigDecimal.valueOf(position.price()),
                                 BigDecimal.valueOf(position.cost()), BigDecimal.valueOf(position.discount())});
                     }
@@ -536,7 +536,7 @@ final class SalesAnalyticsPanel extends JPanel {
                     recentModel.setRowCount(0);
                     for (SalesPosition position : rows) {
                         recentModel.addRow(new Object[]{new java.util.Date((long) (position.soldAt() * 1000)),
-                                new ReceiptNumber(position.checkNumber()), position.item(), position.name(),
+                                new ReceiptNumber(position.checkNumber()), position.name(),
                                 BigDecimal.valueOf(position.quantity()), BigDecimal.valueOf(position.price()),
                                 BigDecimal.valueOf(position.cost()), BigDecimal.valueOf(position.discount())});
                     }

@@ -119,13 +119,15 @@ public final class MainWindow extends JFrame {
             }, this::openSalesPointChanges, salesPointEditorPanel::refreshPoints);
     private final PriceChangesPanel priceChanges = new PriceChangesPanel(taskService, priceChangePrintHistory,
             (marking, name, barcode) ->
-            workspace.addDynamicWindow("История цен — " + marking,
+            workspace.addDynamicWindow("История цен — " + marking + (name == null || name.isBlank() ? "" : " · " + name)
+                    + (barcode == null || barcode.isBlank() ? "" : " · " + barcode),
                     new PriceHistoryPanel(taskService, marking, name, barcode), 760, 480),
             this::enqueueChangedLabels);
     private final PrintChangesHistoryPanel changedPrintHistoryPanel = new PrintChangesHistoryPanel(
             new ChangedLabelPrintHistoryPanel(changedLabelPrintHistory),
             new PriceChangePrintHistoryPanel(priceChangePrintHistory));
     private final javax.swing.JLabel status = new javax.swing.JLabel("Готово");
+    private long searchGeneration;
     private boolean printInProgress;
 
     public MainWindow() {
@@ -725,6 +727,7 @@ public final class MainWindow extends JFrame {
     private record ScannedPrintProduct(Product product, PrintHistoryEntry previousPrint) { }
 
     private void search() {
+        long generation = ++searchGeneration;
         String query = search.query();
         java.util.Optional<String> barcode = query.isEmpty() ? java.util.Optional.empty() : BarInput.barcode(query);
         String lookup = barcode.orElse(query);
@@ -740,13 +743,17 @@ public final class MainWindow extends JFrame {
         runBackground(() -> {
             List<Product> local = products.search(criteria);
             if (!local.isEmpty() || criteria.hasFilters() || barcode.isEmpty()) return local;
-            SwingUtilities.invokeLater(() -> search.setStatus("Локально не найдено; ищем в SetRetailX…"));
+            SwingUtilities.invokeLater(() -> {
+                if (generation == searchGeneration) search.setStatus("Локально не найдено; ищем в SetRetailX…");
+            });
             return parentApiClient.searchOnlineProduct(lookup).map(List::of).orElseGet(List::of);
         }, results -> {
+            if (generation != searchGeneration) return;
             search.setSearchEnabled(true);
             search.showResults(results);
             search.setStatus(search.resultSummary());
         }, error -> {
+            if (generation != searchGeneration) return;
             search.setSearchEnabled(true);
             search.setStatus("Ошибка поиска: " + error);
         });

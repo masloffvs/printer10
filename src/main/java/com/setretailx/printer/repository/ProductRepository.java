@@ -366,8 +366,9 @@ public final class ProductRepository {
             Set<String> columns = columns(connection);
             if (columns.contains("price")) {
                 try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
-                        "SELECT MIN(CAST(price AS INTEGER)), MAX(CAST(price AS INTEGER)) FROM products "
-                                + "WHERE price IS NOT NULL AND CAST(price AS INTEGER) >= 0")) {
+                        "SELECT MIN(CAST(ROUND(CAST(price AS REAL), 0) AS INTEGER)), "
+                                + "MAX(CAST(ROUND(CAST(price AS REAL), 0) AS INTEGER)) FROM products "
+                                + "WHERE price IS NOT NULL AND CAST(price AS REAL) >= 0")) {
                     if (rows.next() && rows.getObject(1) != null) {
                         minimum = Math.max(0, rows.getLong(1));
                         maximum = Math.max(minimum, rows.getLong(2));

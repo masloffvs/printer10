@@ -66,10 +66,7 @@ final class PriceHistoryPanel extends JPanel {
         this.marking = marking;
         this.name = name == null || name.isBlank() ? "Без названия" : name;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
-        JLabel product = new JLabel("Артикул: " + marking + " · " + this.name
-                + (barcode == null || barcode.isBlank() ? "" : " · Штрихкод: " + barcode));
         JPanel header = new JPanel(new BorderLayout(6, 6));
-        header.add(product, BorderLayout.NORTH);
         JPanel filters = new JPanel(new FlowLayout(FlowLayout.LEADING, 8, 0));
         filters.add(new JLabel("Источник:"));
         filters.add(sourceFilter);

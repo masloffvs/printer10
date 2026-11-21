@@ -62,6 +62,7 @@ final class SearchPanel extends JPanel {
     private final JLabel resultSearchCount = new JLabel(" ");
     private final JPanel resultSearchBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
     private final JLabel resultCount = new JLabel(" ");
+    private final JPanel filterPane = new JPanel(new BorderLayout(0, 10));
     private final DefaultTableModel model = readOnlyModel("Товар", "Артикул", "Штрихкод", "Цена", "Остаток");
     private final JTable table = new JTable(model);
     private final JPanel filters = new FilterPanel();
@@ -94,35 +95,6 @@ final class SearchPanel extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
         JPanel resultPane = new JPanel(new BorderLayout(0, 8));
-        JPanel resultsHeader = new JPanel(new BorderLayout(0, 8));
-        JPanel resultsTitle = new JPanel(new BorderLayout(8, 0));
-        resultsTitle.setOpaque(false);
-        JLabel resultsHeading = new JLabel("Результаты поиска");
-        resultsHeading.setFont(resultsHeading.getFont().deriveFont(java.awt.Font.BOLD, 15f));
-        JButton toggleResultSearch = new JButton("Фильтр в списке");
-        toggleResultSearch.setFocusable(false);
-        toggleResultSearch.setToolTipText("Быстро отфильтровать уже загруженные результаты (Ctrl+F)");
-        toggleResultSearch.addActionListener(event -> toggleResultSearch());
-        resultsTitle.add(resultsHeading, BorderLayout.WEST);
-        resultsTitle.add(resultCount, BorderLayout.CENTER);
-        resultsTitle.add(toggleResultSearch, BorderLayout.EAST);
-        JPanel queryRow = new JPanel(new BorderLayout(8, 0));
-        queryRow.setOpaque(false);
-        input.setToolTipText("Название, артикул или штрихкод · Enter — поиск");
-        input.setPreferredSize(new Dimension(240, input.getPreferredSize().height));
-        queryRow.add(input, BorderLayout.CENTER);
-        JPanel queryActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
-        queryActions.setOpaque(false);
-        find.setToolTipText("Искать в локальном каталоге; Enter запускает поиск");
-        find.addActionListener(event -> search.run());
-        advancedSearch.setSelected(true);
-        advancedSearch.setToolTipText("Ищет каждое слово отдельно и учитывает варианты размеров: 1/2, 1x2, 1х2. Снимите отметку для поиска фразой целиком.");
-        queryActions.add(advancedSearch);
-        queryActions.add(find);
-        queryRow.add(queryActions, BorderLayout.EAST);
-        resultsHeader.add(resultsTitle, BorderLayout.NORTH);
-        resultsHeader.add(queryRow, BorderLayout.CENTER);
-        resultPane.add(resultsHeader, BorderLayout.NORTH);
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setAutoCreateRowSorter(true);
         table.setFillsViewportHeight(true);
@@ -134,6 +106,37 @@ final class SearchPanel extends JPanel {
         });
         addContextMenu(addSelected, openProduct);
         JPanel tableArea = new JPanel(new BorderLayout(0, 6));
+        tableArea.add(new JScrollPane(table), BorderLayout.CENTER);
+        resultPane.add(tableArea, BorderLayout.CENTER);
+        resultPane.add(status, BorderLayout.SOUTH);
+        add(resultPane, BorderLayout.CENTER);
+
+        JPanel filterPane = this.filterPane;
+        filterPane.setPreferredSize(new Dimension(320, 10));
+        filterPane.setMinimumSize(new Dimension(250, 10));
+        filterPane.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 1, 0, 0, javax.swing.UIManager.getColor("Component.borderColor")),
+                BorderFactory.createEmptyBorder(8, 14, 8, 2)));
+        JPanel queryControls = new JPanel(new BorderLayout(0, 6));
+        queryControls.setOpaque(false);
+        input.setToolTipText("Название, артикул или штрихкод · Enter — поиск");
+        input.setPreferredSize(new Dimension(240, input.getPreferredSize().height));
+        queryControls.add(input, BorderLayout.NORTH);
+        JPanel queryActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        queryActions.setOpaque(false);
+        find.setToolTipText("Искать в локальном каталоге; Enter запускает поиск");
+        find.addActionListener(event -> search.run());
+        advancedSearch.setSelected(true);
+        advancedSearch.setEnabled(false);
+        advancedSearch.setToolTipText("Поиск всегда учитывает каждое слово и варианты размеров: 1/2, 1x2, 1х2.");
+        queryActions.add(advancedSearch);
+        queryActions.add(find);
+        JButton toggleResultSearch = new JButton("Фильтр в списке");
+        toggleResultSearch.setFocusable(false);
+        toggleResultSearch.setToolTipText("Быстро отфильтровать уже загруженные результаты (Ctrl+F)");
+        toggleResultSearch.addActionListener(event -> toggleResultSearch());
+        queryActions.add(toggleResultSearch);
+        queryControls.add(queryActions, BorderLayout.CENTER);
         resultSearchBar.setOpaque(false);
         JLabel resultSearchLabel = new JLabel("Оставить в списке:");
         JButton closeResultSearch = new JButton("Закрыть");
@@ -144,21 +147,8 @@ final class SearchPanel extends JPanel {
         resultSearchBar.add(resultSearchCount);
         resultSearchBar.add(closeResultSearch);
         resultSearchBar.setVisible(false);
-        tableArea.add(resultSearchBar, BorderLayout.NORTH);
-        tableArea.add(new JScrollPane(table), BorderLayout.CENTER);
-        resultPane.add(tableArea, BorderLayout.CENTER);
-        resultPane.add(status, BorderLayout.SOUTH);
-        add(resultPane, BorderLayout.CENTER);
-
-        JPanel filterPane = new JPanel(new BorderLayout(0, 10));
-        filterPane.setPreferredSize(new Dimension(280, 10));
-        filterPane.setMinimumSize(new Dimension(250, 10));
-        filterPane.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(0, 1, 0, 0, javax.swing.UIManager.getColor("Component.borderColor")),
-                BorderFactory.createEmptyBorder(8, 14, 8, 2)));
-        JLabel filterHeading = new JLabel("Фильтры");
-        filterHeading.setFont(filterHeading.getFont().deriveFont(java.awt.Font.BOLD, 15f));
-        filterPane.add(filterHeading, BorderLayout.NORTH);
+        queryControls.add(resultSearchBar, BorderLayout.SOUTH);
+        filterPane.add(queryControls, BorderLayout.NORTH);
         buildFilters();
         JScrollPane filterScroll = new JScrollPane(filters);
         filterScroll.setBorder(null);
@@ -167,7 +157,6 @@ final class SearchPanel extends JPanel {
         filterScroll.getVerticalScrollBar().setUnitIncrement(14);
         filterPane.add(filterScroll, BorderLayout.CENTER);
 
-        JPanel actions = new JPanel(new java.awt.GridLayout(0, 1, 0, 7));
         input.addActionListener(event -> search.run());
         input.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
             private void changed() {
@@ -186,6 +175,7 @@ final class SearchPanel extends JPanel {
             }
         });
         clear.addActionListener(event -> resetFilters(search));
+        JPanel actions = new JPanel(new java.awt.GridLayout(0, 1, 0, 7));
         actions.add(clear);
         filterPane.add(actions, BorderLayout.SOUTH);
         add(filterPane, BorderLayout.EAST);
@@ -323,6 +313,18 @@ final class SearchPanel extends JPanel {
     private void updateAttributeValues() {
         String selected = (String) attributeName.getSelectedItem();
         List<String> values = attributeOptions.getOrDefault(selected, List.of());
+        if (!results.isEmpty() && !"Не выбрана".equals(selected)) {
+            values = results.stream()
+                    .map(product -> product.details().entrySet().stream()
+                            .filter(entry -> entry.getKey().equalsIgnoreCase(selected))
+                            .map(Map.Entry::getValue)
+                            .filter(value -> value != null && !value.isBlank())
+                            .findFirst().orElse(null))
+                    .filter(value -> value != null && !value.isBlank())
+                    .distinct()
+                    .sorted(String.CASE_INSENSITIVE_ORDER)
+                    .toList();
+        }
         attributeValue.removeAllItems();
         attributeValue.addItem("Любое значение");
         for (String value : values) attributeValue.addItem(value);
@@ -337,7 +339,7 @@ final class SearchPanel extends JPanel {
     }
 
     private static String money(long kopecks) {
-        return new java.text.DecimalFormat("#,##0.00 ₽").format(kopecks / 100.0);
+        return new com.setretailx.printer.model.Price(kopecks).format();
     }
 
     private long priceAt(int sliderValue) {
@@ -346,7 +348,7 @@ final class SearchPanel extends JPanel {
     }
 
     String query() { return input.getText().trim(); }
-    boolean advancedSearch() { return advancedSearch.isSelected(); }
+    boolean advancedSearch() { return true; }
     void setQuery(String query) { input.setText(query); }
     List<Product> selectedProducts() {
         return java.util.Arrays.stream(table.getSelectedRows())
@@ -552,6 +554,7 @@ final class SearchPanel extends JPanel {
     void showResults(List<Product> products) {
         unrankedResults = List.copyOf(products);
         updateResultSearch();
+        updateAttributeValues();
     }
 
     private void installResultSearch() {
