@@ -18,7 +18,6 @@ import java.awt.Color;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
-import java.awt.GradientPaint;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
@@ -131,7 +130,7 @@ final class SalesPointMapPanel extends JPanel {
             }
         });
         menu.add(rename);
-        JMenuItem appearance = new JMenuItem("Цвет и значок…");
+        JMenuItem appearance = new JMenuItem("Цвет точки…");
         appearance.addActionListener(event -> editPointAppearance(point));
         menu.add(appearance);
         JMenuItem delete = new JMenuItem("Удалить точку");
@@ -158,29 +157,13 @@ final class SalesPointMapPanel extends JPanel {
             Color chosen = JColorChooser.showDialog(this, "Цвет торговой точки", selected[0]);
             if (chosen != null) { selected[0] = chosen; color.setBackground(chosen); }
         });
-        javax.swing.JComboBox<String> icon = new javax.swing.JComboBox<>(new String[]{"store", "basket", "warehouse", "pin"});
-        icon.setSelectedItem(point.icon());
-        icon.setRenderer(new javax.swing.DefaultListCellRenderer() {
-            @Override public java.awt.Component getListCellRendererComponent(javax.swing.JList<?> list, Object value,
-                    int index, boolean selectedRow, boolean focus) {
-                super.getListCellRendererComponent(list, value, index, selectedRow, focus);
-                setText(switch (String.valueOf(value)) {
-                    case "basket" -> "Корзина";
-                    case "warehouse" -> "Склад";
-                    case "pin" -> "Метка";
-                    default -> "Магазин";
-                });
-                return this;
-            }
-        });
         JPanel form = new JPanel(new java.awt.GridLayout(0, 2, 6, 6));
         form.add(new JLabel("Цвет")); form.add(color);
-        form.add(new JLabel("Значок")); form.add(icon);
-        if (JOptionPane.showConfirmDialog(this, form, "Внешний вид точки",
+        if (JOptionPane.showConfirmDialog(this, form, "Цвет точки",
                 JOptionPane.OK_CANCEL_OPTION) != JOptionPane.OK_OPTION) return;
         try {
             String hex = String.format("#%06X", selected[0].getRGB() & 0xFFFFFF);
-            repository.updatePointAppearance(point.id(), hex, String.valueOf(icon.getSelectedItem()));
+            repository.updatePointAppearance(point.id(), hex, point.icon());
             refresh();
         } catch (Exception error) { showError("Не удалось изменить внешний вид точки", error); }
     }
@@ -289,7 +272,7 @@ final class SalesPointMapPanel extends JPanel {
             }
             JPopupMenu menu = new JPopupMenu();
             JMenuItem create = new JMenuItem("Создать точку здесь");
-            create.addActionListener(ignored -> createPoint(new Rectangle(world.x, world.y, 150, 72)));
+            create.addActionListener(ignored -> createPoint(new Rectangle(world.x, world.y, 132, 48)));
             menu.add(create);
             menu.show(MapCanvas.this, event.getX(), event.getY());
         }
@@ -399,7 +382,7 @@ final class SalesPointMapPanel extends JPanel {
         }
 
         private Rectangle bounds(SalesPoint point) {
-            return new Rectangle(point.x(), point.y(), point.width(), point.height());
+            return new Rectangle(point.x(), point.y(), Math.min(point.width(), 180), Math.min(point.height(), 48));
         }
 
         @Override protected void paintComponent(Graphics graphics) {
@@ -469,93 +452,27 @@ final class SalesPointMapPanel extends JPanel {
         }
 
         private void paintPoint(Graphics2D g, SalesPoint point, Rectangle bounds, boolean active) {
-            int arc = Math.min(12, Math.max(8, bounds.height / 5));
-            Color accent = accentColor();
             Color foreground = javax.swing.UIManager.getColor("Label.foreground");
             if (foreground == null) foreground = new Color(40, 52, 64);
             Color card = javax.swing.UIManager.getColor("Panel.background");
             if (card == null) card = Color.WHITE;
 
             Color pointColor = Color.decode(point.color());
-            g.setColor(blend(pointColor, card, active ? 0.76f : 0.88f));
-            g.fillRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, arc, arc);
-            g.setColor(active ? pointColor : blend(pointColor, card, 0.38f));
-            g.setStroke(new BasicStroke(active ? 1.5f : 0.8f));
-            g.drawRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, arc, arc);
+            Color base = active ? new Color(238, 242, 244) : card;
+            g.setColor(base);
+            g.fillRoundRect(bounds.x, bounds.y, bounds.width, bounds.height, 4, 4);
+            g.setColor(pointColor);
+            g.fillRoundRect(bounds.x, bounds.y, 3, bounds.height, 3, 3);
 
-            int pad = Math.max(10, bounds.width / 16);
-            int iconSize = Math.min(30, Math.max(22, bounds.height / 3));
-            int iconX = bounds.x + pad;
-            int iconY = bounds.y + Math.max(10, (bounds.height - iconSize) / 2 - 3);
-            g.setColor(blend(pointColor, card, 0.84f));
-            g.fillOval(iconX, iconY, iconSize, iconSize);
-            paintPointIcon(g, iconX, iconY, iconSize, pointColor, point.icon());
-
-            int textX = iconX + iconSize + Math.max(9, pad / 2);
-            int textWidth = Math.max(20, bounds.x + bounds.width - pad - textX);
-            int titleSize = Math.min(16, Math.max(12, bounds.height / 6));
+            int pad = 10;
+            int textX = bounds.x + pad;
+            int textWidth = Math.max(20, bounds.width - pad * 2);
+            int titleSize = Math.min(15, Math.max(12, bounds.height / 4));
             g.setColor(foreground);
             g.setFont(getFont().deriveFont(java.awt.Font.BOLD, (float) titleSize));
             FontMetrics titleMetrics = g.getFontMetrics();
-            int titleBaseline = bounds.y + Math.min(bounds.height - 9, Math.max(titleSize + 15,
-                    bounds.height / 2 - 1));
+            int titleBaseline = bounds.y + (bounds.height - titleMetrics.getHeight()) / 2 + titleMetrics.getAscent();
             g.drawString(ellipsize(point.name(), titleMetrics, textWidth), textX, titleBaseline);
-
-            if (bounds.height >= 64) {
-                g.setFont(getFont().deriveFont(java.awt.Font.PLAIN, Math.max(10f, titleSize - 3f)));
-                g.setColor(blend(foreground, card, 0.42f));
-                String meta = "№" + point.id();
-                FontMetrics metaMetrics = g.getFontMetrics();
-                int metaBaseline = Math.min(bounds.y + bounds.height - 10, titleBaseline + titleMetrics.getHeight() - 1);
-                g.drawString(ellipsize(meta, metaMetrics, textWidth), textX, metaBaseline);
-            }
-        }
-
-        private void paintStoreIcon(Graphics2D g, int x, int y, int size, Color accent) {
-            int inset = Math.max(6, size / 5);
-            int left = x + inset;
-            int width = size - inset * 2;
-            int roofY = y + Math.max(5, size / 5);
-            g.setColor(accent);
-            g.setStroke(new BasicStroke(1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            g.drawLine(left, roofY + 3, left + width, roofY + 3);
-            g.drawLine(left + 2, roofY + 2, left + 4, roofY - 2);
-            g.drawLine(left + 4, roofY - 2, left + width - 4, roofY - 2);
-            g.drawLine(left + width - 4, roofY - 2, left + width - 2, roofY + 2);
-            g.drawRoundRect(left + 2, roofY + 4, width - 4, size - inset - (roofY - y), 3, 3);
-            g.drawLine(left + width / 2, roofY + 5, left + width / 2, y + size - inset);
-            g.drawLine(left + 3, roofY + 9, left + width - 3, roofY + 9);
-        }
-
-        private void paintPointIcon(Graphics2D g, int x, int y, int size, Color accent, String icon) {
-            if ("store".equals(icon)) { paintStoreIcon(g, x, y, size, accent); return; }
-            int inset = Math.max(6, size / 4), left = x + inset, top = y + inset;
-            int width = size - inset * 2, height = size - inset * 2;
-            g.setColor(accent);
-            g.setStroke(new BasicStroke(1.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            switch (icon) {
-                case "basket" -> {
-                    g.drawLine(left + 1, top + 4, left + width - 1, top + 4);
-                    g.drawLine(left + 3, top + 4, left + 5, top + height - 1);
-                    g.drawLine(left + width - 3, top + 4, left + width - 5, top + height - 1);
-                    g.drawLine(left + 5, top + height - 1, left + width - 5, top + height - 1);
-                    g.drawLine(left + width / 3, top + 6, left + width / 3, top + height - 2);
-                    g.drawLine(left + width * 2 / 3, top + 6, left + width * 2 / 3, top + height - 2);
-                }
-                case "warehouse" -> {
-                    g.drawLine(left, top + 5, left + width / 2, top);
-                    g.drawLine(left + width / 2, top, left + width, top + 5);
-                    g.drawRect(left + 2, top + 5, width - 4, height - 5);
-                    g.drawRect(left + width / 3, top + height / 2, width / 3, height / 2);
-                }
-                case "pin" -> {
-                    g.drawOval(left + width / 4, top, width / 2, height / 2);
-                    g.drawLine(left + width / 4, top + height / 3, left + width / 2, top + height);
-                    g.drawLine(left + width * 3 / 4, top + height / 3, left + width / 2, top + height);
-                    g.fillOval(left + width * 2 / 5, top + height / 6, Math.max(2, width / 5), Math.max(2, width / 5));
-                }
-                default -> paintStoreIcon(g, x, y, size, accent);
-            }
         }
 
         private String ellipsize(String text, FontMetrics metrics, int width) {
@@ -569,18 +486,8 @@ final class SalesPointMapPanel extends JPanel {
         private Color accentColor() {
             Color accent = javax.swing.UIManager.getColor("Component.focusColor");
             if (accent == null) accent = javax.swing.UIManager.getColor("nimbusFocus");
-            if (accent == null) accent = new Color(47, 126, 105);
-            return accent;
+            return accent == null ? new Color(47, 126, 105) : accent;
         }
 
-        private Color blend(Color first, Color second, float secondWeight) {
-            if (first == null) first = new Color(40, 52, 64);
-            if (second == null) second = Color.WHITE;
-            float weight = Math.max(0f, Math.min(1f, secondWeight));
-            float firstWeight = 1f - weight;
-            return new Color(Math.round(first.getRed() * firstWeight + second.getRed() * weight),
-                    Math.round(first.getGreen() * firstWeight + second.getGreen() * weight),
-                    Math.round(first.getBlue() * firstWeight + second.getBlue() * weight));
-        }
     }
 }
