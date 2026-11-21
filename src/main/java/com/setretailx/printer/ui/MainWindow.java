@@ -71,7 +71,8 @@ public final class MainWindow extends JFrame {
     private final ComparisonPanel comparison;
     private final SearchPanel search = new SearchPanel(this::search, this::updateSearchSelection,
             this::addSelectedSearchResults, this::showProductCard,
-            picker -> workspace.addDynamicWindow("Выбор категории", picker, 500, 520));
+            picker -> workspace.addDynamicWindow("Выбор категории", picker, 500, 520),
+            this::suggestProducts);
     private final QueuePanel queue = new QueuePanel(this::assignSelected, this::removeSelected,
             this::clearQueue, this::moveSelected, this::printAssigned, this::printQueueList);
     private final OrderBuilderPanel orderBuilderPanel = new OrderBuilderPanel(orderBuilderRepository);
@@ -725,7 +726,8 @@ public final class MainWindow extends JFrame {
 
     private void search() {
         String query = search.query();
-        String lookup = query.isEmpty() ? "" : BarInput.barcode(query).orElse(query);
+        java.util.Optional<String> barcode = query.isEmpty() ? java.util.Optional.empty() : BarInput.barcode(query);
+        String lookup = barcode.orElse(query);
         ProductRepository.SearchCriteria criteria = new ProductRepository.SearchCriteria(lookup,
                 search.categoryFilter(), search.attributeNameFilter(), search.attributeValueFilter(),
                 search.minimumPriceFilter(), search.maximumPriceFilter(), search.advancedSearch());
@@ -737,17 +739,23 @@ public final class MainWindow extends JFrame {
         search.setSearchEnabled(false);
         runBackground(() -> {
             List<Product> local = products.search(criteria);
-            if (!local.isEmpty() || criteria.hasFilters() || lookup.isEmpty()) return local;
+            if (!local.isEmpty() || criteria.hasFilters() || barcode.isEmpty()) return local;
             SwingUtilities.invokeLater(() -> search.setStatus("Локально не найдено; ищем в SetRetailX…"));
             return parentApiClient.searchOnlineProduct(lookup).map(List::of).orElseGet(List::of);
         }, results -> {
             search.setSearchEnabled(true);
             search.showResults(results);
-            search.setStatus("Найдено товаров: " + results.size());
+            search.setStatus(search.resultSummary());
         }, error -> {
             search.setSearchEnabled(true);
             search.setStatus("Ошибка поиска: " + error);
         });
+    }
+
+    private void suggestProducts(String query) {
+        runBackground(() -> products.searchSuggestions(query, 8),
+                suggestions -> search.showSuggestions(query, suggestions),
+                error -> { });
     }
 
     private void printAssigned() {

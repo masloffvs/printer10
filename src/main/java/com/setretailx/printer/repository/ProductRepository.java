@@ -172,6 +172,17 @@ public final class ProductRepository {
     }
 
     public List<Product> search(SearchCriteria criteria) throws SQLException {
+        return search(criteria, 500);
+    }
+
+    /** Small, relevance-ranked result set used by the product-search autocomplete. */
+    public List<Product> searchSuggestions(String query, int limit) throws SQLException {
+        if (query == null || query.isBlank()) return List.of();
+        return search(new SearchCriteria(query, "", "", "", null, null, true),
+                Math.max(1, Math.min(20, limit)));
+    }
+
+    private List<Product> search(SearchCriteria criteria, int resultLimit) throws SQLException {
         SearchCriteria filters = criteria == null ? SearchCriteria.empty() : criteria;
         String text = filters.query().trim();
         try (Connection connection = connect()) {
@@ -243,15 +254,17 @@ public final class ProductRepository {
                 if (!filters.attributeValue().isBlank()) parameters.add(filters.attributeValue());
             }
             List<Object> orderingParameters = new ArrayList<>();
-            String relevance = relevanceOrder(columns, text, orderingParameters);
+            String relevance = relevanceOrder(columns, text, filters.advancedSearch(), orderingParameters);
             String sql = selectColumns(connection, columns) + " FROM products"
                     + (conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions))
-                    + " ORDER BY " + relevance + " LIMIT 500";
+                    + " ORDER BY " + relevance + " LIMIT ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 for (int i = 0; i < parameters.size(); i++) statement.setObject(i + 1, parameters.get(i));
                 for (int i = 0; i < orderingParameters.size(); i++) {
                     statement.setObject(parameters.size() + i + 1, orderingParameters.get(i));
                 }
+                statement.setInt(parameters.size() + orderingParameters.size() + 1,
+                        Math.max(1, Math.min(500, resultLimit)));
                 try (ResultSet rows = statement.executeQuery()) {
                     List<Product> products = new ArrayList<>();
                     while (rows.next()) products.add(product(rows));
@@ -284,40 +297,41 @@ public final class ProductRepository {
         return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
     }
 
-    private static String relevanceOrder(Set<String> columns, String text, List<Object> parameters) {
+    private static String relevanceOrder(Set<String> columns, String text, boolean advanced,
+                                         List<Object> parameters) {
         if (text.isEmpty()) return columns.contains("name") ? "\"name\" COLLATE NOCASE, product_id" : "product_id";
+        List<String> terms = advanced ? advancedTerms(text) : List.of(text);
+        List<String> scores = new ArrayList<>();
+        for (String term : terms) {
+            List<String> variants = advanced ? termVariants(term) : List.of(term);
+            StringBuilder score = new StringBuilder("CASE");
+            for (String variant : variants) {
+                String escaped = variant.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+                appendRelevanceCase(score, columns, "barcode", "=", -9, variant, parameters);
+                appendRelevanceCase(score, columns, "vendor_code", "=", -8, variant, parameters);
+                appendRelevanceCase(score, columns, "name", "=", -7, variant, parameters);
+                appendRelevanceCase(score, columns, "barcode", "LIKE", -5, escaped + "%", parameters);
+                appendRelevanceCase(score, columns, "vendor_code", "LIKE", -4, escaped + "%", parameters);
+                appendRelevanceCase(score, columns, "name", "LIKE", -3, escaped + "%", parameters);
+                appendRelevanceCase(score, columns, "name", "LIKE", 0, "%" + escaped + "%", parameters);
+                appendRelevanceCase(score, columns, "vendor_code", "LIKE", 1, "%" + escaped + "%", parameters);
+                appendRelevanceCase(score, columns, "barcode", "LIKE", 2, "%" + escaped + "%", parameters);
+            }
+            scores.add(score.append(" ELSE 3 END").toString());
+        }
+        String order = "(" + String.join(" + ", scores) + ")";
+        return order + (columns.contains("name") ? ", unicode_lower(CAST(\"name\" AS TEXT))" : ", product_id");
+    }
 
-        StringBuilder order = new StringBuilder("CASE");
-        if (columns.contains("barcode")) {
-            order.append(" WHEN CAST(\"barcode\" AS TEXT) = ? THEN 0");
-            parameters.add(text);
-            order.append(" WHEN unicode_lower(CAST(\"barcode\" AS TEXT)) = unicode_lower(?) THEN 1");
-            parameters.add(text);
-        }
-        if (columns.contains("vendor_code")) {
-            order.append(" WHEN unicode_lower(CAST(\"vendor_code\" AS TEXT)) = unicode_lower(?) THEN 2");
-            parameters.add(text);
-        }
-        if (columns.contains("name")) {
-            order.append(" WHEN unicode_lower(CAST(\"name\" AS TEXT)) = unicode_lower(?) THEN 3");
-            parameters.add(text);
-        }
-        if (columns.contains("barcode")) {
-            order.append(" WHEN unicode_lower(CAST(\"barcode\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\' THEN 4");
-            parameters.add(text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%");
-        }
-        if (columns.contains("vendor_code")) {
-            order.append(" WHEN unicode_lower(CAST(\"vendor_code\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\' THEN 5");
-            parameters.add(text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%");
-        }
-        if (columns.contains("name")) {
-            order.append(" WHEN unicode_lower(CAST(\"name\" AS TEXT)) LIKE unicode_lower(?) ESCAPE '\\' THEN 6");
-            parameters.add(text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%");
-        }
-        order.append(" ELSE 7 END");
-        if (columns.contains("name")) order.append(", unicode_lower(CAST(\"name\" AS TEXT))");
-        else order.append(", product_id");
-        return order.toString();
+    private static void appendRelevanceCase(StringBuilder score, Set<String> columns, String column,
+                                            String operator, int value, String pattern,
+                                            List<Object> parameters) {
+        if (!columns.contains(column)) return;
+        score.append(" WHEN unicode_lower(CAST(\"").append(column)
+                .append("\" AS TEXT)) ").append(operator).append(" unicode_lower(?)");
+        if ("LIKE".equals(operator)) score.append(" ESCAPE '\\'");
+        score.append(" THEN ").append(value);
+        parameters.add(pattern);
     }
 
     public SearchOptions searchOptions() throws SQLException {

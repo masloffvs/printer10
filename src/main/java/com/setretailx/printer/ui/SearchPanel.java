@@ -48,7 +48,7 @@ final class SearchPanel extends JPanel {
     private static final int PRICE_SLIDER_STEPS = 1000;
 
     private final JTextField input = new JTextField();
-    private final JCheckBox advancedSearch = new JCheckBox("Расширенный поиск");
+    private final JCheckBox advancedSearch = new JCheckBox("Все слова");
     private final JButton category = new JButton("Выбрать категорию…");
     private final JLabel selectedCategory = new JLabel("Все категории");
     private final JComboBox<String> attributeName = new CompactComboBox();
@@ -61,12 +61,16 @@ final class SearchPanel extends JPanel {
     private final JTextField resultSearchInput = new JTextField(22);
     private final JLabel resultSearchCount = new JLabel(" ");
     private final JPanel resultSearchBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+    private final JLabel resultCount = new JLabel(" ");
     private final DefaultTableModel model = readOnlyModel("Товар", "Артикул", "Штрихкод", "Цена", "Остаток");
     private final JTable table = new JTable(model);
     private final JPanel filters = new FilterPanel();
     private final JButton find = new JButton("Найти товары");
     private final JButton clear = new JButton("Сбросить");
     private final Consumer<JPanel> openCategoryPicker;
+    private final Consumer<String> requestSuggestions;
+    private final JPopupMenu suggestionsPopup = new JPopupMenu();
+    private final javax.swing.Timer suggestionsTimer;
     private List<Product> results = List.of();
     private List<Product> unrankedResults = List.of();
     private List<String> categories = List.of();
@@ -77,15 +81,48 @@ final class SearchPanel extends JPanel {
     private boolean updatingControls;
 
     SearchPanel(Runnable search, Runnable selectionChanged, Runnable addSelected, Consumer<Product> openProduct,
-                Consumer<JPanel> openCategoryPicker) {
+                Consumer<JPanel> openCategoryPicker, Consumer<String> requestSuggestions) {
         super(new BorderLayout(12, 10));
         this.openCategoryPicker = openCategoryPicker;
+        this.requestSuggestions = requestSuggestions;
+        suggestionsTimer = new javax.swing.Timer(300, event -> {
+            String query = query();
+            if (query.length() >= 2 && input.isEnabled()) requestSuggestions.accept(query);
+            else suggestionsPopup.setVisible(false);
+        });
+        suggestionsTimer.setRepeats(false);
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
         JPanel resultPane = new JPanel(new BorderLayout(0, 8));
+        JPanel resultsHeader = new JPanel(new BorderLayout(0, 8));
+        JPanel resultsTitle = new JPanel(new BorderLayout(8, 0));
+        resultsTitle.setOpaque(false);
         JLabel resultsHeading = new JLabel("Результаты поиска");
         resultsHeading.setFont(resultsHeading.getFont().deriveFont(java.awt.Font.BOLD, 15f));
-        resultPane.add(resultsHeading, BorderLayout.NORTH);
+        JButton toggleResultSearch = new JButton("Фильтр в списке");
+        toggleResultSearch.setFocusable(false);
+        toggleResultSearch.setToolTipText("Быстро отфильтровать уже загруженные результаты (Ctrl+F)");
+        toggleResultSearch.addActionListener(event -> toggleResultSearch());
+        resultsTitle.add(resultsHeading, BorderLayout.WEST);
+        resultsTitle.add(resultCount, BorderLayout.CENTER);
+        resultsTitle.add(toggleResultSearch, BorderLayout.EAST);
+        JPanel queryRow = new JPanel(new BorderLayout(8, 0));
+        queryRow.setOpaque(false);
+        input.setToolTipText("Название, артикул или штрихкод · Enter — поиск");
+        input.setPreferredSize(new Dimension(240, input.getPreferredSize().height));
+        queryRow.add(input, BorderLayout.CENTER);
+        JPanel queryActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        queryActions.setOpaque(false);
+        find.setToolTipText("Искать в локальном каталоге; Enter запускает поиск");
+        find.addActionListener(event -> search.run());
+        advancedSearch.setSelected(true);
+        advancedSearch.setToolTipText("Ищет каждое слово отдельно и учитывает варианты размеров: 1/2, 1x2, 1х2. Снимите отметку для поиска фразой целиком.");
+        queryActions.add(advancedSearch);
+        queryActions.add(find);
+        queryRow.add(queryActions, BorderLayout.EAST);
+        resultsHeader.add(resultsTitle, BorderLayout.NORTH);
+        resultsHeader.add(queryRow, BorderLayout.CENTER);
+        resultPane.add(resultsHeader, BorderLayout.NORTH);
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.setAutoCreateRowSorter(true);
         table.setFillsViewportHeight(true);
@@ -98,7 +135,7 @@ final class SearchPanel extends JPanel {
         addContextMenu(addSelected, openProduct);
         JPanel tableArea = new JPanel(new BorderLayout(0, 6));
         resultSearchBar.setOpaque(false);
-        JLabel resultSearchLabel = new JLabel("Найти в результатах:");
+        JLabel resultSearchLabel = new JLabel("Оставить в списке:");
         JButton closeResultSearch = new JButton("Закрыть");
         closeResultSearch.setFocusable(false);
         closeResultSearch.addActionListener(event -> closeResultSearch());
@@ -131,11 +168,24 @@ final class SearchPanel extends JPanel {
         filterPane.add(filterScroll, BorderLayout.CENTER);
 
         JPanel actions = new JPanel(new java.awt.GridLayout(0, 1, 0, 7));
-        find.setToolTipText("Выполнить предварительный поиск по выбранным условиям");
-        find.addActionListener(event -> search.run());
         input.addActionListener(event -> search.run());
+        input.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            private void changed() {
+                suggestionsPopup.setVisible(false);
+                suggestionsTimer.restart();
+            }
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent event) { changed(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent event) { changed(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent event) { changed(); }
+        });
+        input.getInputMap().put(javax.swing.KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "hideSuggestions");
+        input.getActionMap().put("hideSuggestions", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent event) {
+                suggestionsTimer.stop();
+                suggestionsPopup.setVisible(false);
+            }
+        });
         clear.addActionListener(event -> resetFilters(search));
-        actions.add(find);
         actions.add(clear);
         filterPane.add(actions, BorderLayout.SOUTH);
         add(filterPane, BorderLayout.EAST);
@@ -150,14 +200,7 @@ final class SearchPanel extends JPanel {
         c.anchor = GridBagConstraints.NORTHWEST;
         c.insets = new Insets(0, 0, 10, 0);
 
-        addSectionLabel("Поиск по тексту", c, 0);
-        input.setToolTipText("Название, артикул или штрихкод");
-        input.setPreferredSize(new Dimension(240, input.getPreferredSize().height));
-        filters.add(input, at(c, 1));
-        advancedSearch.setToolTipText("Ищет каждое слово отдельно и учитывает варианты размеров: 1/2, 1x2, 1х2");
-        filters.add(advancedSearch, at(c, 2));
-
-        addSectionLabel("Категория товара", c, 3);
+        addSectionLabel("Категория товара", c, 0);
         category.addActionListener(event -> chooseCategory());
         JPanel categoryChoice = new JPanel(new BorderLayout(0, 5));
         categoryChoice.setOpaque(false);
@@ -165,30 +208,30 @@ final class SearchPanel extends JPanel {
         selectedCategory.setPreferredSize(new Dimension(240, selectedCategory.getPreferredSize().height));
         categoryChoice.add(category, BorderLayout.NORTH);
         categoryChoice.add(selectedCategory, BorderLayout.CENTER);
-        filters.add(categoryChoice, at(c, 4));
+        filters.add(categoryChoice, at(c, 1));
 
-        addSectionLabel("Цена от", c, 5);
+        addSectionLabel("Цена от", c, 2);
         minimumPrice.setFocusable(false);
         minimumPrice.setPaintTicks(true);
         minimumPrice.setMajorTickSpacing(250);
-        filters.add(minimumPrice, at(c, 6));
-        filters.add(minimumPriceLabel, at(c, 7));
+        filters.add(minimumPrice, at(c, 3));
+        filters.add(minimumPriceLabel, at(c, 4));
 
-        addSectionLabel("Цена до", c, 8);
+        addSectionLabel("Цена до", c, 5);
         maximumPrice.setFocusable(false);
         maximumPrice.setPaintTicks(true);
         maximumPrice.setMajorTickSpacing(250);
-        filters.add(maximumPrice, at(c, 9));
-        filters.add(maximumPriceLabel, at(c, 10));
+        filters.add(maximumPrice, at(c, 6));
+        filters.add(maximumPriceLabel, at(c, 7));
 
-        addSectionLabel("Характеристика", c, 11);
+        addSectionLabel("Характеристика", c, 8);
         attributeName.addItem("Не выбрана");
         attributeName.addActionListener(event -> updateAttributeValues());
-        filters.add(attributeName, at(c, 12));
+        filters.add(attributeName, at(c, 9));
 
-        addSectionLabel("Значение", c, 13);
+        addSectionLabel("Значение", c, 10);
         attributeValue.addItem("Любое значение");
-        filters.add(attributeValue, at(c, 14));
+        filters.add(attributeValue, at(c, 11));
 
         minimumPrice.addChangeListener(event -> {
             if (minimumPrice.getValue() > maximumPrice.getValue()) maximumPrice.setValue(minimumPrice.getValue());
@@ -198,7 +241,7 @@ final class SearchPanel extends JPanel {
             if (maximumPrice.getValue() < minimumPrice.getValue()) minimumPrice.setValue(maximumPrice.getValue());
             updatePriceLabels();
         });
-        c.gridy = 15;
+        c.gridy = 12;
         c.weighty = 1;
         filters.add(new JPanel(), c);
     }
@@ -315,7 +358,39 @@ final class SearchPanel extends JPanel {
     int selectedCount() { return table.getSelectedRowCount(); }
     DefaultTableModel model() { return model; }
     void setStatus(String message) { status.setText(message); }
-    void setSearchEnabled(boolean enabled) { find.setEnabled(enabled); }
+    void setSearchEnabled(boolean enabled) {
+        find.setEnabled(enabled);
+        input.setEnabled(enabled);
+        if (!enabled) {
+            suggestionsTimer.stop();
+            suggestionsPopup.setVisible(false);
+        }
+    }
+
+    void showSuggestions(String requestedQuery, List<Product> products) {
+        if (!query().equals(requestedQuery) || !input.isFocusOwner() || products.isEmpty()) return;
+        suggestionsPopup.removeAll();
+        for (Product product : products) {
+            String label = product.name();
+            if (product.marking() != null && !product.marking().isBlank()) label += "  ·  " + product.marking();
+            if (product.barcode() != null && !product.barcode().isBlank()) label += "  ·  " + product.barcode();
+            if (product.price() != null) label += "  ·  " + product.price().format();
+            JMenuItem item = new JMenuItem(label);
+            item.setToolTipText(product.name());
+            item.addActionListener(event -> {
+                suggestionsTimer.stop();
+                suggestionsPopup.setVisible(false);
+                String exactQuery = product.barcode() != null && !product.barcode().isBlank()
+                        ? product.barcode()
+                        : product.marking() != null && !product.marking().isBlank()
+                        ? product.marking() : product.name();
+                setQuery(exactQuery);
+                find.doClick();
+            });
+            suggestionsPopup.add(item);
+        }
+        if (input.isShowing()) suggestionsPopup.show(input, 0, input.getHeight());
+    }
 
     String categoryFilter() { return categoryPath; }
     String attributeNameFilter() { return selected(attributeName, "Не выбрана"); }
@@ -516,7 +591,7 @@ final class SearchPanel extends JPanel {
         } else {
             String normalized = query.toLowerCase(Locale.ROOT);
             results = unrankedResults.stream()
-                    .sorted((left, right) -> Boolean.compare(matches(right, normalized), matches(left, normalized)))
+                    .filter(product -> matches(product, normalized))
                     .toList();
         }
         model.setRowCount(0);
@@ -525,22 +600,21 @@ final class SearchPanel extends JPanel {
                     product.price() == null ? "—" : product.price().format(),
                     product.totalQuantity().isEmpty() ? "—" : product.totalQuantity()});
         }
-        int count = query.isEmpty() ? 0 : (int) results.stream()
-                .filter(product -> matches(product, query.toLowerCase(Locale.ROOT))).count();
-        resultSearchCount.setText(query.isEmpty() ? " " : count + " совпад.");
+        resultSearchCount.setText(query.isEmpty() ? " " : results.size() + " из " + unrankedResults.size());
+        resultCount.setText(query.isEmpty() || unrankedResults.isEmpty()
+                ? (unrankedResults.isEmpty() ? "" : unrankedResults.size() + " товаров")
+                : results.size() + " из " + unrankedResults.size() + " товаров");
         if (table.getRowSorter() instanceof javax.swing.table.TableRowSorter<?> sorter) sorter.setSortKeys(null);
     }
 
     private static boolean matches(Product product, String normalizedQuery) {
-        return contains(product.name(), normalizedQuery)
-                || contains(product.marking(), normalizedQuery)
-                || contains(product.barcode(), normalizedQuery)
-                || contains(product.price() == null ? "—" : product.price().format(), normalizedQuery)
-                || contains(product.totalQuantity(), normalizedQuery);
-    }
-
-    private static boolean contains(String value, String normalizedQuery) {
-        return value != null && value.toLowerCase(Locale.ROOT).contains(normalizedQuery);
+        String searchable = String.join(" ", product.name(), product.marking(), product.barcode(),
+                product.price() == null ? "—" : product.price().format(), product.totalQuantity())
+                .toLowerCase(Locale.ROOT);
+        for (String term : normalizedQuery.split("\\s+")) {
+            if (!term.isBlank() && !searchable.contains(term)) return false;
+        }
+        return !normalizedQuery.isBlank();
     }
 
     private Product productAt(int row) {
@@ -574,7 +648,11 @@ final class SearchPanel extends JPanel {
         }
 
         private String highlight(String text, String query) {
-            Pattern pattern = Pattern.compile(Pattern.quote(query), Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+            String alternatives = java.util.Arrays.stream(query.trim().split("\\s+"))
+                    .filter(term -> !term.isBlank()).map(Pattern::quote)
+                    .collect(java.util.stream.Collectors.joining("|"));
+            if (alternatives.isEmpty()) return text;
+            Pattern pattern = Pattern.compile(alternatives, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
             Matcher matcher = pattern.matcher(text);
             StringBuilder html = new StringBuilder("<html>");
             int previous = 0;
@@ -593,6 +671,27 @@ final class SearchPanel extends JPanel {
             return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                     .replace("\"", "&quot;").replace("'", "&#39;");
         }
+    }
+
+    private void toggleResultSearch() {
+        if (!resultSearchBar.isVisible()) {
+            resultSearchBar.setVisible(true);
+            resultSearchInput.requestFocusInWindow();
+            resultSearchInput.selectAll();
+            revalidate();
+            repaint();
+        } else {
+            resultSearchInput.requestFocusInWindow();
+        }
+    }
+
+    String resultSummary() {
+        int total = unrankedResults.size();
+        int visible = results.size();
+        if (total == 0) return "Товары не найдены.";
+        if (total == 500) return "Выведено до 500 товаров. Уточните запрос, чтобы сузить список.";
+        if (visible < total) return "Показано " + visible + " из " + total + " товаров.";
+        return "Найдено товаров: " + total;
     }
 
     private static final class FilterPanel extends JPanel implements Scrollable {
