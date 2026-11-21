@@ -95,6 +95,7 @@ final class SalesAnalyticsPanel extends JPanel {
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
         JButton search = new JButton("Найти");
+        search.putClientProperty("JButton.buttonType", "default");
         search.addActionListener(event -> loadArticles());
         query.addActionListener(event -> loadArticles());
         period.addActionListener(event -> loadArticles());
@@ -167,7 +168,7 @@ final class SalesAnalyticsPanel extends JPanel {
             loadAnalytics();
         });
         JScrollPane articleScroll = new JScrollPane(articlesTable);
-        articleScroll.setBorder(BorderFactory.createTitledBorder("Артикулы с продажами"));
+        articleScroll.setBorder(BorderFactory.createEmptyBorder());
         articlesTree.setRootVisible(false);
         articlesTree.setShowsRootHandles(true);
         articlesTree.setCellRenderer(new SalesTreeRenderer());
@@ -186,7 +187,7 @@ final class SalesAnalyticsPanel extends JPanel {
         });
         installTreeContextMenu();
         JScrollPane treeScroll = new JScrollPane(articlesTree);
-        treeScroll.setBorder(BorderFactory.createTitledBorder("Артикулы по категориям · выберите товары или разделы"));
+        treeScroll.setBorder(BorderFactory.createEmptyBorder());
         articleViews.add(articleScroll, "table");
         articleViews.add(treeScroll, "tree");
         JButton selectVisible = new JButton("Выбрать всё"), clearSelection = new JButton("Снять выбор");
@@ -216,9 +217,9 @@ final class SalesAnalyticsPanel extends JPanel {
         recentTable.setAutoCreateRowSorter(true);
         configureSalesSorters(recentTable);
         JScrollPane recentScroll = new JScrollPane(recentTable);
-        recentScroll.setBorder(BorderFactory.createTitledBorder("Последние продажи · от новых к старым"));
+        recentScroll.setBorder(BorderFactory.createEmptyBorder());
         JScrollPane positionsScroll = new JScrollPane(positionsTable);
-        positionsScroll.setBorder(BorderFactory.createTitledBorder("Строки чеков по выбранным артикулам"));
+        positionsScroll.setBorder(BorderFactory.createEmptyBorder());
         JSplitPane right = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(daysTable), positionsScroll);
         right.setResizeWeight(.36);
         JTabbedPane salesTabs = new JTabbedPane();

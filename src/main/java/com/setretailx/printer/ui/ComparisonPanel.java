@@ -55,10 +55,12 @@ final class ComparisonPanel extends JPanel {
                 + "Назначение price3 неизвестно, поэтому оно не участвует в выводе о совпадении. "
                 + "В сгруппированных ячейках значения показаны по номерам #1–#4; «Совпадение» сравнивает "
                 + "цену ценника с обычной ценой или акционной ценой SetRetailX.");
-        add(new JScrollPane(table), BorderLayout.CENTER);
+        JScrollPane results = new JScrollPane(table);
+        results.setBorder(BorderFactory.createEmptyBorder());
+        add(results, BorderLayout.CENTER);
         JPanel footer = new JPanel(new BorderLayout(8, 0));
         footer.add(status, BorderLayout.CENTER);
-        JButton clear = new JButton("Очистить результаты");
+        JButton clear = new JButton("Очистить");
         clear.addActionListener(event -> {
             if (workerRunning) {
                 setStatus("Дождитесь завершения текущей проверки.");

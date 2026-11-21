@@ -101,7 +101,8 @@ final class OrderBuilderPanel extends JPanel {
         move.addActionListener(event -> moveSelectedToGroup());
         JButton remove = new JButton("Удалить выбранное");
         remove.addActionListener(event -> removeSelected());
-        JButton print = new JButton("Печать списка заказа");
+        JButton print = new JButton("Печать заказа");
+        print.putClientProperty("JButton.buttonType", "default");
         print.addActionListener(event -> printOrder());
         JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEADING, 6, 0));
         actions.add(group);
@@ -110,8 +111,8 @@ final class OrderBuilderPanel extends JPanel {
         actions.add(move);
         actions.add(remove);
         actions.add(print);
-        JPanel footer = new JPanel(new BorderLayout(6, 4));
-        footer.add(actions, BorderLayout.NORTH);
+        JPanel footer = new JPanel(new BorderLayout(8, 0));
+        footer.add(actions, BorderLayout.CENTER);
         footer.add(status, BorderLayout.SOUTH);
         add(footer, BorderLayout.SOUTH);
         refreshOrders(null);
