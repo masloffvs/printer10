@@ -5,6 +5,8 @@ import com.google.zxing.EncodeHintType;
 import com.google.zxing.MultiFormatWriter;
 import com.google.zxing.WriterException;
 import com.google.zxing.client.j2se.MatrixToImageWriter;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.setretailx.printer.model.Product;
 import com.setretailx.printer.repository.AddressStorageRepository;
 import com.setretailx.printer.repository.AddressStorageRepository.LocationResult;
@@ -66,6 +68,7 @@ import java.util.Map;
  */
 @SuppressWarnings("serial")
 final class ProductCardDialog extends JPanel {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final Map<String, String> LABELS = Map.ofEntries(
             Map.entry("brand", "Бренд"), Map.entry("brandname", "Бренд"),
             Map.entry("manufacturer", "Производитель"), Map.entry("manufacturername", "Производитель"),
@@ -665,7 +668,7 @@ final class ProductCardDialog extends JPanel {
             y = tagEnd == y ? y : tagEnd + 4;
 
             String description = findDetail(product.details(), "description");
-            if (!description.isBlank()) {
+            if (!description.isBlank() && !isJsonPayload(description)) {
                 y = drawSection(g, "ОПИСАНИЕ", x, y, width, paint);
                 g.setFont(BODY);
                 y = drawWrapped(g, normalizeText(description), x + 2, y + 10, width - 4, 12, paint) + 7;
@@ -673,9 +676,7 @@ final class ProductCardDialog extends JPanel {
 
             List<Map.Entry<String, String>> main = new ArrayList<>();
             for (Map.Entry<String, String> entry : product.details().entrySet()) {
-                String key = normalizeKey(entry.getKey());
-                if (HIDDEN_FIELDS.contains(key) || key.equals("catalogattributes") || isServiceField(key)
-                        || key.contains("json") || entry.getValue().isBlank()) continue;
+                if (!isPrintableDetail(entry)) continue;
                 main.add(entry);
             }
             if (!main.isEmpty()) {
@@ -774,11 +775,7 @@ final class ProductCardDialog extends JPanel {
             y += photoHeight + 7;
 
             List<Map.Entry<String, String>> attributes = product.details().entrySet().stream()
-                    .filter(entry -> {
-                        String key = normalizeKey(entry.getKey());
-                        return !HIDDEN_FIELDS.contains(key) && !key.equals("catalogattributes")
-                                && !isServiceField(key) && !key.contains("json") && !entry.getValue().isBlank();
-                    })
+                    .filter(ProductInfoPrintable::isPrintableDetail)
                     .limit(7)
                     .toList();
             if (!attributes.isEmpty()) {
@@ -861,7 +858,7 @@ final class ProductCardDialog extends JPanel {
         private String firstDetail(String... keys) {
             for (String key : keys) {
                 String value = findDetail(product.details(), key);
-                if (!value.isBlank()) return value;
+                if (!value.isBlank() && !isJsonPayload(value)) return value;
             }
             return "";
         }
@@ -983,6 +980,39 @@ final class ProductCardDialog extends JPanel {
         private static boolean isServiceField(String key) {
             return key.equals("id") || key.equals("code") || key.equals("cost") || key.startsWith("is")
                     || key.contains("flag") || key.contains("raw");
+        }
+
+        private static boolean isPrintableDetail(Map.Entry<String, String> entry) {
+            String key = normalizeKey(entry.getKey());
+            String value = entry.getValue();
+            return !value.isBlank() && !HIDDEN_FIELDS.contains(key) && !key.equals("catalogattributes")
+                    && !isServiceField(key) && !key.contains("json") && !key.contains("payload")
+                    && !key.contains("request") && !key.contains("response") && !isJsonPayload(value);
+        }
+
+        /** Ignore raw API/database blobs even when they were stored under a generic attribute name. */
+        private static boolean isJsonPayload(String value) {
+            String candidate = value == null ? "" : value.trim();
+            for (int attempt = 0; attempt < 2 && !candidate.isEmpty(); attempt++) {
+                if (!(candidate.startsWith("{") || candidate.startsWith("[") || candidate.startsWith("\""))) {
+                    return false;
+                }
+                try {
+                    JsonNode parsed = JSON.readTree(candidate);
+                    if (parsed == null) return false;
+                    if (parsed.isObject() || parsed.isArray()) return true;
+                    if (parsed.isTextual()) {
+                        candidate = parsed.asText().trim();
+                        continue;
+                    }
+                    return false;
+                } catch (com.fasterxml.jackson.core.JsonProcessingException ignored) {
+                    // A truncated or malformed blob is still not product information for a printout.
+                    return candidate.startsWith("{") || candidate.startsWith("[")
+                            || candidate.startsWith("\"");
+                }
+            }
+            return false;
         }
 
         private static boolean isValidEan13(String value) {
