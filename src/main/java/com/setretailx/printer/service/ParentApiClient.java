@@ -78,6 +78,15 @@ public final class ParentApiClient {
         return values(call(request).path("positions"), PriceMonitoringTaskService.SalesPosition.class);
     }
 
+    public List<PriceMonitoringTaskService.SalesPosition> recentSalesPositions(Double from, Double to,
+                                                                                int limit) throws Exception {
+        ObjectNode request = authenticated("sales.recentPositions");
+        number(request, "fromInclusive", from);
+        number(request, "toExclusive", to);
+        request.put("limit", limit);
+        return values(call(request).path("positions"), PriceMonitoringTaskService.SalesPosition.class);
+    }
+
     public java.util.Optional<Product> searchOnlineProduct(String barcode) throws Exception {
         ObjectNode request = request("catalog.searchBarcode");
         addTokenIfLoggedIn(request);

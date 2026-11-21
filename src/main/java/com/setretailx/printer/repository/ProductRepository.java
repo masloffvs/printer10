@@ -455,6 +455,37 @@ public final class ProductRepository {
         }
     }
 
+    /** Category paths for sales articles, loaded in one catalog query. */
+    public Map<String, String> categoryPaths(List<String> markings) throws SQLException {
+        if (markings == null || markings.isEmpty()) return Map.of();
+        try (Connection connection = connect()) {
+            Set<String> columns = columns(connection);
+            if (!columns.contains("product_id") || !hasTable(connection, "product_categories_path")) return Map.of();
+            String identity = columns.contains("vendor_code")
+                    ? "CASE WHEN TRIM(COALESCE(p.vendor_code, ''))<>'' THEN TRIM(p.vendor_code) || '_' || "
+                    + (columns.contains("uom") ? "COALESCE(NULLIF(TRIM(p.uom), ''), 'ST')" : "'ST'")
+                    + " ELSE CAST(p.product_id AS TEXT) END"
+                    : "CAST(p.product_id AS TEXT)";
+            String sql = "SELECT " + identity + " AS marking, "
+                    + "group_concat(c.name, ' › ') AS category FROM products p "
+                    + "LEFT JOIN (SELECT product_id, group_concat(name, ' › ') AS name FROM "
+                    + "(SELECT product_id, name FROM product_categories_path ORDER BY position) GROUP BY product_id) c "
+                    + "ON c.product_id=p.product_id WHERE " + identity + " IN (" + "?,".repeat(markings.size());
+            sql = sql.substring(0, sql.length() - 1) + ") GROUP BY marking";
+            Map<String, String> result = new java.util.LinkedHashMap<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                for (int index = 0; index < markings.size(); index++) statement.setString(index + 1, markings.get(index));
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        String category = rows.getString("category");
+                        result.put(rows.getString("marking"), category == null || category.isBlank() ? "Без категории" : category);
+                    }
+                }
+            }
+            return result;
+        }
+    }
+
     private Set<String> columns(Connection connection) throws SQLException {
         Set<String> columns = new LinkedHashSet<>();
         try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery("PRAGMA table_info(products)")) {

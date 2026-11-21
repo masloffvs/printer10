@@ -109,6 +109,7 @@ public final class MainWindow extends JFrame {
     private final SalesPointEditorPanel salesPointEditorPanel = new SalesPointEditorPanel(salesPoints);
     private final SalesPointChangesPanel salesPointChangesPanel = new SalesPointChangesPanel(
             this::processSalesPointChanges, this::refreshSalesPointChanges);
+    private final SalesChartPanel salesChartPanel = new SalesChartPanel(List.of());
     private final SalesPointMapPanel salesPointMapPanel = new SalesPointMapPanel(salesPoints,
             point -> {
                 salesPointEditorPanel.refreshPoints();
@@ -156,8 +157,8 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("apiExchangeLog", new ApiExchangeLogPanel(), 1000, 620);
         workspace.addWindow("peerMesh", peerMeshPanel, 850, 500);
         workspace.addWindow("history", history, 760, 420);
-        workspace.addWindow("salesHistory", new SalesAnalyticsPanel(parentApiClient,
-                this::openSalesArticleCard, this::enqueueSalesArticle), 900, 600);
+        workspace.addWindow("salesHistory", new SalesAnalyticsPanel(parentApiClient, products,
+                this::openSalesArticleCard, this::enqueueSalesArticle, this::showSalesChart), 1100, 700);
         workspace.addWindow("priceChangePrintHistory", changedPrintHistoryPanel, 950, 540);
         workspace.addWindow("tasks", taskPanel, 900, 520);
         workspace.addWindow("storage", addressStoragePanel, 900, 560);
@@ -270,6 +271,12 @@ public final class MainWindow extends JFrame {
 
     private void refreshPeerMesh() {
         if (peerMeshPanel != null) peerMeshPanel.refreshPeers();
+    }
+
+    private void showSalesChart(List<PriceMonitoringTaskService.SalesDay> days) {
+        salesChartPanel.setDays(days);
+        workspace.showDynamicWindow("salesAnalyticsChart", "Графики истории продаж",
+                salesChartPanel, 900, 560);
     }
 
     private void submitScan() {

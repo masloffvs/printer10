@@ -59,17 +59,23 @@ public final class ParentApiService {
             case "sales.history" -> {
                 require(request, AccountRepository.Permission.SALES_READ);
                 List<String> markings = strings(request.path("markings"));
-                if (markings.isEmpty() || markings.size() > 500)
-                    throw new IllegalArgumentException("Необходимо указать от 1 до 500 артикулов.");
+                if (markings.isEmpty() || markings.size() > 5000)
+                    throw new IllegalArgumentException("Необходимо указать от 1 до 5000 артикулов.");
                 response.set("days", JSON.valueToTree(tasks.salesHistory(markings,
                         optionalNumber(request.path("fromInclusive")), optionalNumber(request.path("toExclusive")))));
             }
             case "sales.positions" -> {
                 require(request, AccountRepository.Permission.SALES_READ);
                 List<String> markings = strings(request.path("markings"));
-                if (markings.isEmpty() || markings.size() > 500)
-                    throw new IllegalArgumentException("Необходимо указать от 1 до 500 артикулов.");
+                if (markings.isEmpty() || markings.size() > 5000)
+                    throw new IllegalArgumentException("Необходимо указать от 1 до 5000 артикулов.");
                 response.set("positions", JSON.valueToTree(tasks.salesPositions(markings,
+                        optionalNumber(request.path("fromInclusive")), optionalNumber(request.path("toExclusive")),
+                        bounded(request.path("limit").asInt(2000), 1, 20_000))));
+            }
+            case "sales.recentPositions" -> {
+                require(request, AccountRepository.Permission.SALES_READ);
+                response.set("positions", JSON.valueToTree(tasks.recentSalesPositions(
                         optionalNumber(request.path("fromInclusive")), optionalNumber(request.path("toExclusive")),
                         bounded(request.path("limit").asInt(2000), 1, 20_000))));
             }

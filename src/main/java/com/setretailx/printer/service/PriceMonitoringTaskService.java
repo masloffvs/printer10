@@ -474,6 +474,31 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return result;
     }
 
+    /** Latest receipt lines across all articles, newest receipt and position first. */
+    public List<SalesPosition> recentSalesPositions(Double fromInclusive, Double toExclusive,
+                                                     int limit) throws SQLException {
+        StringBuilder sql = new StringBuilder("SELECT check_id, check_number, sold_at, date_commit, name, item, barcode, "
+                + "quantity, unit, price, cost, discount FROM sales_positions WHERE item IS NOT NULL AND TRIM(item)<>'' ");
+        if (fromInclusive != null) sql.append("AND sold_at>=? ");
+        if (toExclusive != null) sql.append("AND sold_at<? ");
+        sql.append("ORDER BY sold_at DESC, check_id DESC, position_order DESC LIMIT ?");
+        List<SalesPosition> result = new ArrayList<>();
+        try (Connection connection = connect(); PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            if (fromInclusive != null) statement.setDouble(parameter++, fromInclusive);
+            if (toExclusive != null) statement.setDouble(parameter++, toExclusive);
+            statement.setInt(parameter, Math.max(1, Math.min(limit, 20_000)));
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) result.add(new SalesPosition(rows.getLong("check_id"), rows.getString("check_number"),
+                        rows.getDouble("sold_at"), rows.getDouble("date_commit"), rows.getString("name"),
+                        rows.getString("item"), rows.getString("barcode"), rows.getDouble("quantity"),
+                        rows.getString("unit"), rows.getDouble("price"), rows.getDouble("cost"),
+                        rows.getDouble("discount")));
+            }
+        }
+        return result;
+    }
+
     /** Individual receipt lines for one article, including the receipt and position timestamps. */
     public List<SalesPosition> salesPositions(String marking) throws SQLException {
         List<SalesPosition> result = new ArrayList<>();
