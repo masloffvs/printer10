@@ -2,14 +2,13 @@ package com.setretailx.printer.ui;
 
 import com.setretailx.printer.service.ParentApiClient;
 import com.setretailx.printer.repository.ProductRepository;
+import com.setretailx.printer.repository.SalesPointRepository;
 import com.setretailx.printer.service.PriceMonitoringTaskService.SalesArticle;
-import com.setretailx.printer.service.PriceMonitoringTaskService.SalesDay;
 import com.setretailx.printer.service.PriceMonitoringTaskService.SalesPosition;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
-import javax.swing.JCheckBox;
 import javax.swing.JMenuItem;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -31,10 +30,8 @@ import java.math.BigDecimal;
 import java.text.NumberFormat;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 import java.util.Map;
 import java.util.ArrayList;
 import java.util.Enumeration;
@@ -53,69 +50,47 @@ final class SalesAnalyticsPanel extends JPanel {
     private final ProductRepository products;
     private final Consumer<SalesArticle> openProductCard;
     private final Consumer<SalesArticle> addToPrintQueue;
-    private final Consumer<List<SalesDay>> openChart;
     private final JTextField query = new JTextField(24);
     private final JComboBox<Period> period = new JComboBox<>(Period.values());
-    private final JCheckBox treeView = new JCheckBox("Дерево категорий");
     private final DefaultTableModel articlesModel = new SalesArticleTableModel();
-    private final DefaultTableModel daysModel = new TypedTableModel(
-            new Object[]{"День", "Продано", "Выручка", "Чеков"},
-            new Class<?>[]{java.util.Date.class, BigDecimal.class, BigDecimal.class, Integer.class});
-    private final DefaultTableModel positionsModel = new TypedTableModel(
-            new Object[]{"Дата", "Чек", "Товар", "Кол-во", "Цена", "Сумма", "Скидка"},
-            new Class<?>[]{java.util.Date.class, ReceiptNumber.class, String.class,
-                    BigDecimal.class, BigDecimal.class, BigDecimal.class, BigDecimal.class});
     private final DefaultTableModel recentModel = new TypedTableModel(
             new Object[]{"Дата продажи", "Чек", "Товар", "Кол-во", "Цена", "Сумма", "Скидка"},
             new Class<?>[]{java.util.Date.class, ReceiptNumber.class, String.class,
                     BigDecimal.class, BigDecimal.class, BigDecimal.class, BigDecimal.class});
     private final JTable articlesTable = new JTable(articlesModel);
+    private final SalesPointRepository salesPoints = new SalesPointRepository();
     private final DefaultMutableTreeNode articlesRoot = new DefaultMutableTreeNode("Артикулы");
     private final DefaultTreeModel articlesTreeModel = new DefaultTreeModel(articlesRoot);
     private final JTree articlesTree = new JTree(articlesTreeModel);
-    private final JPanel articleViews = new JPanel(new java.awt.CardLayout());
-    private final JLabel summary = new JLabel("Выберите артикулы, чтобы увидеть общие продажи.");
+    private final JLabel summary = new JLabel(" ");
     private final JLabel status = new JLabel(" ");
     private final AtomicLong requestId = new AtomicLong();
     private final AtomicLong recentRequestId = new AtomicLong();
     private List<SalesArticle> articles = List.of();
-    private List<SalesDay> days = List.of();
     private Map<String, String> categories = Map.of();
-    private Set<String> selected = new LinkedHashSet<>();
-    private boolean updatingTable;
+    private Map<String, List<String>> pointNames = Map.of();
 
     SalesAnalyticsPanel(ParentApiClient service, ProductRepository products, Consumer<SalesArticle> openProductCard,
-                        Consumer<SalesArticle> addToPrintQueue, Consumer<List<SalesDay>> openChart) {
+                        Consumer<SalesArticle> addToPrintQueue) {
         super(new BorderLayout(8, 8));
         this.service = service;
         this.products = products;
         this.openProductCard = openProductCard;
         this.addToPrintQueue = addToPrintQueue;
-        this.openChart = openChart;
         setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
         JButton search = new JButton("Найти");
         search.putClientProperty("JButton.buttonType", "default");
         search.addActionListener(event -> loadArticles());
         query.addActionListener(event -> loadArticles());
-        period.addActionListener(event -> loadArticles());
-        period.addActionListener(event -> loadRecentSales());
-        treeView.addActionListener(event -> {
-            ((java.awt.CardLayout) articleViews.getLayout()).show(articleViews,
-                    treeView.isSelected() ? "tree" : "table");
-            syncTreeSelection();
-        });
-        JPanel controls = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 8, 2));
-        controls.add(new JLabel("Поиск товара / артикула / штрихкода:"));
+        period.addActionListener(event -> { loadArticles(); loadRecentSales(); });
+        JPanel controls = new JPanel(new java.awt.GridLayout(0, 1, 0, 7));
+        controls.add(new JLabel("Поиск товара / артикула / штрихкода"));
         controls.add(query);
-        controls.add(search);
-        controls.add(new JLabel("Период:"));
+        controls.add(new JLabel("Период продаж"));
         controls.add(period);
-        controls.add(treeView);
-        JButton chartButton = new JButton("Открыть графики…");
-        chartButton.addActionListener(event -> openChart.accept(days));
-        controls.add(chartButton);
-        JButton refresh = new JButton("Обновить");
+        controls.add(search);
+        JButton refresh = new JButton("Обновить данные");
         refresh.addActionListener(event -> { loadArticles(); loadRecentSales(); });
         controls.add(refresh);
         JButton login = new JButton();
@@ -130,12 +105,7 @@ final class SalesAnalyticsPanel extends JPanel {
                     articles = List.of();
                     categories = Map.of();
                     recentModel.setRowCount(0);
-                    days = List.of();
-                    daysModel.setRowCount(0);
-                    positionsModel.setRowCount(0);
-                    selected.clear();
                     populateArticlesTable();
-                    loadAnalytics();
                     status.setText("Сеанс завершён.");
                 } catch (Exception error) { showError(error); }
             } else if (showLoginDialog()) {
@@ -145,89 +115,43 @@ final class SalesAnalyticsPanel extends JPanel {
             }
         });
         controls.add(login);
-        JPanel header = new JPanel(new BorderLayout(4, 4));
-        header.add(controls, BorderLayout.NORTH);
-        header.add(summary, BorderLayout.SOUTH);
-        add(header, BorderLayout.NORTH);
 
         articlesTable.setFillsViewportHeight(true);
         articlesTable.setAutoCreateRowSorter(true);
-        articlesTable.getColumnModel().getColumn(0).setMaxWidth(34);
         articlesTable.setDefaultRenderer(Object.class, new SalesCellRenderer());
         installArticleContextMenu();
-        articlesTable.getModel().addTableModelListener(event -> {
-            if (updatingTable || event.getType() != javax.swing.event.TableModelEvent.UPDATE
-                    || event.getColumn() != 0 || event.getFirstRow() < 0) return;
-            // TableModelEvent indices are already model indices (unlike mouse/selection events).
-            int row = event.getFirstRow();
-            if (row >= articlesModel.getRowCount()) return;
-            String marking = String.valueOf(articlesModel.getValueAt(row, 1));
-            if (Boolean.TRUE.equals(articlesModel.getValueAt(row, 0))) selected.add(marking);
-            else selected.remove(marking);
-            syncTreeSelection();
-            loadAnalytics();
-        });
-        JScrollPane articleScroll = new JScrollPane(articlesTable);
-        articleScroll.setBorder(BorderFactory.createEmptyBorder());
         articlesTree.setRootVisible(false);
         articlesTree.setShowsRootHandles(true);
         articlesTree.setCellRenderer(new SalesTreeRenderer());
-        articlesTree.getSelectionModel().setSelectionMode(
-                javax.swing.tree.TreeSelectionModel.DISCONTIGUOUS_TREE_SELECTION);
-        articlesTree.addTreeSelectionListener(event -> {
-            if (updatingTable) return;
-            Set<String> visible = new LinkedHashSet<>();
-            for (SalesArticle article : articles) visible.add(article.marking());
-            selected.removeAll(visible);
-            TreePath[] paths = articlesTree.getSelectionPaths();
-            if (paths != null) for (TreePath path : paths)
-                collectTreeArticles((DefaultMutableTreeNode) path.getLastPathComponent(), selected);
-            syncArticleTableSelection();
-            loadAnalytics();
-        });
         installTreeContextMenu();
         JScrollPane treeScroll = new JScrollPane(articlesTree);
-        treeScroll.setBorder(BorderFactory.createEmptyBorder());
-        articleViews.add(articleScroll, "table");
-        articleViews.add(treeScroll, "tree");
-        JButton selectVisible = new JButton("Выбрать всё"), clearSelection = new JButton("Снять выбор");
-        selectVisible.addActionListener(event -> setVisibleSelected(true));
-        clearSelection.addActionListener(event -> {
-            selected.clear();
-            syncSelection();
-            loadAnalytics();
-        });
-        JPanel articleControls = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 2));
-        articleControls.add(selectVisible);
-        articleControls.add(clearSelection);
+        treeScroll.setBorder(BorderFactory.createTitledBorder("Категории товаров"));
         JPanel articlePanel = new JPanel(new BorderLayout());
-        articlePanel.add(articleViews, BorderLayout.CENTER);
-        articlePanel.add(articleControls, BorderLayout.SOUTH);
-
-        JTable daysTable = new JTable(daysModel);
-        daysTable.setFillsViewportHeight(true);
-        daysTable.setAutoCreateRowSorter(true);
-        configureSalesSorters(daysTable);
-        JTable positionsTable = new JTable(positionsModel);
-        positionsTable.setFillsViewportHeight(true);
-        positionsTable.setAutoCreateRowSorter(true);
-        configureSalesSorters(positionsTable);
+        JScrollPane articleScroll = new JScrollPane(articlesTable);
+        articleScroll.setBorder(BorderFactory.createTitledBorder("Товары с продажами"));
+        articlePanel.add(articleScroll, BorderLayout.CENTER);
         JTable recentTable = new JTable(recentModel);
         recentTable.setFillsViewportHeight(true);
         recentTable.setAutoCreateRowSorter(true);
         configureSalesSorters(recentTable);
         JScrollPane recentScroll = new JScrollPane(recentTable);
         recentScroll.setBorder(BorderFactory.createEmptyBorder());
-        JScrollPane positionsScroll = new JScrollPane(positionsTable);
-        positionsScroll.setBorder(BorderFactory.createEmptyBorder());
-        JSplitPane right = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(daysTable), positionsScroll);
-        right.setResizeWeight(.36);
         JTabbedPane salesTabs = new JTabbedPane();
+        salesTabs.addTab("Товары и продажи", articlePanel);
         salesTabs.addTab("Последние чеки", recentScroll);
-        salesTabs.addTab("Аналитика", right);
-        JSplitPane content = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, articlePanel, salesTabs);
-        content.setResizeWeight(.36);
-        content.setDividerLocation(410);
+        JSplitPane left = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, treeScroll, salesTabs);
+        left.setResizeWeight(.23);
+        left.setDividerLocation(260);
+        JPanel filterPane = new JPanel(new BorderLayout(8, 8));
+        filterPane.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 1, 0, 0, javax.swing.UIManager.getColor("Component.borderColor")),
+                BorderFactory.createEmptyBorder(10, 12, 10, 4)));
+        filterPane.setPreferredSize(new java.awt.Dimension(245, 10));
+        filterPane.add(controls, BorderLayout.NORTH);
+        filterPane.add(summary, BorderLayout.SOUTH);
+        JSplitPane content = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, left, filterPane);
+        content.setResizeWeight(.79);
+        content.setDividerLocation(850);
         add(content, BorderLayout.CENTER);
         add(status, BorderLayout.SOUTH);
         if (service.isLoggedIn()) loadRecentSales();
@@ -278,20 +202,10 @@ final class SalesAnalyticsPanel extends JPanel {
 
     private void installArticleContextMenu() {
         JPopupMenu menu = new JPopupMenu();
-        JMenuItem showStats = new JMenuItem("Показать статистику продаж");
         JMenuItem openCard = new JMenuItem("Открыть карточку товара");
         JMenuItem queue = new JMenuItem("Добавить в очередь печати");
-        menu.add(showStats);
         menu.add(openCard);
         menu.add(queue);
-        showStats.addActionListener(event -> {
-            SalesArticle article = contextArticle();
-            if (article == null) return;
-            selected.clear();
-            selected.add(article.marking());
-            syncSelection();
-            loadAnalytics();
-        });
         openCard.addActionListener(event -> {
             SalesArticle article = contextArticle();
             if (article != null) openProductCard.accept(article);
@@ -318,7 +232,7 @@ final class SalesAnalyticsPanel extends JPanel {
         if (viewRow < 0) return null;
         int row = articlesTable.convertRowIndexToModel(viewRow);
         if (row < 0 || row >= articlesModel.getRowCount()) return null;
-        String marking = String.valueOf(articlesModel.getValueAt(row, 1));
+        String marking = String.valueOf(articlesModel.getValueAt(row, 0));
         return articles.stream().filter(article -> article.marking().equals(marking)).findFirst().orElse(null);
     }
 
@@ -334,7 +248,15 @@ final class SalesAnalyticsPanel extends JPanel {
                 Map<String, String> paths;
                 try { paths = products.categoryPaths(found.stream().map(SalesArticle::marking).toList()); }
                 catch (Exception ignored) { paths = Map.of(); }
-                return new LoadedArticles(found, paths);
+                List<String> locationKeys = new ArrayList<>();
+                for (SalesArticle article : found) {
+                    locationKeys.add(article.marking());
+                    if (!article.barcode().isBlank()) locationKeys.add(article.barcode());
+                }
+                Map<String, List<String>> locations;
+                try { locations = salesPoints.locationNamesForProducts(locationKeys); }
+                catch (Exception ignored) { locations = Map.of(); }
+                return new LoadedArticles(found, paths, locations);
             }
             @Override protected void done() {
                 if (id != requestId.get()) return;
@@ -342,80 +264,29 @@ final class SalesAnalyticsPanel extends JPanel {
                     LoadedArticles loaded = get();
                     articles = loaded.articles();
                     categories = loaded.categories();
+                    pointNames = loaded.locations();
                     populateArticlesTable();
-                    summary.setText(articles.size() + " артикулов в выдаче · отмечено: " + selected.size()
-                            + " (выбор сохраняется между поисками) · данные синхронизируются в разделе «Задачи».");
+                    summary.setText("В таблице показаны итоги локальной истории чеков и связанные торговые точки.");
                     status.setText(articles.isEmpty()
                             ? "Продажи не найдены. Проверьте запрос или успешность задачи «История продаж из чеков»."
                             : "Показано артикулов: " + articles.size() + (articles.size() == 2000 ? " (лимит выдачи)" : ""));
-                    loadAnalytics();
                 } catch (Exception error) {
-                    updatingTable = false;
                     showError(error);
                 }
             }
         }.execute();
     }
 
-    private void loadAnalytics() {
-        long id = requestId.incrementAndGet();
-        List<String> markings = List.copyOf(selected);
-        double[] bounds = periodBounds();
-        if (markings.isEmpty()) {
-            days = List.of();
-            daysModel.setRowCount(0);
-            positionsModel.setRowCount(0);
-            summary.setText(articles.size() + " артикулов в выборке · отметьте артикулы для общей аналитики.");
-            return;
-        }
-        status.setText("Считаем продажи для " + markings.size() + " артикулов…");
-        new SwingWorker<LoadedSales, Void>() {
-            @Override protected LoadedSales doInBackground() throws Exception {
-                Double from = bounds[0] < 0 ? null : bounds[0];
-                Double to = bounds[1] < 0 ? null : bounds[1];
-                return new LoadedSales(service.salesHistory(markings, from, to),
-                        service.salesPositions(markings, from, to, POSITION_LIMIT));
-            }
-            @Override protected void done() {
-                if (id != requestId.get()) return;
-                try {
-                    LoadedSales loaded = get();
-                    days = loaded.days();
-                    daysModel.setRowCount(0);
-                    double units = 0, revenue = 0;
-                    int checks = 0;
-                    for (SalesDay day : days) {
-                        daysModel.addRow(new Object[]{new java.util.Date(day.dayEpochSeconds() * 1000),
-                                BigDecimal.valueOf(day.units()), BigDecimal.valueOf(day.revenue()), day.checks()});
-                        units += day.units(); revenue += day.revenue(); checks += day.checks();
-                    }
-                    positionsModel.setRowCount(0);
-                    for (SalesPosition position : loaded.positions()) {
-                        positionsModel.addRow(new Object[]{new java.util.Date((long) (position.soldAt() * 1000)),
-                                new ReceiptNumber(position.checkNumber()), position.name(),
-                                BigDecimal.valueOf(position.quantity()), BigDecimal.valueOf(position.price()),
-                                BigDecimal.valueOf(position.cost()), BigDecimal.valueOf(position.discount())});
-                    }
-                    summary.setText("Выбрано артикулов: " + markings.size() + " · продано: " + quantity(units)
-                            + " · выручка: " + MONEY.format(revenue) + " · чеков по дням: " + checks
-                            + " · дней с продажами: " + days.size());
-                    status.setText("Позиции чеков: " + loaded.positions().size()
-                            + (loaded.positions().size() == POSITION_LIMIT ? " (показан лимит последних " + POSITION_LIMIT + ")" : ""));
-                } catch (Exception error) { showError(error); }
-            }
-        }.execute();
-    }
-
     private void populateArticlesTable() {
-        updatingTable = true;
         articlesModel.setRowCount(0);
         for (SalesArticle article : articles) {
-            articlesModel.addRow(new Object[]{selected.contains(article.marking()), article.marking(), article.name(),
-                    article.barcode(), BigDecimal.valueOf(article.units()), BigDecimal.valueOf(article.revenue()),
-                    article.checks()});
+            List<String> locations = new ArrayList<>(pointNames.getOrDefault(normalizeKey(article.marking()), List.of()));
+            locations.addAll(pointNames.getOrDefault(normalizeKey(article.barcode()), List.of()));
+            articlesModel.addRow(new Object[]{article.marking(), article.barcode(),
+                    article.name(), BigDecimal.valueOf(article.units()), BigDecimal.valueOf(article.revenue()),
+                    article.checks(), String.join(", ", locations.stream().distinct().toList())});
         }
         populateArticlesTree();
-        updatingTable = false;
     }
 
     private void populateArticlesTree() {
@@ -445,53 +316,14 @@ final class SalesAnalyticsPanel extends JPanel {
         articlesTreeModel.reload();
         articlesTree.expandPath(new TreePath(articlesRoot.getPath()));
         for (int row = 0; row < articlesTree.getRowCount(); row++) articlesTree.expandRow(row);
-        syncTreeSelection();
-    }
-
-    private static void collectTreeArticles(DefaultMutableTreeNode node, Set<String> markings) {
-        Object value = node.getUserObject();
-        if (value instanceof SalesArticle article) {
-            markings.add(article.marking());
-            return;
-        }
-        Enumeration<?> children = node.children();
-        while (children.hasMoreElements())
-            collectTreeArticles((DefaultMutableTreeNode) children.nextElement(), markings);
-    }
-
-    private void syncTreeSelection() {
-        List<TreePath> paths = new ArrayList<>();
-        collectSelectedTreePaths(articlesRoot, paths);
-        boolean wasUpdating = updatingTable;
-        updatingTable = true;
-        articlesTree.setSelectionPaths(paths.toArray(TreePath[]::new));
-        updatingTable = wasUpdating;
-    }
-
-    private void collectSelectedTreePaths(DefaultMutableTreeNode node, List<TreePath> paths) {
-        if (node.getUserObject() instanceof SalesArticle article && selected.contains(article.marking()))
-            paths.add(new TreePath(node.getPath()));
-        Enumeration<?> children = node.children();
-        while (children.hasMoreElements())
-            collectSelectedTreePaths((DefaultMutableTreeNode) children.nextElement(), paths);
     }
 
     private void installTreeContextMenu() {
         JPopupMenu menu = new JPopupMenu();
-        JMenuItem showStats = new JMenuItem("Показать статистику продаж");
         JMenuItem openCard = new JMenuItem("Открыть карточку товара");
         JMenuItem queue = new JMenuItem("Добавить в очередь печати");
-        menu.add(showStats);
         menu.add(openCard);
         menu.add(queue);
-        showStats.addActionListener(event -> {
-            SalesArticle article = treeContextArticle();
-            if (article == null) return;
-            selected.clear();
-            selected.add(article.marking());
-            syncSelection();
-            loadAnalytics();
-        });
         openCard.addActionListener(event -> {
             SalesArticle article = treeContextArticle();
             if (article != null) openProductCard.accept(article);
@@ -548,28 +380,6 @@ final class SalesAnalyticsPanel extends JPanel {
         }.execute();
     }
 
-    private void setVisibleSelected(boolean value) {
-        if (value) for (SalesArticle article : articles) selected.add(article.marking());
-        else selected.clear();
-        syncSelection();
-        loadAnalytics();
-    }
-
-    private void syncSelection() {
-        updatingTable = true;
-        syncArticleTableSelection();
-        syncTreeSelection();
-        updatingTable = false;
-    }
-
-    private void syncArticleTableSelection() {
-        boolean wasUpdating = updatingTable;
-        updatingTable = true;
-        for (int row = 0; row < articlesModel.getRowCount(); row++)
-            articlesModel.setValueAt(selected.contains(String.valueOf(articlesModel.getValueAt(row, 1))), row, 0);
-        updatingTable = wasUpdating;
-    }
-
     /** Bounds are epoch seconds; negative values represent an unbounded side. */
     private double[] periodBounds() {
         Period chosen = (Period) period.getSelectedItem();
@@ -587,19 +397,28 @@ final class SalesAnalyticsPanel extends JPanel {
                 + (cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage()));
     }
 
-    private static String quantity(double value) {
-        NUMBER.setMaximumFractionDigits(3);
-        return NUMBER.format(value);
-    }
-
-    private record LoadedSales(List<SalesDay> days, List<SalesPosition> positions) { }
-    private record LoadedArticles(List<SalesArticle> articles, Map<String, String> categories) { }
+    private record LoadedArticles(List<SalesArticle> articles, Map<String, String> categories,
+                                  Map<String, List<String>> locations) { }
     private enum Period {
         WEEK("7 дней", 7), MONTH("30 дней", 30), QUARTER("90 дней", 90), ALL("Всё время", 0);
         private final String title;
         private final int days;
         Period(String title, int days) { this.title = title; this.days = days; }
         @Override public String toString() { return title; }
+    }
+
+    private static final class SalesArticleTableModel extends DefaultTableModel {
+        SalesArticleTableModel() {
+            super(new Object[]{"Артикул", "Штрихкод", "Название", "Продано", "Выручка", "Чеков", "Торговые точки"}, 0);
+        }
+        @Override public boolean isCellEditable(int row, int column) { return false; }
+        @Override public Class<?> getColumnClass(int column) {
+            return switch (column) {
+                case 3, 4 -> BigDecimal.class;
+                case 5 -> Integer.class;
+                default -> String.class;
+            };
+        }
     }
 
     private static final class TypedTableModel extends DefaultTableModel {
@@ -609,24 +428,7 @@ final class SalesAnalyticsPanel extends JPanel {
             this.columnTypes = columnTypes.clone();
         }
         @Override public boolean isCellEditable(int row, int column) { return false; }
-        @Override public Class<?> getColumnClass(int column) {
-            return columnTypes[column];
-        }
-    }
-
-    private static final class SalesArticleTableModel extends DefaultTableModel {
-        SalesArticleTableModel() {
-            super(new Object[]{"✓", "Артикул", "Название", "Штрихкод", "Продано", "Выручка", "Чеков"}, 0);
-        }
-        @Override public boolean isCellEditable(int row, int column) { return column == 0; }
-        @Override public Class<?> getColumnClass(int column) {
-            return switch (column) {
-                case 0 -> Boolean.class;
-                case 4, 5 -> BigDecimal.class;
-                case 6 -> Integer.class;
-                default -> String.class;
-            };
-        }
+        @Override public Class<?> getColumnClass(int column) { return columnTypes[column]; }
     }
 
     private record CategoryNode(String name) {
@@ -672,12 +474,21 @@ final class SalesAnalyticsPanel extends JPanel {
             } else if (value instanceof BigDecimal decimal) {
                 String columnName = table.getColumnName(column);
                 setText(java.util.Set.of("Выручка", "Цена", "Сумма", "Скидка").contains(columnName)
-                        ? MONEY.format(decimal) : quantity(decimal.doubleValue()));
+                        ? MONEY.format(decimal) : formatQuantity(decimal.doubleValue()));
             } else if (value instanceof ReceiptNumber receipt) setText(receipt.value());
             else setText(value == null ? "" : value.toString());
             setHorizontalAlignment(value instanceof Number || value instanceof BigDecimal
                     ? javax.swing.SwingConstants.RIGHT : javax.swing.SwingConstants.LEFT);
             return this;
         }
+    }
+
+    private static String formatQuantity(double value) {
+        NUMBER.setMaximumFractionDigits(3);
+        return NUMBER.format(value);
+    }
+
+    private static String normalizeKey(String key) {
+        return key == null ? "" : key.trim().toLowerCase(Locale.ROOT);
     }
 }

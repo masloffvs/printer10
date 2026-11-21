@@ -110,7 +110,6 @@ public final class MainWindow extends JFrame {
     private final SalesPointEditorPanel salesPointEditorPanel = new SalesPointEditorPanel(salesPoints);
     private final SalesPointChangesPanel salesPointChangesPanel = new SalesPointChangesPanel(
             this::processSalesPointChanges, this::refreshSalesPointChanges);
-    private final SalesChartPanel salesChartPanel = new SalesChartPanel(List.of());
     private final SalesPointMapPanel salesPointMapPanel = new SalesPointMapPanel(salesPoints,
             point -> {
                 salesPointEditorPanel.refreshPoints();
@@ -163,7 +162,7 @@ public final class MainWindow extends JFrame {
         workspace.addWindow("peerMesh", peerMeshPanel, 850, 500);
         workspace.addWindow("history", history, 760, 420);
         workspace.addWindow("salesHistory", new SalesAnalyticsPanel(parentApiClient, products,
-                this::openSalesArticleCard, this::enqueueSalesArticle, this::showSalesChart), 1100, 700);
+                this::openSalesArticleCard, this::enqueueSalesArticle), 1100, 700);
         workspace.addWindow("priceChangePrintHistory", changedPrintHistoryPanel, 950, 540);
         workspace.addWindow("tasks", taskPanel, 900, 520);
         workspace.addWindow("storage", addressStoragePanel, 900, 560);
@@ -275,12 +274,6 @@ public final class MainWindow extends JFrame {
 
     private void refreshPeerMesh() {
         if (peerMeshPanel != null) peerMeshPanel.refreshPeers();
-    }
-
-    private void showSalesChart(List<PriceMonitoringTaskService.SalesDay> days) {
-        salesChartPanel.setDays(days);
-        workspace.showDynamicWindow("salesAnalyticsChart", "Графики истории продаж",
-                salesChartPanel, 900, 560);
     }
 
     private void submitScan() {
@@ -742,8 +735,38 @@ public final class MainWindow extends JFrame {
         search.setStatus("Ищем в локальной базе…");
         search.setSearchEnabled(false);
         runBackground(() -> {
-            List<Product> local = products.search(criteria);
-            if (!local.isEmpty() || criteria.hasFilters() || barcode.isEmpty()) return local;
+            java.util.Set<String> salesKeys = taskService.salesSearchKeys();
+            List<Product> local = products.search(criteria, salesKeys);
+            List<String> resultKeys = new ArrayList<>();
+            for (Product product : local) {
+                if (!product.vendorCode().isBlank()) resultKeys.add(product.vendorCode());
+                if (!product.stCode().isBlank()) resultKeys.add(product.stCode());
+                if (!product.marking().isBlank()) resultKeys.add(product.marking());
+                if (!product.barcode().isBlank()) resultKeys.add(product.barcode());
+            }
+            List<PriceMonitoringTaskService.SalesArticle> sales = taskService.salesSummaryForKeys(resultKeys);
+            Map<String, PriceMonitoringTaskService.SalesArticle> salesByKey = new LinkedHashMap<>();
+            for (PriceMonitoringTaskService.SalesArticle article : sales) {
+                salesByKey.put(article.marking().trim().toLowerCase(java.util.Locale.ROOT), article);
+                if (!article.barcode().isBlank()) salesByKey.put(article.barcode().trim().toLowerCase(java.util.Locale.ROOT), article);
+            }
+            List<Product> enriched = local.stream().map(product -> {
+                PriceMonitoringTaskService.SalesArticle article = salesByKey.get(product.marking().trim().toLowerCase(java.util.Locale.ROOT));
+                if (article == null && !product.vendorCode().isBlank())
+                    article = salesByKey.get(product.vendorCode().trim().toLowerCase(java.util.Locale.ROOT));
+                if (article == null && !product.stCode().isBlank())
+                    article = salesByKey.get(product.stCode().trim().toLowerCase(java.util.Locale.ROOT));
+                if (article == null && !product.barcode().isBlank())
+                    article = salesByKey.get(product.barcode().trim().toLowerCase(java.util.Locale.ROOT));
+                if (article == null) return product;
+                Map<String, String> details = new LinkedHashMap<>(product.details());
+                details.put("salesUnits", String.format(java.util.Locale.ROOT, "%.3f", article.units()));
+                details.put("salesRevenue", String.format(java.util.Locale.ROOT, "%.2f", article.revenue()));
+                details.put("salesChecks", Integer.toString(article.checks()));
+                return new Product(product.stCode(), product.name(), product.vendorCode(), product.barcode(),
+                        product.uom(), product.source(), product.price(), product.totalQuantity(), details, product.rawJson());
+            }).toList();
+            if (!enriched.isEmpty() || criteria.hasFilters() || barcode.isEmpty()) return enriched;
             SwingUtilities.invokeLater(() -> {
                 if (generation == searchGeneration) search.setStatus("Локально не найдено; ищем в SetRetailX…");
             });

@@ -21,6 +21,7 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.function.Consumer;
+import java.util.Collection;
 import org.sqlite.Function;
 
 /** Exact barcode lookup and local catalog search against all_products.sqlite. */
@@ -172,20 +173,40 @@ public final class ProductRepository {
     }
 
     public List<Product> search(SearchCriteria criteria) throws SQLException {
-        return search(criteria, 500);
+        return search(criteria, Set.of(), 500);
+    }
+
+    /** Search while prioritizing products whose catalog keys occur in the local receipt history. */
+    public List<Product> search(SearchCriteria criteria, Collection<String> salesKeys) throws SQLException {
+        return search(criteria, salesKeys == null ? Set.of() : new LinkedHashSet<>(salesKeys), 500);
     }
 
     /** Small, relevance-ranked result set used by the product-search autocomplete. */
     public List<Product> searchSuggestions(String query, int limit) throws SQLException {
         if (query == null || query.isBlank()) return List.of();
-        return search(new SearchCriteria(query, "", "", "", null, null, true),
+        return search(new SearchCriteria(query, "", "", "", null, null, true), Set.of(),
                 Math.max(1, Math.min(20, limit)));
     }
 
-    private List<Product> search(SearchCriteria criteria, int resultLimit) throws SQLException {
+    private List<Product> search(SearchCriteria criteria, Set<String> salesKeys, int resultLimit) throws SQLException {
         SearchCriteria filters = criteria == null ? SearchCriteria.empty() : criteria;
         String text = filters.query().trim();
         try (Connection connection = connect()) {
+            if (!salesKeys.isEmpty()) {
+                try (Statement setup = connection.createStatement()) {
+                    setup.executeUpdate("CREATE TEMP TABLE IF NOT EXISTS search_sales_keys (key TEXT PRIMARY KEY)");
+                    setup.executeUpdate("DELETE FROM search_sales_keys");
+                }
+                try (PreparedStatement insert = connection.prepareStatement(
+                        "INSERT OR IGNORE INTO search_sales_keys(key) VALUES(?)")) {
+                    for (String key : salesKeys) {
+                        if (key == null || key.isBlank()) continue;
+                        insert.setString(1, key.trim().toLowerCase(Locale.ROOT));
+                        insert.addBatch();
+                    }
+                    insert.executeBatch();
+                }
+            }
             Function.create(connection, "unicode_lower", new Function() {
                 @Override protected void xFunc() throws SQLException {
                     String value = value_text(0);
@@ -255,9 +276,32 @@ public final class ProductRepository {
             }
             List<Object> orderingParameters = new ArrayList<>();
             String relevance = relevanceOrder(columns, text, filters.advancedSearch(), orderingParameters);
+            String salesPriority = "";
+            if (!salesKeys.isEmpty()) {
+                List<String> salesMatches = new ArrayList<>();
+                if (columns.contains("vendor_code")) {
+                    String vendor = "unicode_lower(TRIM(CAST(products.\"vendor_code\" AS TEXT)))";
+                    salesMatches.add("EXISTS (SELECT 1 FROM search_sales_keys sk WHERE sk.key=" + vendor + ")");
+                    if (columns.contains("uom")) {
+                        String marking = "unicode_lower(TRIM(CAST(products.\"vendor_code\" AS TEXT)) || '_' || "
+                                + "COALESCE(NULLIF(TRIM(CAST(products.\"uom\" AS TEXT)), ''), 'ST'))";
+                        salesMatches.add("EXISTS (SELECT 1 FROM search_sales_keys sk WHERE sk.key=" + marking + ")");
+                    }
+                }
+                if (columns.contains("product_id")) {
+                    String productId = "unicode_lower(TRIM(CAST(products.\"product_id\" AS TEXT)))";
+                    salesMatches.add("EXISTS (SELECT 1 FROM search_sales_keys sk WHERE sk.key=" + productId + ")");
+                }
+                if (columns.contains("barcode")) {
+                    String barcode = "unicode_lower(CAST(products.\"barcode\" AS TEXT))";
+                    salesMatches.add("EXISTS (SELECT 1 FROM search_sales_keys sk WHERE sk.key=" + barcode + ")");
+                }
+                if (!salesMatches.isEmpty()) salesPriority = "CASE WHEN " + String.join(" OR ", salesMatches)
+                        + " THEN 0 ELSE 1 END, ";
+            }
             String sql = selectColumns(connection, columns) + " FROM products"
                     + (conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions))
-                    + " ORDER BY " + relevance + " LIMIT ?";
+                    + " ORDER BY " + salesPriority + relevance + " LIMIT ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 for (int i = 0; i < parameters.size(); i++) statement.setObject(i + 1, parameters.get(i));
                 for (int i = 0; i < orderingParameters.size(); i++) {

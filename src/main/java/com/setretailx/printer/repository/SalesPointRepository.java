@@ -11,6 +11,9 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.awt.Color;
 
@@ -180,6 +183,33 @@ public final class SalesPointRepository {
             }
         }
         return result;
+    }
+
+    /** Batch lookup for search and sales tables; keys are article/barcode values from shelf rows. */
+    public Map<String, List<String>> locationNamesForProducts(Collection<String> keys) throws SQLException {
+        if (keys == null || keys.isEmpty()) return Map.of();
+        List<String> values = keys.stream().filter(Objects::nonNull).map(String::trim)
+                .filter(value -> !value.isBlank()).distinct().toList();
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        try (Connection connection = connect()) {
+            for (int start = 0; start < values.size(); start += 400) {
+                List<String> batch = values.subList(start, Math.min(values.size(), start + 400));
+                String placeholders = "?,".repeat(batch.size());
+                String sql = "SELECT lower(TRIM(i.article)) AS article, p.name AS point_name FROM sales_point_items i "
+                        + "JOIN sales_points p ON p.point_id=i.point_id WHERE lower(TRIM(i.article)) IN (" + placeholders
+                        + ") ORDER BY p.name COLLATE NOCASE";
+                try (PreparedStatement query = connection.prepareStatement(sql)) {
+                    for (int i = 0; i < batch.size(); i++) query.setString(i + 1, batch.get(i).toLowerCase(java.util.Locale.ROOT));
+                    try (ResultSet rows = query.executeQuery()) {
+                        while (rows.next()) result.computeIfAbsent(rows.getString("article"), ignored -> new ArrayList<>())
+                                .add(rows.getString("point_name"));
+                    }
+                }
+            }
+        }
+        Map<String, List<String>> immutable = new LinkedHashMap<>();
+        result.forEach((key, names) -> immutable.put(key, List.copyOf(names)));
+        return Map.copyOf(immutable);
     }
 
     public List<String> productItemOrBarcodes() throws SQLException {

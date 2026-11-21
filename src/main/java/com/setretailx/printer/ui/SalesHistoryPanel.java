@@ -1,5 +1,7 @@
 package com.setretailx.printer.ui;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.setretailx.printer.service.PriceMonitoringTaskService;
 
 import javax.swing.BorderFactory;
@@ -25,10 +27,13 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
+import java.util.ArrayList;
+import java.util.Comparator;
 
 /** Daily sales totals and receipt lines for one product article. */
 @SuppressWarnings("serial")
 final class SalesHistoryPanel extends JPanel {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("dd.MM.yyyy");
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
     private static final NumberFormat NUMBER = NumberFormat.getNumberInstance(Locale.forLanguageTag("ru-RU"));
@@ -41,6 +46,7 @@ final class SalesHistoryPanel extends JPanel {
     private final JLabel status = new JLabel("Загружаем историю продаж…");
     private final SalesChart chart = new SalesChart();
     private List<PriceMonitoringTaskService.SalesDay> days = List.of();
+    private List<PriceMarker> priceMarkers = List.of();
     private long loadGeneration;
 
     SalesHistoryPanel(PriceMonitoringTaskService service, String marking, String name, String barcode) {
@@ -78,8 +84,10 @@ final class SalesHistoryPanel extends JPanel {
     private void load() {
         long generation = ++loadGeneration;
         new SwingWorker<LoadedSales, Void>() {
-            @Override protected LoadedSales doInBackground() throws SQLException {
-                return new LoadedSales(service.salesHistory(marking), service.salesPositions(marking));
+            @Override protected LoadedSales doInBackground() throws Exception {
+                List<PriceMonitoringTaskService.PriceSnapshot> snapshots = service.priceHistory(marking);
+                return new LoadedSales(service.salesHistory(marking), service.salesPositions(marking),
+                        buildPriceMarkers(snapshots));
             }
 
             @Override protected void done() {
@@ -87,6 +95,7 @@ final class SalesHistoryPanel extends JPanel {
                 try {
                     LoadedSales loaded = get();
                     days = loaded.days();
+                    priceMarkers = loaded.priceMarkers();
                     daysModel.setRowCount(0);
                     for (var day : days) {
                         daysModel.addRow(new Object[]{Instant.ofEpochSecond(day.dayEpochSeconds())
@@ -103,7 +112,8 @@ final class SalesHistoryPanel extends JPanel {
                     }
                     chart.repaint();
                     if (days.isEmpty()) status.setText("История пока пуста. Первичная загрузка чеков за последние 6 дней выполняется фоновой задачей.");
-                    else status.setText("Дней с продажами: " + days.size() + " · строк чеков: " + loaded.positions().size()
+                    else status.setText("Дней с продажами: " + days.size() + " · изменений цен на графике: " + priceMarkers.size()
+                            + " · строк чеков: " + loaded.positions().size()
                             + (loaded.positions().size() == 2000 ? " (показаны последние 2000)" : ""));
                 } catch (Exception error) {
                     Throwable cause = error.getCause() == null ? error : error.getCause();
@@ -125,8 +135,34 @@ final class SalesHistoryPanel extends JPanel {
         return NUMBER.format(value);
     }
 
+    private static List<PriceMarker> buildPriceMarkers(List<PriceMonitoringTaskService.PriceSnapshot> snapshots) {
+        List<PriceMonitoringTaskService.PriceSnapshot> chronological = new ArrayList<>(snapshots);
+        chronological.sort(Comparator.comparingDouble(PriceMonitoringTaskService.PriceSnapshot::capturedAt));
+        List<PriceMarker> result = new ArrayList<>();
+        String previous = null;
+        for (var snapshot : chronological) {
+            String signature;
+            try {
+                JsonNode root = JSON.readTree(snapshot.pricesJson() == null ? "{}" : snapshot.pricesJson());
+                signature = root.path("pricesMap").path("2").toString() + "|"
+                        + root.path("pricesMap").path("4").toString() + "|"
+                        + root.path("prices99Map").path("2").toString() + "|"
+                        + root.path("prices99Map").path("4").toString();
+            } catch (Exception ignored) { continue; }
+            if (previous != null && !previous.equals(signature)) {
+                long epoch = (long) snapshot.capturedAt();
+                java.time.LocalDate date = Instant.ofEpochSecond(epoch).atZone(ZoneId.systemDefault()).toLocalDate();
+                result.add(new PriceMarker(date.toEpochDay(), date.format(DAY)));
+            }
+            previous = signature;
+        }
+        return List.copyOf(result);
+    }
+
     private record LoadedSales(List<PriceMonitoringTaskService.SalesDay> days,
-                               List<PriceMonitoringTaskService.SalesPosition> positions) { }
+                               List<PriceMonitoringTaskService.SalesPosition> positions,
+                               List<PriceMarker> priceMarkers) { }
+    private record PriceMarker(long day, String label) { }
 
     private final class SalesChart extends JPanel {
         private SalesChart() {
@@ -141,27 +177,58 @@ final class SalesHistoryPanel extends JPanel {
             Graphics2D g = (Graphics2D) graphics.create();
             try {
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                int left = 42, right = 12, top = 14, bottom = 24;
+                int left = 48, right = 14, top = 18, bottom = 34;
                 int width = getWidth() - left - right;
                 int height = getHeight() - top - bottom;
-                double max = days.stream().mapToDouble(PriceMonitoringTaskService.SalesDay::units).max().orElse(1);
+                if (width <= 0 || height <= 0) return;
+                List<PriceMonitoringTaskService.SalesDay> chronological = new ArrayList<>(days);
+                chronological.sort(Comparator.comparingLong(PriceMonitoringTaskService.SalesDay::dayEpochSeconds));
+                double max = chronological.stream().mapToDouble(PriceMonitoringTaskService.SalesDay::units).max().orElse(1);
                 if (max <= 0) max = 1;
                 g.setColor(chartForeground());
                 g.drawLine(left, top + height, left + width, top + height);
-                int count = Math.min(days.size(), Math.max(1, width / 30));
-                double slot = (double) width / count;
-                for (int i = 0; i < count; i++) {
-                    var value = days.get(count - i - 1);
-                    int barHeight = (int) Math.round(height * value.units() / max);
-                    int barWidth = Math.max(4, (int) (slot * .62));
-                    int x = left + (int) (i * slot + (slot - barWidth) / 2);
-                    int y = top + height - barHeight;
-                    g.setColor(new Color(55, 155, 245));
-                    g.fillRoundRect(x, y, barWidth, barHeight, 5, 5);
-                    g.setColor(chartForeground());
-                    String label = Instant.ofEpochSecond(value.dayEpochSeconds()).atZone(ZoneId.of("UTC")).format(DAY);
-                    if (count <= 12) g.drawString(label, x - 8, top + height + 16);
+                g.setColor(new Color(55, 155, 245));
+                g.setStroke(new java.awt.BasicStroke(2f, java.awt.BasicStroke.CAP_ROUND, java.awt.BasicStroke.JOIN_ROUND));
+                long first = Math.floorDiv(chronological.get(0).dayEpochSeconds(), 86_400);
+                long last = Math.floorDiv(chronological.get(chronological.size() - 1).dayEpochSeconds(), 86_400);
+                long span = Math.max(1, last - first);
+                int priorX = -1, priorY = -1;
+                for (PriceMonitoringTaskService.SalesDay value : chronological) {
+                    long day = Math.floorDiv(value.dayEpochSeconds(), 86_400);
+                    int x = left + (int) Math.round((double) (day - first) / span * width);
+                    int y = top + height - (int) Math.round(height * value.units() / max);
+                    if (priorX >= 0) g.drawLine(priorX, priorY, x, y);
+                    g.fillOval(x - 3, y - 3, 6, 6);
+                    priorX = x;
+                    priorY = y;
                 }
+                g.setStroke(new java.awt.BasicStroke(1f, java.awt.BasicStroke.CAP_BUTT,
+                        java.awt.BasicStroke.JOIN_MITER, 10f, new float[]{4f, 3f}, 0f));
+                List<PriceMarker> visibleMarkers = priceMarkers.stream()
+                        .filter(marker -> marker.day() >= first && marker.day() <= last).toList();
+                for (PriceMarker marker : visibleMarkers) {
+                    int x = left + (int) Math.round((double) (marker.day() - first) / span * width);
+                    g.setColor(new Color(220, 76, 70));
+                    g.drawLine(x, top, x, top + height);
+                }
+                g.setColor(chartForeground());
+                int tickCount = Math.min(5, chronological.size());
+                for (int tick = 0; tick < tickCount; tick++) {
+                    int index = tickCount == 1 ? 0 : (int) Math.round((double) tick * (chronological.size() - 1) / (tickCount - 1));
+                    var value = chronological.get(index);
+                    long day = Math.floorDiv(value.dayEpochSeconds(), 86_400);
+                    int x = left + (int) Math.round((double) (day - first) / span * width);
+                    String label = Instant.ofEpochSecond(value.dayEpochSeconds()).atZone(ZoneId.of("UTC")).format(DAY);
+                    g.drawString(label, Math.max(left, Math.min(left + width - g.getFontMetrics().stringWidth(label), x - 20)), top + height + 18);
+                }
+                g.setColor(new Color(55, 155, 245));
+                g.drawLine(left, 10, left + 14, 10);
+                g.setColor(chartForeground());
+                g.drawString("Продажи, шт.", left + 19, 13);
+                g.setColor(new Color(220, 76, 70));
+                g.drawLine(left + 118, 10, left + 132, 10);
+                g.setColor(chartForeground());
+                g.drawString("Изменение цены", left + 137, 13);
             } finally { g.dispose(); }
         }
 

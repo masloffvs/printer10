@@ -22,11 +22,14 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -412,6 +415,52 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                 while (rows.next()) result.add(new SalesArticle(rows.getString("item"), rows.getString("name"),
                         rows.getString("barcode"), rows.getDouble("units"), rows.getDouble("revenue"),
                         rows.getInt("checks")));
+            }
+        }
+        return result;
+    }
+
+    /** Distinct article and barcode keys used to rank catalog search results independently of display filters. */
+    public Set<String> salesSearchKeys() throws SQLException {
+        Set<String> result = new LinkedHashSet<>();
+        try (Connection connection = connect(); Statement statement = connection.createStatement();
+             ResultSet rows = statement.executeQuery("SELECT item, barcode FROM sales_positions "
+                     + "WHERE (item IS NOT NULL AND TRIM(item)<>'') OR (barcode IS NOT NULL AND TRIM(barcode)<>'')")) {
+            while (rows.next()) {
+                String item = rows.getString("item");
+                String barcode = rows.getString("barcode");
+                if (item != null && !item.isBlank()) result.add(item.trim());
+                if (barcode != null && !barcode.isBlank()) result.add(barcode.trim());
+            }
+        }
+        return result;
+    }
+
+    /** Receipt aggregates for a bounded set of catalog article/barcode keys. */
+    public List<SalesArticle> salesSummaryForKeys(Collection<String> keys) throws SQLException {
+        if (keys == null || keys.isEmpty()) return List.of();
+        List<String> values = keys.stream().filter(Objects::nonNull).map(String::trim)
+                .filter(value -> !value.isBlank()).distinct().toList();
+        if (values.isEmpty()) return List.of();
+        List<SalesArticle> result = new ArrayList<>();
+        try (Connection connection = connect()) {
+            for (int start = 0; start < values.size(); start += 300) {
+                List<String> batch = values.subList(start, Math.min(values.size(), start + 300));
+                String placeholders = "?,".repeat(batch.size());
+                String sql = "SELECT item, MAX(name) AS name, MAX(barcode) AS barcode, SUM(quantity) AS units, "
+                        + "SUM(cost) AS revenue, COUNT(DISTINCT check_id) AS checks FROM sales_positions WHERE "
+                        + "lower(trim(item)) IN (" + placeholders + ") OR lower(trim(barcode)) IN ("
+                        + placeholders + ") GROUP BY item";
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    int index = 1;
+                    for (String value : batch) statement.setString(index++, value.toLowerCase(Locale.ROOT));
+                    for (String value : batch) statement.setString(index++, value.toLowerCase(Locale.ROOT));
+                    try (ResultSet rows = statement.executeQuery()) {
+                        while (rows.next()) result.add(new SalesArticle(rows.getString("item"), rows.getString("name"),
+                                rows.getString("barcode"), rows.getDouble("units"), rows.getDouble("revenue"),
+                                rows.getInt("checks")));
+                    }
+                }
             }
         }
         return result;

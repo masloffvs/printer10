@@ -58,6 +58,8 @@ final class SearchPanel extends JPanel {
 
     private final JTextField input = new JTextField();
     private final JCheckBox advancedSearch = new JCheckBox("Все слова");
+    private final JCheckBox showMovement = new JCheckBox("Показать информацию о движении");
+    private final JCheckBox showStock = new JCheckBox("Показать информацию об остатках");
     private final JButton category = new JButton("Выбрать категорию…");
     private final JLabel selectedCategory = new JLabel("Все категории");
     private final JComboBox<String> attributeName = new CompactComboBox();
@@ -72,7 +74,7 @@ final class SearchPanel extends JPanel {
     private final JPanel resultSearchBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
     private final JLabel resultCount = new JLabel(" ");
     private final JPanel filterPane = new JPanel(new BorderLayout(0, 10));
-    private final DefaultTableModel model = readOnlyModel("Товар", "Артикул", "Штрихкод", "Цена", "Остаток");
+    private final DefaultTableModel model = readOnlyModel("Товар", "Артикул", "Штрихкод", "Цена", "Продажи", "Движение", "Остаток");
     private final JTable table = new JTable(model);
     private final JPanel filters = new FilterPanel();
     private final JButton find = new JButton("Найти товары");
@@ -237,6 +239,14 @@ final class SearchPanel extends JPanel {
         attributeValue.addItem("Любое значение");
         filters.add(attributeValue, at(c, 11));
 
+        addSectionLabel("Дополнительная информация", c, 12);
+        showMovement.setOpaque(false);
+        showStock.setOpaque(false);
+        filters.add(showMovement, at(c, 13));
+        filters.add(showStock, at(c, 14));
+        showMovement.addActionListener(event -> updateResultSearch());
+        showStock.addActionListener(event -> updateResultSearch());
+
         minimumPrice.addChangeListener(event -> {
             if (minimumPrice.getValue() > maximumPrice.getValue()) maximumPrice.setValue(minimumPrice.getValue());
             updatePriceLabels();
@@ -245,7 +255,7 @@ final class SearchPanel extends JPanel {
             if (maximumPrice.getValue() < minimumPrice.getValue()) minimumPrice.setValue(maximumPrice.getValue());
             updatePriceLabels();
         });
-        c.gridy = 12;
+        c.gridy = 15;
         c.weighty = 1;
         filters.add(new JPanel(), c);
     }
@@ -411,6 +421,8 @@ final class SearchPanel extends JPanel {
     }
 
     String query() { return input.getText().trim(); }
+    boolean showMovement() { return showMovement.isSelected(); }
+    boolean showStock() { return showStock.isSelected(); }
     boolean advancedSearch() { return true; }
     void setQuery(String query) { input.setText(query); }
     List<Product> selectedProducts() {
@@ -662,9 +674,15 @@ final class SearchPanel extends JPanel {
         }
         model.setRowCount(0);
         for (Product product : results) {
+            String units = product.details().getOrDefault("salesUnits", "");
+            String movement = units.isBlank() ? "—" : units + " шт. · "
+                    + product.details().getOrDefault("salesChecks", "0") + " чеков · "
+                    + product.details().getOrDefault("salesRevenue", "0") + " ₽";
             model.addRow(new Object[]{product.name(), product.marking(), product.barcode(),
                     product.price() == null ? "—" : product.price().format(),
-                    product.totalQuantity().isEmpty() ? "—" : product.totalQuantity()});
+                    !showMovement.isSelected() || units.isBlank() ? "—" : units + " шт.",
+                    showMovement.isSelected() ? movement : "—",
+                    showStock.isSelected() ? (product.totalQuantity().isEmpty() ? "—" : product.totalQuantity()) : "—"});
         }
         resultSearchCount.setText(query.isEmpty() ? " " : results.size() + " из " + unrankedResults.size());
         resultCount.setText(query.isEmpty() || unrankedResults.isEmpty()
@@ -685,7 +703,8 @@ final class SearchPanel extends JPanel {
 
     private static boolean matches(Product product, String normalizedQuery) {
         String searchable = String.join(" ", product.name(), product.marking(), product.barcode(),
-                product.price() == null ? "—" : product.price().format(), product.totalQuantity())
+                product.price() == null ? "—" : product.price().format(), product.totalQuantity(),
+                product.details().getOrDefault("salesUnits", ""), product.details().getOrDefault("salesRevenue", ""))
                 .toLowerCase(Locale.ROOT);
         for (String term : normalizedQuery.split("\\s+")) {
             if (!term.isBlank() && !searchable.contains(term)) return false;
