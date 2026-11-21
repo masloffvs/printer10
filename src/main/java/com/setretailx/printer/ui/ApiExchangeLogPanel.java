@@ -55,13 +55,14 @@ final class ApiExchangeLogPanel extends JPanel {
             if (!event.getValueIsAdjusting() && !refreshing) showSelected();
         });
         JScrollPane exchanges = new JScrollPane(table);
-        exchanges.setBorder(BorderFactory.createTitledBorder("HTTP-запросы к SetRetailX"));
+        exchanges.setBorder(BorderFactory.createEmptyBorder());
         details.setEditable(false);
         details.setLineWrap(false);
         details.setTabSize(2);
         JScrollPane detailScroll = new JScrollPane(details);
-        detailScroll.setBorder(BorderFactory.createTitledBorder("Подробности обмена"));
+        detailScroll.setBorder(BorderFactory.createEmptyBorder());
         JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, exchanges, detailScroll);
+        split.setBorder(BorderFactory.createEmptyBorder());
         split.setResizeWeight(0.4);
         add(split, BorderLayout.CENTER);
         reload();
@@ -103,11 +104,6 @@ final class ApiExchangeLogPanel extends JPanel {
         if (row < 0 || row >= entries.size()) return;
         ExchangeLogEntry entry = entries.get(row);
         details.setText("ID: " + entry.id() + "\n"
-                + "Время: " + formatTime(entry.occurredAt()) + "\n"
-                + "Метод: " + entry.method() + "\n"
-                + "HTTP: " + (entry.httpStatus() == null ? "—" : entry.httpStatus()) + "\n"
-                + "Длительность: " + entry.durationMs() + " мс\n"
-                + "Результат: " + ("success".equals(entry.outcome()) ? "Успешно" : "Ошибка") + "\n"
                 + (entry.error() == null || entry.error().isBlank() ? "" : "Ошибка:\n" + entry.error() + "\n")
                 + "\nREQUEST\n" + entry.requestBody()
                 + "\n\nRESPONSE\n" + entry.responseBody());

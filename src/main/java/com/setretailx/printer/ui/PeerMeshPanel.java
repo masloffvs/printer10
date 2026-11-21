@@ -47,14 +47,14 @@ final class PeerMeshPanel extends JPanel {
             setResizeWeight(0.0);
             setBorder(null);
         }}, BorderLayout.CENTER);
-        JPanel footer = new JPanel(new BorderLayout(8, 4));
+        JPanel footer = new JPanel(new BorderLayout(8, 0));
         footer.add(status, BorderLayout.CENTER);
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         JButton refresh = new JButton("Обновить список");
         refresh.addActionListener(event -> refreshPeers());
         sync.addActionListener(event -> synchronizeSelected());
         actions.add(refresh); actions.add(sync);
-        footer.add(actions, BorderLayout.SOUTH);
+        footer.add(actions, BorderLayout.EAST);
         add(footer, BorderLayout.SOUTH);
         refreshPeers();
         new Timer(2000, event -> refreshPeers()).start();
@@ -62,7 +62,7 @@ final class PeerMeshPanel extends JPanel {
 
     private JPanel buildIdentityPanel() {
         JPanel outer = new JPanel(new BorderLayout(8, 8));
-        outer.setBorder(BorderFactory.createTitledBorder("Этот пир"));
+        outer.setBorder(BorderFactory.createEmptyBorder(2, 0, 2, 0));
         JPanel fields = new JPanel(new GridLayout(0, 1, 2, 2));
         fields.add(new JLabel("Роль: " + service.nodeRole().displayName()));
         if (service.nodeRole() == AppConfig.NodeRole.CHILD) {

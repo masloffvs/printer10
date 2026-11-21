@@ -73,6 +73,7 @@ final class PrintHistoryPanel extends JPanel {
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         JButton refresh = new JButton("Обновить");
         refresh.addActionListener(event -> refreshAction.run());
+        restore.putClientProperty("JButton.buttonType", "default");
         restore.addActionListener(event -> {
             int row = table.getSelectedRow();
             if (row >= 0 && row < batches.size()) restoreAction.accept(batches.get(row));

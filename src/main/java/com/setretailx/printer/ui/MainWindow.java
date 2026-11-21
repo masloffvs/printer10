@@ -267,7 +267,6 @@ public final class MainWindow extends JFrame {
                 log("Ошибка подключения SetRetailX: " + message);
             } else {
                 exchange.setStatus("Подключено");
-                status.setText("Соединение с SetRetailX проверено");
             }
         }));
     }

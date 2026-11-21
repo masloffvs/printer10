@@ -55,20 +55,19 @@ public final class PriceMonitoringPanel extends JPanel implements AutoCloseable 
 
     private JPanel createTasksTab() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
-        panel.add(summary, BorderLayout.NORTH);
+        JPanel top = new JPanel(new BorderLayout(8, 0));
+        top.add(summary, BorderLayout.CENTER);
+        JPanel controls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        javax.swing.JButton open = new javax.swing.JButton("Открыть настройки");
+        open.addActionListener(event -> openSelectedSettings());
+        controls.add(open);
+        top.add(controls, BorderLayout.EAST);
+        panel.add(top, BorderLayout.NORTH);
         configureTable(taskTable);
         taskTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         panel.add(new JScrollPane(taskTable), BorderLayout.CENTER);
-
-        JPanel bottom = new JPanel(new BorderLayout(8, 6));
-        JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        javax.swing.JButton open = new javax.swing.JButton("Открыть настройки задачи…");
-        open.addActionListener(event -> openSelectedSettings());
-        controls.add(open);
         status.setVerticalAlignment(JLabel.CENTER);
-        bottom.add(controls, BorderLayout.NORTH);
-        bottom.add(status, BorderLayout.SOUTH);
-        panel.add(bottom, BorderLayout.SOUTH);
+        panel.add(status, BorderLayout.SOUTH);
         return panel;
     }
 
@@ -94,8 +93,8 @@ public final class PriceMonitoringPanel extends JPanel implements AutoCloseable 
             tasks = service.listTasks();
             int enabledCount = (int) tasks.stream().filter(PriceMonitoringTaskService.TaskInfo::enabled).count();
             int runningCount = (int) tasks.stream().filter(task -> "Выполняется".equals(task.lastStatus())).count();
-            summary.setText("Всего задач: " + tasks.size() + " · включено: " + enabledCount
-                    + " · сейчас выполняется: " + runningCount + " · база истории: " + service.databasePath());
+            summary.setText("Задач: " + tasks.size() + " · включено: " + enabledCount
+                    + " · выполняется сейчас: " + runningCount);
             taskModel.setRowCount(0);
             int selectedRow = -1;
             for (int row = 0; row < tasks.size(); row++) {

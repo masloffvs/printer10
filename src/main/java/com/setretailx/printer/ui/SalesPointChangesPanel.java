@@ -52,6 +52,7 @@ final class SalesPointChangesPanel extends JPanel {
         refresh.addActionListener(event -> this.refreshAction.run());
         JButton process = new JButton("Обработать выбранные события");
         process.addActionListener(event -> this.processSelected.accept(selectedChanges()));
+        process.putClientProperty("JButton.buttonType", "default");
         JPanel actions = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEADING));
         actions.add(refresh);
         actions.add(process);

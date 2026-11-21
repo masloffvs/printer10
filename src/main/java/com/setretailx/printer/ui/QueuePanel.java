@@ -115,15 +115,10 @@ final class QueuePanel extends JPanel {
         tree.addMouseListener(popup);
 
         JPanel heading = new JPanel(new BorderLayout(8, 4));
-        JLabel title = new JLabel("Печать ценников");
-        title.setFont(title.getFont().deriveFont(java.awt.Font.BOLD, 16f));
-        JPanel headingTop = new JPanel(new BorderLayout(8, 0));
-        headingTop.add(title, BorderLayout.WEST);
         JPanel counts = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 10, 0));
         counts.add(visibleCount);
         counts.add(summary);
-        headingTop.add(counts, BorderLayout.EAST);
-        heading.add(headingTop, BorderLayout.NORTH);
+        heading.add(counts, BorderLayout.NORTH);
         JPanel filter = new JPanel(new BorderLayout(6, 0));
         filter.add(new JLabel("Найти в списке:"), BorderLayout.WEST);
         filterField.setToolTipText("Фильтр по названию, штрихкоду и коду ST");
@@ -158,7 +153,7 @@ final class QueuePanel extends JPanel {
         JPanel printAction = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 0, 0));
         printAction.add(printButtons);
         footer.add(printAction, BorderLayout.WEST);
-        actions.add(new JLabel("Выберите товар · правый клик — настройка и другие действия"));
+        actions.add(new JLabel("Правый клик — дополнительные действия"));
         footer.add(actions, BorderLayout.CENTER);
         add(footer, BorderLayout.SOUTH);
         updateActionState();
