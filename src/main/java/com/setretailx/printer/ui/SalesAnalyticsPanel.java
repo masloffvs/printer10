@@ -18,13 +18,8 @@ import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTable;
 import javax.swing.JTextField;
-import javax.swing.JTabbedPane;
-import javax.swing.JTree;
 import javax.swing.SwingWorker;
 import javax.swing.table.DefaultTableModel;
-import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.DefaultTreeModel;
-import javax.swing.tree.TreePath;
 import java.awt.BorderLayout;
 import java.math.BigDecimal;
 import java.text.NumberFormat;
@@ -33,9 +28,9 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.ArrayList;
-import java.util.Enumeration;
-import java.util.HashMap;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -52,16 +47,16 @@ final class SalesAnalyticsPanel extends JPanel {
     private final Consumer<SalesArticle> addToPrintQueue;
     private final JTextField query = new JTextField(24);
     private final JComboBox<Period> period = new JComboBox<>(Period.values());
+    private final JComboBox<String> categoryFilter = new JComboBox<>(new String[]{"Все категории"});
+    private final JComboBox<String> tableMode = new JComboBox<>(new String[]{"Товары", "Последние чеки"});
     private final DefaultTableModel articlesModel = new SalesArticleTableModel();
     private final DefaultTableModel recentModel = new TypedTableModel(
             new Object[]{"Дата продажи", "Чек", "Товар", "Кол-во", "Цена", "Сумма", "Скидка"},
             new Class<?>[]{java.util.Date.class, ReceiptNumber.class, String.class,
                     BigDecimal.class, BigDecimal.class, BigDecimal.class, BigDecimal.class});
     private final JTable articlesTable = new JTable(articlesModel);
+    private final JScrollPane articleScroll = new JScrollPane(articlesTable);
     private final SalesPointRepository salesPoints = new SalesPointRepository();
-    private final DefaultMutableTreeNode articlesRoot = new DefaultMutableTreeNode("Артикулы");
-    private final DefaultTreeModel articlesTreeModel = new DefaultTreeModel(articlesRoot);
-    private final JTree articlesTree = new JTree(articlesTreeModel);
     private final JLabel summary = new JLabel(" ");
     private final JLabel status = new JLabel(" ");
     private final AtomicLong requestId = new AtomicLong();
@@ -69,6 +64,7 @@ final class SalesAnalyticsPanel extends JPanel {
     private List<SalesArticle> articles = List.of();
     private Map<String, String> categories = Map.of();
     private Map<String, List<String>> pointNames = Map.of();
+    private boolean updatingCategoryFilter;
 
     SalesAnalyticsPanel(ParentApiClient service, ProductRepository products, Consumer<SalesArticle> openProductCard,
                         Consumer<SalesArticle> addToPrintQueue) {
@@ -87,6 +83,23 @@ final class SalesAnalyticsPanel extends JPanel {
         JPanel controls = new JPanel(new java.awt.GridLayout(0, 1, 0, 7));
         controls.add(new JLabel("Поиск товара / артикула / штрихкода"));
         controls.add(query);
+        controls.add(new JLabel("Категория товара"));
+        controls.add(categoryFilter);
+        categoryFilter.addActionListener(event -> {
+            if (!updatingCategoryFilter && articlesTable.getModel() == articlesModel) populateArticlesTable();
+        });
+        controls.add(new JLabel("Данные в таблице"));
+        controls.add(tableMode);
+        tableMode.addActionListener(event -> {
+            boolean showArticles = tableMode.getSelectedIndex() == 0;
+            articlesTable.setModel(showArticles ? articlesModel : recentModel);
+            configureSalesSorters(articlesTable);
+            articlesTable.setAutoCreateRowSorter(true);
+            categoryFilter.setEnabled(showArticles);
+            articleScroll.setBorder(BorderFactory.createTitledBorder(
+                    showArticles ? "Товары с продажами" : "Последние чеки"));
+            articlesTable.getParent().revalidate();
+        });
         controls.add(new JLabel("Период продаж"));
         controls.add(period);
         controls.add(search);
@@ -104,6 +117,7 @@ final class SalesAnalyticsPanel extends JPanel {
                     updateLoginButton(login);
                     articles = List.of();
                     categories = Map.of();
+                    updateCategoryFilter();
                     recentModel.setRowCount(0);
                     populateArticlesTable();
                     status.setText("Сеанс завершён.");
@@ -120,28 +134,9 @@ final class SalesAnalyticsPanel extends JPanel {
         articlesTable.setAutoCreateRowSorter(true);
         articlesTable.setDefaultRenderer(Object.class, new SalesCellRenderer());
         installArticleContextMenu();
-        articlesTree.setRootVisible(false);
-        articlesTree.setShowsRootHandles(true);
-        articlesTree.setCellRenderer(new SalesTreeRenderer());
-        installTreeContextMenu();
-        JScrollPane treeScroll = new JScrollPane(articlesTree);
-        treeScroll.setBorder(BorderFactory.createTitledBorder("Категории товаров"));
         JPanel articlePanel = new JPanel(new BorderLayout());
-        JScrollPane articleScroll = new JScrollPane(articlesTable);
         articleScroll.setBorder(BorderFactory.createTitledBorder("Товары с продажами"));
         articlePanel.add(articleScroll, BorderLayout.CENTER);
-        JTable recentTable = new JTable(recentModel);
-        recentTable.setFillsViewportHeight(true);
-        recentTable.setAutoCreateRowSorter(true);
-        configureSalesSorters(recentTable);
-        JScrollPane recentScroll = new JScrollPane(recentTable);
-        recentScroll.setBorder(BorderFactory.createEmptyBorder());
-        JTabbedPane salesTabs = new JTabbedPane();
-        salesTabs.addTab("Товары и продажи", articlePanel);
-        salesTabs.addTab("Последние чеки", recentScroll);
-        JSplitPane left = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, treeScroll, salesTabs);
-        left.setResizeWeight(.23);
-        left.setDividerLocation(260);
         JPanel filterPane = new JPanel(new BorderLayout(8, 8));
         filterPane.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createMatteBorder(0, 1, 0, 0, javax.swing.UIManager.getColor("Component.borderColor")),
@@ -149,8 +144,8 @@ final class SalesAnalyticsPanel extends JPanel {
         filterPane.setPreferredSize(new java.awt.Dimension(245, 10));
         filterPane.add(controls, BorderLayout.NORTH);
         filterPane.add(summary, BorderLayout.SOUTH);
-        JSplitPane content = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, left, filterPane);
-        content.setResizeWeight(.79);
+        JSplitPane content = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, articlePanel, filterPane);
+        content.setResizeWeight(.76);
         content.setDividerLocation(850);
         add(content, BorderLayout.CENTER);
         add(status, BorderLayout.SOUTH);
@@ -228,6 +223,7 @@ final class SalesAnalyticsPanel extends JPanel {
     }
 
     private SalesArticle contextArticle() {
+        if (articlesTable.getModel() != articlesModel) return null;
         int viewRow = articlesTable.getSelectedRow();
         if (viewRow < 0) return null;
         int row = articlesTable.convertRowIndexToModel(viewRow);
@@ -265,6 +261,7 @@ final class SalesAnalyticsPanel extends JPanel {
                     articles = loaded.articles();
                     categories = loaded.categories();
                     pointNames = loaded.locations();
+                    updateCategoryFilter();
                     populateArticlesTable();
                     summary.setText("В таблице показаны итоги локальной истории чеков и связанные торговые точки.");
                     status.setText(articles.isEmpty()
@@ -280,78 +277,50 @@ final class SalesAnalyticsPanel extends JPanel {
     private void populateArticlesTable() {
         articlesModel.setRowCount(0);
         for (SalesArticle article : articles) {
+            if (!matchesCategoryFilter(article)) continue;
             List<String> locations = new ArrayList<>(pointNames.getOrDefault(normalizeKey(article.marking()), List.of()));
             locations.addAll(pointNames.getOrDefault(normalizeKey(article.barcode()), List.of()));
             articlesModel.addRow(new Object[]{article.marking(), article.barcode(),
                     article.name(), BigDecimal.valueOf(article.units()), BigDecimal.valueOf(article.revenue()),
                     article.checks(), String.join(", ", locations.stream().distinct().toList())});
         }
-        populateArticlesTree();
     }
 
-    private void populateArticlesTree() {
-        articlesRoot.removeAllChildren();
-        Map<String, DefaultMutableTreeNode> categoryNodes = new HashMap<>();
-        List<SalesArticle> sorted = new ArrayList<>(articles);
-        sorted.sort(java.util.Comparator.comparing(article ->
-                categories.getOrDefault(article.marking(), "Без категории"), String.CASE_INSENSITIVE_ORDER));
-        for (SalesArticle article : sorted) {
-            DefaultMutableTreeNode parent = articlesRoot;
-            String category = categories.getOrDefault(article.marking(), "Без категории");
+    private void updateCategoryFilter() {
+        String current = String.valueOf(categoryFilter.getSelectedItem());
+        Set<String> paths = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        boolean uncategorized = false;
+        for (SalesArticle article : articles) {
+            String category = categories.get(article.marking());
+            if (category == null || category.isBlank()) {
+                uncategorized = true;
+                continue;
+            }
             StringBuilder path = new StringBuilder();
             for (String part : category.split("\\s*›\\s*")) {
                 if (path.length() > 0) path.append(" › ");
                 path.append(part);
-                String key = path.toString();
-                DefaultMutableTreeNode categoryNode = categoryNodes.get(key);
-                if (categoryNode == null) {
-                    categoryNode = new DefaultMutableTreeNode(new CategoryNode(part));
-                    categoryNodes.put(key, categoryNode);
-                    parent.add(categoryNode);
-                }
-                parent = categoryNode;
+                paths.add(path.toString());
             }
-            parent.add(new DefaultMutableTreeNode(article));
         }
-        articlesTreeModel.reload();
-        articlesTree.expandPath(new TreePath(articlesRoot.getPath()));
-        for (int row = 0; row < articlesTree.getRowCount(); row++) articlesTree.expandRow(row);
+        updatingCategoryFilter = true;
+        categoryFilter.removeAllItems();
+        categoryFilter.addItem("Все категории");
+        paths.forEach(categoryFilter::addItem);
+        if (uncategorized) categoryFilter.addItem("Без категории");
+        if (paths.contains(current) || (uncategorized && "Без категории".equals(current)))
+            categoryFilter.setSelectedItem(current);
+        else categoryFilter.setSelectedIndex(0);
+        updatingCategoryFilter = false;
     }
 
-    private void installTreeContextMenu() {
-        JPopupMenu menu = new JPopupMenu();
-        JMenuItem openCard = new JMenuItem("Открыть карточку товара");
-        JMenuItem queue = new JMenuItem("Добавить в очередь печати");
-        menu.add(openCard);
-        menu.add(queue);
-        openCard.addActionListener(event -> {
-            SalesArticle article = treeContextArticle();
-            if (article != null) openProductCard.accept(article);
-        });
-        queue.addActionListener(event -> {
-            SalesArticle article = treeContextArticle();
-            if (article != null) addToPrintQueue.accept(article);
-        });
-        articlesTree.addMouseListener(new java.awt.event.MouseAdapter() {
-            private void showMenu(java.awt.event.MouseEvent event) {
-                if (!event.isPopupTrigger()) return;
-                TreePath path = articlesTree.getPathForLocation(event.getX(), event.getY());
-                if (path == null) return;
-                Object value = ((DefaultMutableTreeNode) path.getLastPathComponent()).getUserObject();
-                if (!(value instanceof SalesArticle)) return;
-                articlesTree.setSelectionPath(path);
-                menu.show(articlesTree, event.getX(), event.getY());
-            }
-            @Override public void mousePressed(java.awt.event.MouseEvent event) { showMenu(event); }
-            @Override public void mouseReleased(java.awt.event.MouseEvent event) { showMenu(event); }
-        });
-    }
-
-    private SalesArticle treeContextArticle() {
-        TreePath path = articlesTree.getSelectionPath();
-        if (path == null) return null;
-        Object value = ((DefaultMutableTreeNode) path.getLastPathComponent()).getUserObject();
-        return value instanceof SalesArticle article ? article : null;
+    private boolean matchesCategoryFilter(SalesArticle article) {
+        String filter = (String) categoryFilter.getSelectedItem();
+        if (filter == null || "Все категории".equals(filter)) return true;
+        String category = categories.get(article.marking());
+        if ("Без категории".equals(filter)) return category == null || category.isBlank();
+        return category != null && (category.equalsIgnoreCase(filter)
+                || category.regionMatches(true, 0, filter + " › ", 0, filter.length() + 3));
     }
 
     private void loadRecentSales() {
@@ -429,22 +398,6 @@ final class SalesAnalyticsPanel extends JPanel {
         }
         @Override public boolean isCellEditable(int row, int column) { return false; }
         @Override public Class<?> getColumnClass(int column) { return columnTypes[column]; }
-    }
-
-    private record CategoryNode(String name) {
-        @Override public String toString() { return name; }
-    }
-
-    private static final class SalesTreeRenderer extends javax.swing.tree.DefaultTreeCellRenderer {
-        @Override public java.awt.Component getTreeCellRendererComponent(JTree tree, Object value,
-                boolean selected, boolean expanded, boolean leaf, int row, boolean focused) {
-            super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, focused);
-            Object user = ((DefaultMutableTreeNode) value).getUserObject();
-            if (user instanceof SalesArticle article)
-                setText(article.name() + "  ·  " + article.marking());
-            else if (user instanceof CategoryNode category) setText(category.name());
-            return this;
-        }
     }
 
     private record ReceiptNumber(String value) implements Comparable<ReceiptNumber> {
