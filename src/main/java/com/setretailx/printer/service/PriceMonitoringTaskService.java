@@ -590,12 +590,10 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
                 + " товарам торговых точек: " + since + " — " + until);
         List<JsonNode> checks;
         try {
-            checks = checkRows(connector.findChecks(since, until, SALES_CHECK_LIMIT, productItems).join());
-            if (checks.size() >= SALES_CHECK_LIMIT) {
-                throw new IllegalStateException("findChecks вернул лимит " + SALES_CHECK_LIMIT
-                        + "; запрос выполнен одним вызовом, watermark не обновлён во избежание потери чеков.");
-            }
-            finishSubtask(searchTask, "Успешно", "Найдено чеков: " + checks.size());
+            SalesCheckSearchResult search = findSalesChecks(since, until, productItems);
+            checks = search.checks();
+            finishSubtask(searchTask, "Успешно", "Найдено чеков: " + checks.size()
+                    + "; запросов findChecks: " + search.requestCount());
         } catch (Throwable error) {
             finishSubtask(searchTask, "Ошибка", errorText(error));
             throw error;
@@ -643,6 +641,36 @@ public final class PriceMonitoringTaskService implements AutoCloseable {
         return "Период: " + since + " — " + until + "; найдено чеков: "
                 + checks.size() + "; новых чеков: " + loaded + "; позиций сохранено: " + positions;
     }
+
+    /** Splits saturated time ranges until each response is known to be complete. */
+    private SalesCheckSearchResult findSalesChecks(Instant from, Instant to, List<String> productItems) {
+        List<JsonNode> rows = checkRows(
+                connector.findChecks(from, to, SALES_CHECK_LIMIT, productItems).join());
+        if (rows.size() < SALES_CHECK_LIMIT) return new SalesCheckSearchResult(rows, 1);
+
+        long fromSecond = from.getEpochSecond();
+        long toSecond = to.getEpochSecond();
+        if (toSecond - fromSecond <= 3) {
+            throw new IllegalStateException("findChecks вернул лимит " + SALES_CHECK_LIMIT
+                    + " даже в интервале не длиннее трёх секунд; нельзя подтвердить полноту списка чеков, "
+                    + "watermark не обновлён во избежание потери чеков.");
+        }
+
+        long middleSecond = fromSecond + (toSecond - fromSecond) / 2;
+        Instant middle = Instant.ofEpochSecond(middleSecond);
+        SalesCheckSearchResult earlier = findSalesChecks(from, middle, productItems);
+        // Overlap by one second so a check on the split is found even if one bound is exclusive.
+        SalesCheckSearchResult later = findSalesChecks(middle.minusSeconds(1), to, productItems);
+
+        // Check IDs make the overlap harmless.
+        Map<Long, JsonNode> uniqueChecks = new LinkedHashMap<>();
+        for (JsonNode check : earlier.checks()) uniqueChecks.putIfAbsent(checkId(check), check);
+        for (JsonNode check : later.checks()) uniqueChecks.putIfAbsent(checkId(check), check);
+        return new SalesCheckSearchResult(new ArrayList<>(uniqueChecks.values()),
+                1 + earlier.requestCount() + later.requestCount());
+    }
+
+    private record SalesCheckSearchResult(List<JsonNode> checks, int requestCount) { }
 
     private Instant salesSyncWatermark() {
         try (Connection connection = connect(); PreparedStatement query = connection.prepareStatement(
